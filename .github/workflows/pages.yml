@@ -27,15 +27,15 @@ jobs:
       # 型チェック + ビルド。許可外ライセンスの依存が入るとここで失敗する
       - run: npm run build
       - uses: actions/upload-pages-artifact@v5
-        if: github.ref == 'refs/heads/main' && vars.DEPLOY_PAGES == 'true'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         with:
           path: dist
 
-  # GitHub Pages を有効にし、リポジトリ変数 DEPLOY_PAGES=true を設定したときだけ公開する。
-  # (プライベートリポジトリの Pages は有料プランが必要なので、それまではビルド確認のみ)
+  # main への push(と手動実行)のときだけ公開する。PR ではテストとビルドのみ。
+  # 事前に Settings → Pages の Source を「GitHub Actions」にしておく必要がある。
   deploy:
     needs: build
-    if: github.ref == 'refs/heads/main' && vars.DEPLOY_PAGES == 'true'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       pages: write

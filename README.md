@@ -19,12 +19,12 @@ npm run preview  # ビルド結果の確認
 
 ### GitHub Pages で公開する
 
-1. リポジトリの Settings → Pages で Source を「GitHub Actions」にする
-   (プライベートのまま公開するには GitHub Pro 以上が必要)
-2. Settings → Secrets and variables → Actions → Variables に `DEPLOY_PAGES` = `true` を追加
-3. `main` に push すると自動でビルド・公開される
+公開先: https://kota395.github.io/packet-factory/
 
-`DEPLOY_PAGES` が未設定の間は、テストとビルドだけを実行する。
+1. リポジトリの Settings → Pages で Source を「GitHub Actions」にする(初回のみ)
+2. `main` に push すると、テスト・ビルドのあと自動で公開される
+
+PR ではテストとビルドだけを実行する。
 
 ## 遊び方(プロトタイプ)
 

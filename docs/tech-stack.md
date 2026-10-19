@@ -28,7 +28,7 @@ GitHub Pages(静的ホスティング)で動かすことを前提にした選定
 | サーバー処理なし | セーブは localStorage、構成の共有は JSON を URL ハッシュにエンコード |
 | `kota395.github.io/packet-factory/` のようにパスが付く | Vite の `base: './'`(相対パス)で、公開先が変わってもそのまま動くようにした |
 | レスポンスヘッダーを設定できない(COOP/COEP 不可) | SharedArrayBuffer やマルチスレッド WASM は使わない。通常の Web Worker は使える |
-| プライベートリポジトリの Pages は有料プランが必要 | ワークフローは `DEPLOY_PAGES` 変数が `true` のときだけ公開する。それまではテストとビルドだけ回す |
+| プライベートリポジトリの Pages は有料プランが必要 | リポジトリを公開にして無料枠で運用。`main` への push で自動公開し、PR はテストとビルドのみ |
 
 ## ライセンス方針
 
