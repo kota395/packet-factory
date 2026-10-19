@@ -3,6 +3,7 @@ import { GRID_H, GRID_W } from '../sim/config';
 import type { NodeRuntime, Simulation } from '../sim/simulation';
 import type { ReqKind } from '../sim/types';
 import { compact } from '../ui/format';
+import { nodeName } from '../ui/node-info';
 
 const COLORS = {
   bg: 0x0b0f14,
@@ -49,7 +50,43 @@ interface NodeView {
   label: Text;
   stats: Text;
   bar: Graphics;
+  /** バーの見出し(大きいマスのときだけ表示) */
+  captions: Text[];
 }
+
+/** ノードに出すメーター 1 本分 */
+interface Meter {
+  caption: string;
+  /** 0〜1(1 を超えたら満杯で表示) */
+  ratio: number;
+  /** 指定がなければ負荷率の色(緑→黄→赤) */
+  color?: number;
+}
+
+/** 種類ごとに、ノードに出すメーター */
+function metersOf(node: NodeRuntime, sim: Simulation): Meter[] {
+  const inRps = sim.inRpsOf(node);
+  const cpu = sim.cpuCapacityRpsOf(node);
+  const bw = sim.bandwidthMBpsOf(node);
+  const cpuMeter: Meter = { caption: '処理', ratio: Number.isFinite(cpu) && cpu > 0 ? inRps / cpu : 0 };
+  const bwMeter: Meter = { caption: '帯域', ratio: Number.isFinite(bw) ? node.inKBps / 1000 / bw : 0 };
+  const queueMeter: Meter = { caption: '待ち', ratio: node.queue.length / node.def.queueMax };
+  switch (node.kind) {
+    case 'internet':
+      return [];
+    case 'cdn':
+      return [bwMeter, { caption: 'HIT', ratio: sim.cacheHitRateOf(node), color: COLORS.packet.static }];
+    case 'lb':
+      return [bwMeter, cpuMeter];
+    default:
+      return [cpuMeter, queueMeter];
+  }
+}
+
+/** 大きいマスなら見出し付きのメーターと単位を出す */
+const DETAIL_CELL = 52;
+/** 接続線に流量を出す最小のマスの大きさ */
+const EDGE_LABEL_CELL = 44;
 
 /** 負荷率(受信 / 上限)に応じた色 */
 const loadColor = (ratio: number) => (ratio >= 0.9 ? COLORS.error : ratio >= 0.7 ? COLORS.warn : COLORS.ok);
@@ -84,6 +121,8 @@ export class BoardRenderer {
   private readonly edgeG = new Graphics();
   private readonly packetLayer = new Container();
   private readonly nodeLayer = new Container();
+  private readonly edgeLabelLayer = new Container();
+  private readonly edgeLabels = new Map<string, Text>();
   private packetTexture!: Texture;
   private readonly sprites: Sprite[] = [];
   private readonly nodeViews = new Map<number, NodeView>();
@@ -95,6 +134,7 @@ export class BoardRenderer {
   private builtLayoutVersion = -1;
   private builtSim: Simulation | null = null;
   private lastStatsAt = 0;
+  private statsRefreshedThisFrame = false;
 
   /** 押している間の情報(タップかドラッグかはまだ未定) */
   private press: { sx: number; sy: number; cell: Point | null; nodeId: number | null } | null = null;
@@ -114,7 +154,7 @@ export class BoardRenderer {
     new ResizeObserver(() => this.app.queueResize()).observe(host);
 
     this.nodeLayer.sortableChildren = true;
-    this.board.addChild(this.gridG, this.dropG, this.edgeG, this.packetLayer, this.nodeLayer);
+    this.board.addChild(this.gridG, this.dropG, this.edgeG, this.packetLayer, this.edgeLabelLayer, this.nodeLayer);
     this.app.stage.addChild(this.board);
 
     const dot = new Graphics().circle(0, 0, 8).fill(0xffffff);
@@ -139,6 +179,7 @@ export class BoardRenderer {
     const now = performance.now();
     const refreshStats = now - this.lastStatsAt >= STATS_INTERVAL_MS;
     if (refreshStats) this.lastStatsAt = now;
+    this.statsRefreshedThisFrame = refreshStats;
 
     this.drawDropTarget(sim);
     this.drawEdges(sim, view);
@@ -254,28 +295,60 @@ export class BoardRenderer {
   private rebuildNodes(sim: Simulation): void {
     for (const v of this.nodeViews.values()) v.container.destroy({ children: true });
     this.nodeViews.clear();
+    for (const t of this.edgeLabels.values()) t.destroy();
+    this.edgeLabels.clear();
 
-    const size = this.cell * 0.84;
+    const size = this.cell * 0.86;
+    const detail = this.cell >= DETAIL_CELL;
     for (const node of sim.nodes.values()) {
       const container = new Container();
       const body = new Graphics();
       const bar = new Graphics();
       const label = new Text({
-        text: node.def.label,
-        style: { fontFamily: FONT, fontSize: Math.max(8, Math.round(this.cell * 0.2)), fontWeight: '700', fill: COLORS.text },
+        text: nodeName(sim, node),
+        style: { fontFamily: FONT, fontSize: Math.max(8, Math.round(this.cell * 0.19)), fontWeight: '700', fill: COLORS.text },
       });
       const stats = new Text({
         text: '',
-        style: { fontFamily: FONT, fontSize: Math.max(8, Math.round(this.cell * 0.19)), fill: COLORS.muted },
+        style: { fontFamily: FONT, fontSize: Math.max(8, Math.round(this.cell * 0.165)), fill: COLORS.muted },
       });
       label.anchor.set(0.5);
       stats.anchor.set(0.5);
-      const hasBar = Number.isFinite(sim.capacityRpsOf(node));
-      label.y = hasBar ? -size * 0.24 : -size * 0.13;
-      stats.y = hasBar ? size * 0.04 : size * 0.17;
+      if (label.width > size * 0.92) label.scale.set((size * 0.92) / label.width);
+      const meters = metersOf(node, sim).length;
+      label.y = meters ? -size * 0.31 : -size * 0.14;
+      stats.y = meters ? -size * 0.09 : size * 0.14;
       container.addChild(body, label, stats, bar);
+
+      const captions: Text[] = [];
+      if (detail) {
+        for (let i = 0; i < meters; i++) {
+          const t = new Text({
+            text: '',
+            style: { fontFamily: FONT, fontSize: Math.max(7, Math.round(this.cell * 0.12)), fill: COLORS.muted },
+          });
+          t.anchor.set(0, 0.5);
+          container.addChild(t);
+          captions.push(t);
+        }
+      }
       this.nodeLayer.addChild(container);
-      this.nodeViews.set(node.id, { container, body, label, stats, bar });
+      this.nodeViews.set(node.id, { container, body, label, stats, bar, captions });
+
+      for (const to of node.out) {
+        const t = new Text({
+          text: '',
+          style: {
+            fontFamily: FONT,
+            fontSize: Math.max(8, Math.round(this.cell * 0.14)),
+            fill: COLORS.muted,
+            stroke: { color: COLORS.cell, width: 3 },
+          },
+        });
+        t.anchor.set(0.5);
+        this.edgeLabelLayer.addChild(t);
+        this.edgeLabels.set(`${node.id}>${to}`, t);
+      }
     }
     this.builtSim = sim;
     this.builtLayoutVersion = sim.layoutVersion;
@@ -285,7 +358,7 @@ export class BoardRenderer {
   private updateNode(node: NodeRuntime, sim: Simulation, view: ViewState, refreshStats: boolean): void {
     const v = this.nodeViews.get(node.id);
     if (!v) return;
-    const size = this.cell * 0.84;
+    const size = this.cell * 0.86;
     const half = size / 2;
     const dragging = this.drag?.nodeId === node.id;
     const pos = this.positionOf(node);
@@ -311,27 +384,41 @@ export class BoardRenderer {
 
     if (!refreshStats) return;
 
-    // 受信量 / 上限 と負荷バー
+    // 受信量 / 上限(rps)
     const inRps = sim.inRpsOf(node);
     const cap = sim.capacityRpsOf(node);
-    const bar = v.bar.clear();
+    const unit = this.cell >= DETAIL_CELL ? ' rps' : '';
     if (Number.isFinite(cap)) {
       const ratio = cap > 0 ? inRps / cap : 0;
-      v.stats.text = `${compact(inRps)}/${compact(cap)}`;
+      v.stats.text = `${compact(inRps)}/${compact(cap)}${unit}`;
       v.stats.style.fill = ratio >= 0.9 ? COLORS.error : ratio >= 0.7 ? COLORS.warn : COLORS.text;
-      const w = size * 0.74;
-      const h = Math.max(3, this.cell * 0.075);
-      const y = size * 0.25;
-      bar.rect(-w / 2, y, w, h).fill(COLORS.gaugeBg);
-      if (ratio > 0) bar.rect(-w / 2, y, w * Math.min(1, ratio), h).fill(loadColor(ratio));
     } else {
-      v.stats.text = `${compact(inRps)}/s`;
+      // インターネット: 送り出している量とデータ量
+      v.stats.text = `${compact(inRps)}${unit || '/s'}`;
       v.stats.style.fill = COLORS.muted;
     }
     // 桁が増えても枠からはみ出さないように縮める
     v.stats.scale.set(1);
-    const maxWidth = size * 0.9;
-    if (v.stats.width > maxWidth) v.stats.scale.set(maxWidth / v.stats.width);
+    if (v.stats.width > size * 0.92) v.stats.scale.set((size * 0.92) / v.stats.width);
+
+    // メーター(大きいマスでは見出し付き)
+    const meters = metersOf(node, sim);
+    const bar = v.bar.clear();
+    const h = Math.max(3, this.cell * 0.07);
+    const gap = Math.max(2, this.cell * 0.05);
+    const captionW = v.captions.length ? size * 0.32 : 0;
+    const w = size * 0.78 - captionW;
+    const x = -size * 0.39 + captionW;
+    meters.forEach((m, i) => {
+      const y = size * 0.1 + i * (h + gap);
+      bar.rect(x, y, w, h).fill(COLORS.gaugeBg);
+      if (m.ratio > 0) bar.rect(x, y, w * Math.min(1, m.ratio), h).fill(m.color ?? loadColor(m.ratio));
+      const caption = v.captions[i];
+      if (caption) {
+        caption.text = m.caption;
+        caption.position.set(-size * 0.4, y + h / 2);
+      }
+    });
   }
 
   private drawDropTarget(sim: Simulation): void {
@@ -358,7 +445,9 @@ export class BoardRenderer {
       for (const toId of from.out) {
         const to = sim.nodes.get(toId);
         if (!to) continue;
-        const [p0, c1, c2, p3] = this.curve(this.positionOf(from), this.positionOf(to));
+        const curve = this.curve(this.positionOf(from), this.positionOf(to));
+        const [p0, c1, c2, p3] = curve;
+        this.placeEdgeLabel(sim, from.id, toId, curve);
         const active =
           view.connectFrom === from.id || view.selectedId === from.id || view.selectedId === to.id;
         const color = active ? COLORS.edgeActive : COLORS.edge;
@@ -381,6 +470,18 @@ export class BoardRenderer {
         ]).fill({ color, alpha: 0.9 });
       }
     }
+  }
+
+  /** 接続線の真ん中に、その線を通っている量(rps)を出す */
+  private placeEdgeLabel(sim: Simulation, from: number, to: number, curve: Curve): void {
+    const label = this.edgeLabels.get(`${from}>${to}`);
+    if (!label) return;
+    const rps = sim.edgeRpsOf(from, to);
+    label.visible = this.cell >= EDGE_LABEL_CELL && rps >= 0.5;
+    if (!label.visible) return;
+    const mid = bezier(curve, 0.5);
+    label.position.set(mid.x, mid.y);
+    if (this.statsRefreshedThisFrame) label.text = compact(rps);
   }
 
   private drawPackets(sim: Simulation): void {

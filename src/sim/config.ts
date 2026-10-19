@@ -39,8 +39,8 @@ export const DAY_AMPLITUDE = 0.2;
 export const BASE_MARKET = 1500;
 /** 口コミによる自然増加率(/秒)。市場規模に近づくほど鈍る(ロジスティック成長) */
 export const GROWTH_RATE = 0.03;
-/** 書き込み機能を解放したあとの書き込みリクエストの割合 */
-export const WRITE_SHARE = 0.3;
+/** 会員機能を解放したあと、WEB に届いたリクエストのうち DB へ流す割合(DB が接続されている WEB のみ) */
+export const WEB_TO_DB_SHARE = 0.2;
 
 /** 品質が悪いときの離脱 */
 export const CHURN = {
@@ -103,6 +103,11 @@ export interface NodeKindDef {
    * 1 件ずつ「データ量 ÷ 帯域」だけ回線を占有するので、重いコンテンツほど詰まりやすい
    */
   readonly bandwidthMBps?: number;
+  /**
+   * キャッシュ(CDN)。kinds のリクエストは hitRate の確率でここで返し、外れたら接続先(オリジン)へ送る。
+   * 返したデータも外れたデータも、このノードの帯域を通る
+   */
+  readonly cache?: { readonly kinds: readonly ReqKind[]; readonly hitRate: number };
   /** 受け付けるリクエストの種類 */
   readonly accepts: readonly ReqKind[];
   /** ここで処理が完了する(=レスポンスを返せる)種類。それ以外は次へ転送 */
@@ -115,6 +120,8 @@ export interface NodeKindDef {
   readonly placeable: boolean;
   /** 配置に必要な解放 */
   readonly requires?: UnlockId;
+  /** 処理のあと、この割合で接続先の別ノードへ転送する(書き込みとして扱う) */
+  readonly forwardsToDb?: boolean;
   /** 盤面上の色 */
   readonly color: number;
 }
@@ -132,10 +139,36 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     serviceMs: { static: 0, write: 0 },
     accepts: [],
     terminates: [],
-    connectsTo: ['lb', 'web'],
+    connectsTo: ['cdn', 'lb', 'web'],
     maxOut: 1,
     placeable: false,
     color: 0x8b98a5,
+  },
+  cdn: {
+    kind: 'cdn',
+    label: 'CDN',
+    name: 'CDN',
+    description:
+      'ユーザーの近くで静的コンテンツをキャッシュして返す。当たった分は LB・WEB を通らないので、重い画像や動画の帯域を肩代わりできる。外れた分と書き込みはオリジン(LB / WEB)へ送る。',
+    cost: 2000,
+    upkeepPerSec: 1,
+    // 処理は非常に速く、詰まるのは帯域
+    workers: 256,
+    queueMax: 2000,
+    serviceMs: { static: 1, write: 1 },
+    // 400 MB/秒 = 3.2 Gbps。LB の 8 倍
+    bandwidthMBps: 400,
+    // 静的リクエストの 60% をキャッシュから返す(「CDN キャッシュ拡張」で上がる)
+    cache: { kinds: ['static'], hitRate: 0.6 },
+    accepts: ['static', 'write'],
+    terminates: [],
+    connectsTo: ['lb', 'web'],
+    maxOut: 1,
+    // LB と同じく、サービス 1 つにつき 1 つ
+    maxCount: 1,
+    placeable: true,
+    requires: 'cdn',
+    color: 0x5bc0eb,
   },
   lb: {
     kind: 'lb',
@@ -164,14 +197,15 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     kind: 'web',
     label: 'WEB',
     name: 'Web サーバー',
-    description: '静的リクエストを処理する。書き込みは DB へ転送。',
+    description: 'リクエストを処理する。会員機能のあとは 1/5 を DB へ転送。',
     cost: 50,
     upkeepPerSec: 0.05,
     workers: 4,
     queueMax: 40,
     serviceMs: { static: 60, write: 30 },
-    accepts: ['static', 'write'],
+    accepts: ['static'],
     terminates: ['static'],
+    forwardsToDb: true,
     connectsTo: ['db'],
     maxOut: 4,
     placeable: true,

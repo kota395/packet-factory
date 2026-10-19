@@ -21,7 +21,7 @@ import {
   TICK_MS,
   TIMEOUT_MS,
   TRANSIT_MS_PER_CELL,
-  WRITE_SHARE,
+  WEB_TO_DB_SHARE,
   type NodeKindDef,
 } from './config';
 import { UNLOCKS, UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades, upgradeCost, type FeatureEffect } from './economy';
@@ -61,7 +61,20 @@ export interface NodeRuntime {
   inKBps: number;
   /** 帯域を持つノードで、回線が次に空く時刻 */
   linkFreeAt: number;
+  /** 失敗の内訳(撤去で消えたものは数えない) */
+  errorsBy: Record<ErrorReason, number>;
+  /** キューで待った時間の平均(ms、平滑値) */
+  waitMs: number;
+  /** 今の 1 秒間にこのノードで完了した数 / キャッシュから返した数 */
+  servedCount: number;
+  hitCount: number;
+  /** このノードで完了している数/秒・キャッシュから返している数/秒(平滑値) */
+  servedRps: number;
+  hitRps: number;
 }
+
+/** キューの待ち時間の平滑化係数(1 件ごと) */
+const WAIT_SMOOTHING = 0.02;
 
 /** 受信量の平滑化係数(1 秒ごと)。大きいほど直近の値を重視する */
 const IN_RPS_SMOOTHING = 0.5;
@@ -91,7 +104,7 @@ export interface SimOptions {
    */
   traffic?: (tMs: number) => number;
   /** 書き込みの割合を固定する(テスト用) */
-  writeShare?: number;
+  dbShare?: number;
   unlocks?: Iterable<UnlockId>;
   /** 解放済みだがオフにしている配信コンテンツ */
   disabledFeatures?: Iterable<UnlockId>;
@@ -126,7 +139,10 @@ export class Simulation {
 
   private readonly rng: () => number;
   private readonly fixedTraffic: ((tMs: number) => number) | null;
-  private readonly fixedWriteShare: number | null;
+  private readonly fixedDbShare: number | null;
+  /** 接続ごとの今の 1 秒間の通過数と、平滑化した通過数/秒。キーは edgeKey(from, to) */
+  private readonly edgeCounts = new Map<string, number>();
+  private readonly edgeRps = new Map<string, number>();
   private nextNodeId = 1;
   private nextReqId = 1;
   private pendingMs = 0;
@@ -136,7 +152,7 @@ export class Simulation {
     this.money = opts.startMoney ?? START_MONEY;
     this.users = opts.startUsers ?? START_USERS;
     this.fixedTraffic = opts.traffic ?? null;
-    this.fixedWriteShare = opts.writeShare ?? null;
+    this.fixedDbShare = opts.dbShare ?? null;
     this.unlocks = new Set(opts.unlocks ?? []);
     this.upgrades = { ...emptyUpgrades(), ...opts.upgrades };
     this.disabledFeatures = new Set(opts.disabledFeatures ?? []);
@@ -154,10 +170,10 @@ export class Simulation {
     return UPGRADE_BY_ID.monetize.effect(this.upgrades.monetize);
   }
 
-  /** 書き込みの割合。会員機能を解放し、DB を 1 台以上置いてから流れ始める */
-  get writeShare(): number {
-    if (this.fixedWriteShare !== null) return this.fixedWriteShare;
-    return this.unlocks.has('writes') && this.countOf('db') > 0 ? WRITE_SHARE : 0;
+  /** WEB に届いたうち DB へ流す割合。会員機能を解放していれば有効(実際に流れるのは DB が接続された WEB のみ) */
+  get dbShare(): number {
+    if (this.fixedDbShare !== null) return this.fixedDbShare;
+    return this.unlocks.has('writes') ? WEB_TO_DB_SHARE : 0;
   }
 
   get upkeepPerSec(): number {
@@ -203,7 +219,21 @@ export class Simulation {
     const base = node.def.bandwidthMBps;
     if (base === undefined) return Infinity;
     if (node.kind === 'lb') return base * UPGRADE_BY_ID.lbBandwidth.effect(this.upgrades.lbBandwidth);
+    if (node.kind === 'cdn') return base * UPGRADE_BY_ID.cdnBandwidth.effect(this.upgrades.cdnBandwidth);
     return base;
+  }
+
+  /** キャッシュのヒット率(0〜1)。キャッシュのないノードは 0 */
+  cacheHitRateOf(node: NodeRuntime): number {
+    const cache = node.def.cache;
+    if (!cache) return 0;
+    if (node.kind === 'cdn') return UPGRADE_BY_ID.cdnCache.effect(this.upgrades.cdnCache);
+    return cache.hitRate;
+  }
+
+  /** 接続を通っているリクエスト数/秒 */
+  edgeRpsOf(from: number, to: number): number {
+    return this.edgeRps.get(edgeKey(from, to)) ?? 0;
   }
 
   /** 強化を反映した処理時間(ms) */
@@ -343,8 +373,7 @@ export class Simulation {
 
   private expectedShare(node: NodeRuntime, kind: ReqKind): number {
     if (node.def.accepts.length === 1) return node.def.accepts[0] === kind ? 1 : 0;
-    const w = this.writeShare;
-    return kind === 'write' ? w : 1 - w;
+    return kind === 'static' ? 1 : 0;
   }
 
   nodeAt(x: number, y: number): NodeRuntime | undefined {
@@ -480,17 +509,15 @@ export class Simulation {
     const lambda = (this.trafficAt(now) * TICK_MS) / 1000;
     const count = poisson(lambda, this.rng);
     const internet = this.nodes.get(this.internetId)!;
-    const writeShare = this.writeShare;
-    const size = { static: this.dataSizeKB('static'), write: this.dataSizeKB('write') };
+    const size = this.dataSizeKB('static');
     for (let i = 0; i < count; i++) {
-      const kind: ReqKind = this.rng() < writeShare ? 'write' : 'static';
       const req: Request = {
         id: this.nextReqId++,
-        kind,
+        kind: 'static',
         createdAt: now,
         hops: 0,
         readyAt: now,
-        sizeKB: size[kind],
+        sizeKB: size,
       };
       internet.arrivals[req.kind]++;
       internet.arrivalsKB += req.sizeKB;
@@ -531,7 +558,23 @@ export class Simulation {
       }
       n.inKBps += IN_RPS_SMOOTHING * (n.arrivalsKB - n.inKBps);
       n.arrivalsKB = 0;
+      n.servedRps += IN_RPS_SMOOTHING * (n.servedCount - n.servedRps);
+      n.hitRps += IN_RPS_SMOOTHING * (n.hitCount - n.hitRps);
+      n.servedCount = 0;
+      n.hitCount = 0;
     }
+    // 接続ごとの通過数。今ある接続だけ残す
+    const next = new Map<string, number>();
+    for (const n of this.nodes.values()) {
+      for (const to of n.out) {
+        const key = edgeKey(n.id, to);
+        const old = this.edgeRps.get(key) ?? 0;
+        next.set(key, old + IN_RPS_SMOOTHING * ((this.edgeCounts.get(key) ?? 0) - old));
+      }
+    }
+    this.edgeRps.clear();
+    for (const [k, v] of next) this.edgeRps.set(k, v);
+    this.edgeCounts.clear();
   }
 
   /** ロジスティック成長 − 品質による離脱 */
@@ -569,6 +612,7 @@ export class Simulation {
       for (let i = 1; i < free.length; i++) if (free[i] < free[slot]) slot = i;
       const req = node.queue.shift()!;
       const start = Math.max(free[slot], req.readyAt);
+      node.waitMs += WAIT_SMOOTHING * (start - req.readyAt - node.waitMs);
       if (start - req.createdAt > TIMEOUT_MS) {
         this.fail(req, 'timeout', node, start);
         continue;
@@ -587,10 +631,21 @@ export class Simulation {
 
   private complete(node: NodeRuntime, req: Request, t: number): void {
     node.processed++;
+    // WEB: 一部は DB へ回す(DB が接続されていなければ回さない)
+    if (node.def.forwardsToDb && req.kind === 'static' && this.rng() < this.dbShare) {
+      const hasDb = node.out.some((id) => this.nodes.get(id)?.kind === 'db');
+      if (hasDb) {
+        req.kind = 'write';
+        req.sizeKB = this.dataSizeKB('write');
+        this.route(node, req, t);
+        return;
+      }
+    }
     if (node.def.terminates.includes(req.kind)) {
       this.succeed(req, node, t);
       return;
     }
+    let at = t;
     const bw = this.bandwidthMBpsOf(node);
     if (Number.isFinite(bw)) {
       // 回線は 1 本で、データ量 ÷ 帯域 だけ占有する。混みすぎていたら捨てる
@@ -601,10 +656,16 @@ export class Simulation {
       }
       // 1 MB/秒 = 1 KB/ms
       node.linkFreeAt = start + req.sizeKB / bw;
-      this.route(node, req, node.linkFreeAt);
+      at = node.linkFreeAt;
+    }
+    // キャッシュに当たればここで返す
+    const cache = node.def.cache;
+    if (cache && cache.kinds.includes(req.kind) && this.rng() < this.cacheHitRateOf(node)) {
+      node.hitCount++;
+      this.succeed(req, node, at);
       return;
     }
-    this.route(node, req, t);
+    this.route(node, req, at);
   }
 
   /** 接続先のうち、その種類を受け付けるノードへラウンドロビンで送る */
@@ -624,6 +685,8 @@ export class Simulation {
     }
     const target = candidates[node.rr++ % candidates.length];
     req.hops++;
+    const key = edgeKey(node.id, target.id);
+    this.edgeCounts.set(key, (this.edgeCounts.get(key) ?? 0) + 1);
     const dist = Math.hypot(target.x - node.x, target.y - node.y);
     const travel = Math.max(MIN_TRANSIT_MS, Math.round(dist * TRANSIT_MS_PER_CELL));
     this.transits.push({ req, from: node.id, to: target.id, start: t, end: t + travel });
@@ -652,6 +715,7 @@ export class Simulation {
       return;
     }
     const revenue = this.revenueOf(req.kind);
+    node.servedCount++;
     this.metrics.recordSuccess(req.kind, latency);
     this.metrics.recordRevenue(revenue);
     this.money += revenue;
@@ -662,6 +726,7 @@ export class Simulation {
     this.metrics.recordError(reason);
     if (node) {
       node.errors++;
+      node.errorsBy[reason]++;
       node.lastErrorAt = t;
     }
   }
@@ -686,9 +751,17 @@ export class Simulation {
       arrivalsKB: 0,
       inKBps: 0,
       linkFreeAt: 0,
+      errorsBy: { drop: 0, timeout: 0, 'no-route': 0 },
+      waitMs: 0,
+      servedCount: 0,
+      hitCount: 0,
+      servedRps: 0,
+      hitRps: 0,
     };
     this.nodes.set(node.id, node);
     this.layoutVersion++;
     return node;
   }
 }
+
+const edgeKey = (from: number, to: number) => `${from}>${to}`;

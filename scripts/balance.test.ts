@@ -63,7 +63,7 @@ it(`balance bot (${MINUTES} min)`, () => {
         return false;
       }
       if (lb === null) {
-        const id = s.addNode('lb', 1, 4).id;
+        const id = s.addNode('lb', 2, 4).id;
         if (id === undefined) return false;
         lb = id;
         for (const o of [...s.nodes.get(s.internetId)!.out]) s.disconnect(s.internetId, o);
@@ -72,13 +72,32 @@ it(`balance bot (${MINUTES} min)`, () => {
         event('LB 経由に配線');
         return true;
       }
-      const p = freeCell(s, 3);
+      const p = freeCell(s, 4);
       if (p && s.money >= s.nodeCost('web')) {
         const id = s.addNode('web', p[0], p[1]).id!;
         s.connect(lb, id);
         for (const d of dbs) s.connect(id, d.id);
         return true;
       }
+    }
+
+    // CDN: 導入したら NET と LB の間に挟む。詰まったら回線増強
+    const cdns = ofKind(s, 'cdn');
+    if (s.unlocks.has('cdn') && !cdns.length && lb !== null && s.money >= s.nodeCost('cdn')) {
+      const id = s.addNode('cdn', 1, 4).id!;
+      s.disconnect(s.internetId, lb);
+      s.connect(s.internetId, id);
+      s.connect(id, lb);
+      event('CDN 設置');
+      return true;
+    }
+    if (cdns.length && load(s, cdns) > 0.7) {
+      const cost = s.upgradeCost('cdnBandwidth');
+      if (s.buyUpgrade('cdnBandwidth').ok) {
+        event(`CDN 回線増強 ($${cost})`);
+        return true;
+      }
+      return false;
     }
 
     // 3. 書き込みを解放済みで DB が足りなければ増設
@@ -98,12 +117,13 @@ it(`balance bot (${MINUTES} min)`, () => {
     options.push(['収益化', s.upgradeCost('monetize'), () => s.buyUpgrade('monetize').ok]);
     if (webs.length >= 3) options.push(['WEB 強化', s.upgradeCost('webPerf'), () => s.buyUpgrade('webPerf').ok]);
     if (dbs.length >= 2) options.push(['DB 強化', s.upgradeCost('dbPerf'), () => s.buyUpgrade('dbPerf').ok]);
+    if (cdns.length) options.push(['CDN キャッシュ', s.upgradeCost('cdnCache'), () => s.buyUpgrade('cdnCache').ok]);
     if (s.unlocks.has('lb') && !s.unlocks.has('writes')) {
       options.push(['会員機能', UNLOCK_BY_ID.writes.cost, () => s.unlock('writes').ok]);
     }
     // 配信コンテンツは LB の帯域に余裕があるときだけ増やす
     if (lbs.length && load(s, lbs) < 0.4) {
-      for (const id of ['images', 'video'] as const) {
+      for (const id of ['images', 'cdn', 'video'] as const) {
         if (!s.unlocks.has(id) && s.canUnlock(id) !== '「' + UNLOCK_BY_ID[UNLOCK_BY_ID[id].requires!]?.name + '」が必要です') {
           options.push([UNLOCK_BY_ID[id].name, UNLOCK_BY_ID[id].cost, () => s.unlock(id).ok]);
         }

@@ -161,8 +161,10 @@ button.active {
   top: 8px;
   right: 8px;
   z-index: 2;
-  min-width: 180px;
+  width: 340px;
   max-width: calc(100% - 16px);
+  max-height: calc(100% - 16px);
+  overflow-y: auto;
   padding: 10px 12px;
   background: rgba(18, 26, 35, 0.94);
   border: 1px solid var(--line);
@@ -171,9 +173,47 @@ button.active {
   line-height: 1.6;
 }
 
+#info > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 #info h3 {
-  margin: 0 0 4px;
-  font-size: 14px;
+  margin: 0 0 2px;
+  font-size: 15px;
+}
+
+#info h3 small {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+#info-close {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+}
+
+#info .info-sec {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+#info h4 {
+  margin: 0 0 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+#info .row > span:last-child {
+  text-align: right;
 }
 
 #info .row {
@@ -209,6 +249,11 @@ button.active {
   margin-top: 8px;
 }
 
+button.danger {
+  color: var(--bad);
+  border-color: #5a2326;
+}
+
 #toast {
   position: absolute;
   left: 50%;
@@ -238,8 +283,10 @@ button.active {
 
 #invest {
   position: absolute;
-  left: 0;
-  right: 0;
+  /* 横長の画面で詳細と購入ボタンが離れすぎないよう、幅に上限を付けて中央に置く */
+  left: 50%;
+  width: min(100%, 560px);
+  transform: translateX(-50%);
   bottom: 0;
   z-index: 4;
   display: flex;
@@ -377,7 +424,8 @@ button.active {
 
 #toolbar {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   gap: 5px;
   padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
   background: var(--panel);
@@ -555,7 +603,7 @@ button.active {
 
 @media (min-width: 900px) {
   #toolbar {
-    grid-template-columns: repeat(7, minmax(0, 104px));
+    grid-auto-columns: minmax(0, 100px);
     justify-content: center;
   }
 }
@@ -603,6 +651,8 @@ button.active {
     bottom: 8px;
     left: 8px;
     right: 8px;
+    width: auto;
+    max-height: 48%;
     padding: 8px 10px;
     font-size: 12px;
     line-height: 1.5;
@@ -610,12 +660,6 @@ button.active {
 
   #info .desc {
     display: none;
-  }
-
-  #info .rows-box {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    column-gap: 14px;
   }
 
   #info .actions {

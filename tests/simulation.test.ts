@@ -12,7 +12,7 @@ function sim(opts: SimOptions = {}) {
     seed: 42,
     startMoney: 1_000_000,
     unlocks: ['lb', 'writes'],
-    writeShare: 0.25,
+    dbShare: 0.25,
     ...opts,
   });
 }
@@ -38,14 +38,15 @@ describe('ルーティング', () => {
     expect(s.metrics.errorsByReason['no-route']).toBe(s.metrics.totalErrors);
   });
 
-  it('DB が無いと静的は成功し、書き込みだけ失敗する', () => {
+  it('DB が無い、または未接続の WEB は転送せず、エラーにもならない', () => {
     const s = sim({ traffic: constant(20) });
     const web = s.addNode('web', 3, 4).id!;
     s.connect(s.internetId, web);
+    s.addNode('db', 5, 5); // 置いただけで未接続
     s.step(10_000);
     expect(s.metrics.successByKind.static).toBeGreaterThan(0);
-    expect(s.metrics.successByKind.write).toBe(0);
-    expect(s.metrics.errorsByReason['no-route']).toBeGreaterThan(0);
+    expect(s.metrics.totalErrors).toBe(0);
+    expect(s.nodes.get(web)!.out.length).toBe(0);
   });
 
   it('十分な構成なら可用性はほぼ 100% になる', () => {
@@ -66,7 +67,7 @@ describe('ルーティング', () => {
   });
 
   it('LB は処理能力が高く、テキストだけなら大量に流しても詰まらない', () => {
-    const s = sim({ traffic: constant(700), writeShare: 0, upgrades: { webPerf: 6 } });
+    const s = sim({ traffic: constant(700), dbShare: 0, upgrades: { webPerf: 6 } });
     build(s, 6, 0);
     s.step(15_000);
     const lb = [...s.nodes.values()].find((n) => n.kind === 'lb')!;
@@ -80,7 +81,7 @@ describe('ルーティング', () => {
     const run = (lbBandwidth: number) => {
       const s = sim({
         traffic: constant(700),
-        writeShare: 0,
+        dbShare: 0,
         unlocks: ['lb', 'writes', 'images'],
         upgrades: { lbBandwidth, webPerf: 6 },
       });
@@ -151,7 +152,7 @@ describe('ノードの移動と受信量', () => {
   });
 
   it('届いている量と処理上限を測れる', () => {
-    const s = sim({ traffic: constant(30), writeShare: 0 });
+    const s = sim({ traffic: constant(30), dbShare: 0 });
     const web = s.addNode('web', 3, 4).id!;
     s.connect(s.internetId, web);
     s.step(10_000);
@@ -164,15 +165,92 @@ describe('ノードの移動と受信量', () => {
   });
 
   it('処理上限は届く種類の割合と強化を反映する', () => {
-    const s = sim({ traffic: constant(40), writeShare: 0.5, upgrades: { webPerf: 2 } });
+    const s = sim({ traffic: constant(40), dbShare: 0.5, upgrades: { webPerf: 2 } });
     build(s, 1, 1);
     s.step(10_000);
     const web = [...s.nodes.values()].find((n) => n.kind === 'web')!;
     const db = [...s.nodes.values()].find((n) => n.kind === 'db')!;
-    // 静的 60ms と書き込み 30ms が半々 → 平均 45ms、×1.44 で速くなる
-    expect(s.capacityRpsOf(web)).toBeGreaterThan(110);
-    expect(s.capacityRpsOf(web)).toBeLessThan(145);
+    // WEB は全リクエストを 60ms で処理し、スケールアップ 2 回で ×1.44 速くなる
+    expect(s.capacityRpsOf(web)).toBeCloseTo((4 * 1000 * 1.44) / 60, 0);
     expect(s.capacityRpsOf(db)).toBeCloseTo((4 * 1000) / 80, 0);
+  });
+});
+
+describe('CDN', () => {
+  /** NET → CDN → LB → WEB×webs の構成 */
+  function withCdn(s: Simulation, webs: number) {
+    const cdn = s.addNode('cdn', 1, 4).id!;
+    const lb = s.addNode('lb', 3, 4).id!;
+    expect(s.connect(s.internetId, cdn).ok).toBe(true);
+    expect(s.connect(cdn, lb).ok).toBe(true);
+    for (let i = 0; i < webs; i++) s.connect(lb, s.addNode('web', 6, 1 + i).id!);
+    return { cdn: s.nodes.get(cdn)!, lb: s.nodes.get(lb)! };
+  }
+
+  it('導入するまで置けず、置けるのは 1 つだけ', () => {
+    const s = new Simulation({ seed: 1, startMoney: 1_000_000, unlocks: ['lb'] });
+    expect(s.addNode('cdn', 1, 4).ok).toBe(false);
+    s.unlock('images');
+    s.unlock('cdn');
+    expect(s.addNode('cdn', 1, 4).ok).toBe(true);
+    expect(s.addNode('cdn', 1, 5).ok).toBe(false);
+  });
+
+  it('静的リクエストの一部を CDN で返し、LB に届く量が減る', () => {
+    const s = sim({ traffic: constant(300), dbShare: 0, unlocks: ['lb', 'writes', 'images', 'cdn'] });
+    const { cdn, lb } = withCdn(s, 6);
+    s.step(15_000);
+    expect(s.metrics.availability).toBeGreaterThan(0.99);
+    expect(s.cacheHitRateOf(cdn)).toBeCloseTo(0.6);
+    // ヒット率 60% → LB にはおよそ 4 割しか届かない
+    expect(s.inRpsOf(lb) / s.inRpsOf(cdn)).toBeGreaterThan(0.3);
+    expect(s.inRpsOf(lb) / s.inRpsOf(cdn)).toBeLessThan(0.5);
+    expect(cdn.hitRps).toBeGreaterThan(150);
+    expect(s.edgeRpsOf(cdn.id, lb.id)).toBeCloseTo(s.inRpsOf(lb), -1);
+  });
+
+  it('画像で LB の帯域が足りなくても、CDN を挟めば捌ける', () => {
+    const run = (useCdn: boolean) => {
+      const s = sim({ traffic: constant(700), dbShare: 0, unlocks: ['lb', 'writes', 'images', 'cdn'], upgrades: { webPerf: 6 } });
+      if (useCdn) withCdn(s, 6);
+      else build(s, 6, 0);
+      s.step(15_000);
+      return s.metrics.availability;
+    };
+    expect(run(false)).toBeLessThan(0.9);
+    expect(run(true)).toBeGreaterThan(0.99);
+  });
+
+  it('キャッシュ拡張でヒット率が上がり、回線増強で帯域が増える', () => {
+    const s = sim({ unlocks: ['lb', 'writes', 'images', 'cdn'], upgrades: { cdnCache: 2, cdnBandwidth: 1 } });
+    const cdn = s.nodes.get(s.addNode('cdn', 1, 4).id!)!;
+    expect(s.cacheHitRateOf(cdn)).toBeCloseTo(1 - 0.4 * 0.75 ** 2);
+    expect(s.bandwidthMBpsOf(cdn)).toBeCloseTo(NODE_DEFS.cdn.bandwidthMBps! * 1.5);
+  });
+
+  it('つなげる向きは NET → CDN → LB / WEB', () => {
+    const s = sim({ unlocks: ['lb', 'writes', 'images', 'cdn'] });
+    const cdn = s.addNode('cdn', 1, 4).id!;
+    const web = s.addNode('web', 3, 4).id!;
+    const db = s.addNode('db', 5, 4).id!;
+    expect(s.connect(cdn, db).ok).toBe(false);
+    expect(s.connect(web, cdn).ok).toBe(false);
+    expect(s.connect(cdn, web).ok).toBe(true);
+    expect(s.connect(s.internetId, cdn).ok).toBe(true);
+  });
+});
+
+describe('ノードごとの統計', () => {
+  it('失敗の内訳・待ち時間・接続ごとの流量を数える', () => {
+    const s = sim({ traffic: constant(200), dbShare: 0 });
+    build(s, 1, 0); // WEB 1 台(約 66 rps)に 200 rps
+    s.step(10_000);
+    const web = [...s.nodes.values()].find((n) => n.kind === 'web')!;
+    const lb = [...s.nodes.values()].find((n) => n.kind === 'lb')!;
+    expect(web.errorsBy.drop).toBeGreaterThan(0);
+    expect(web.waitMs).toBeGreaterThan(50);
+    expect(web.servedRps).toBeGreaterThan(50);
+    expect(s.edgeRpsOf(lb.id, web.id)).toBeGreaterThan(150);
   });
 });
 
@@ -244,19 +322,20 @@ describe('投資', () => {
     expect(s.buyUpgrade('dbPerf').ok).toBe(true);
   });
 
-  it('書き込みは会員機能を解放して DB を置くまで流れない', () => {
-    const s = new Simulation({ seed: 1, startMoney: 1_000_000 });
-    expect(s.writeShare).toBe(0);
-    s.unlock('lb');
-    s.unlock('writes');
-    expect(s.writeShare).toBe(0); // DB を置くまでは流れない
-    s.addNode('db', 5, 5);
-    expect(s.writeShare).toBeGreaterThan(0);
+  it('WEB に届いたリクエストの約 1/5 が接続済みの DB に流れる', () => {
+    const s = sim({ traffic: constant(60), dbShare: undefined });
+    build(s, 2, 1);
+    s.step(30_000);
+    const db = [...s.nodes.values()].find((n) => n.kind === 'db')!;
+    const webIn = [...s.nodes.values()].filter((n) => n.kind === 'web').reduce((a, n) => a + s.inRpsOf(n), 0);
+    expect(db.inRps.write / webIn).toBeGreaterThan(0.12);
+    expect(db.inRps.write / webIn).toBeLessThan(0.28);
+    expect(s.metrics.totalErrors).toBe(0);
   });
 
   it('WEB チューニングで 1 台あたりの処理能力が上がる', () => {
     const run = (level: number) => {
-      const s = sim({ traffic: constant(110), writeShare: 0, upgrades: { webPerf: level } });
+      const s = sim({ traffic: constant(110), dbShare: 0, upgrades: { webPerf: level } });
       const w = s.addNode('web', 2, 4).id!;
       s.connect(s.internetId, w);
       s.step(20_000);

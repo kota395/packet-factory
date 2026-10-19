@@ -10,7 +10,8 @@ const KIND_LABEL: Record<ReqKind, string> = { static: '静的', write: '書き�
 
 function formatEffect(def: UpgradeDef, v: number): string {
   if (def.unit === 'users') return `${compact(v)} 人`;
-  if (def.unit === 'bandwidth') return bandwidth((NODE_DEFS.lb.bandwidthMBps ?? 0) * v);
+  if (def.unit === 'bandwidth') return bandwidth((NODE_DEFS[def.node ?? 'lb'].bandwidthMBps ?? 0) * v);
+  if (def.unit === 'percent') return `${(v * 100).toFixed(1)}%`;
   return `×${v.toFixed(2)}`;
 }
 

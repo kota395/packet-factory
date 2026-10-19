@@ -15,7 +15,8 @@ import {
 import type { Simulation } from './sim/simulation';
 import type { NodeKind } from './sim/types';
 import { MetricsChart } from './ui/chart';
-import { bandwidth, compact, dataSize, duration, money, rate } from './ui/format';
+import { nodeInfoHtml, nodeName } from './ui/node-info';
+import { compact, duration, money, rate } from './ui/format';
 import { InvestPanel } from './ui/invest';
 
 type Tool = 'select' | NodeKind | 'connect' | 'delete';
@@ -319,52 +320,23 @@ function updateInfo(): void {
     return;
   }
   const sim = state.sim;
-  const d = node.def;
-  const rows: [string, string][] = [];
-  const inRps = sim.inRpsOf(node);
-  const cap = sim.capacityRpsOf(node);
-  const loadSpan = (ratio: number) =>
-    `<span class="${ratio >= 0.9 ? 'bad' : ratio >= 0.7 ? 'warn' : 'ok'}">${Math.round(ratio * 100)}%</span>`;
-  if (node.kind === 'internet') {
-    rows.push(['送出', `${compact(inRps, 1)} rps`]);
-    rows.push(['データ量', `${bandwidth(node.inKBps / 1000)}(平均 ${dataSize(inRps > 0 ? node.inKBps / inRps : 0)}/件)`]);
-  } else {
-    rows.push(['受信', `${compact(inRps, 1)} rps`]);
-    if (Number.isFinite(cap)) {
-      rows.push(['上限', `${compact(cap, 1)} rps`]);
-      rows.push(['負荷', `${loadSpan(inRps / cap)}(余裕 ${compact(Math.max(0, cap - inRps), 1)} rps)`]);
-    }
-    const bw = sim.bandwidthMBpsOf(node);
-    if (Number.isFinite(bw)) {
-      // 帯域を持つノードは、処理と帯域のどちらで詰まっているかを分けて出す
-      const usedMB = node.inKBps / 1000;
-      rows.push(['帯域', `${loadSpan(usedMB / bw)} ${bandwidth(usedMB)} / ${bandwidth(bw)}`]);
-      rows.push(['処理', `${loadSpan(inRps / sim.cpuCapacityRpsOf(node))} 上限 ${compact(sim.cpuCapacityRpsOf(node))} rps`]);
-    }
-    rows.push(['処理中', `${node.busy.length} / ${d.workers}`]);
-    rows.push(['キュー', `${node.queue.length} / ${d.queueMax}`]);
-    rows.push(['維持費', `$${d.upkeepPerSec}/秒`]);
-  }
-  rows.push(['エラー', compact(node.errors)]);
-  const outs = node.out.map((id) => sim.nodes.get(id)?.def.label ?? '?');
-  rows.push(['接続先', outs.length ? summarize(outs) : 'なし']);
-  const rowsHtml = rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
+  const body = nodeInfoHtml(sim, node);
 
   // ボタンを作り直すとタップを取りこぼすので、選択が変わったときだけ全体を組み立てる
   const key = `${node.id}@${sim.layoutVersion}`;
   if (ui.info.dataset.key === key) {
-    ui.info.querySelector('.rows-box')!.innerHTML = rowsHtml;
+    ui.info.querySelector('.info-body')!.innerHTML = body;
     return;
   }
   ui.info.dataset.key = key;
   ui.info.innerHTML = `
-    <h3>${d.name}</h3>
-    <div class="desc">${d.description}</div>
-    <div class="rows-box">${rowsHtml}</div>
-    <div class="actions">
-      ${node.kind === 'internet' ? '' : `<button type="button" id="info-remove">撤去 +${money(Math.floor(node.paid * SELL_REFUND_RATE))}</button>`}
-      <button type="button" id="info-close">閉じる</button>
-    </div>`;
+    <header>
+      <h3>${nodeName(sim, node)}<small>${node.def.name}</small></h3>
+      <button type="button" id="info-close" aria-label="閉じる">✕</button>
+    </header>
+    <div class="desc">${node.def.description}</div>
+    <div class="info-body">${body}</div>
+    ${node.kind === 'internet' ? '' : '<div class="actions"><button type="button" id="info-remove" class="danger">撤去する</button></div>'}`;
   ui.info.hidden = false;
 
   ui.info.querySelector('#info-remove')?.addEventListener('click', () => {
@@ -501,12 +473,6 @@ function toast(message: string): void {
   ui.toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => ui.toast.classList.remove('show'), 2200);
-}
-
-function summarize(labels: string[]): string {
-  const counts = new Map<string, number>();
-  for (const l of labels) counts.set(l, (counts.get(l) ?? 0) + 1);
-  return [...counts].map(([l, n]) => (n > 1 ? `${l}×${n}` : l)).join(', ');
 }
 
 function newSeed(): number {
