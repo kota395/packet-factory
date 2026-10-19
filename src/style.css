@@ -224,6 +224,114 @@ button.active {
   transform: translate(-50%, 0);
 }
 
+/* ---- 投資パネル ---------------------------------------------------- */
+
+#invest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  max-height: min(70%, 520px);
+  background: rgba(18, 26, 35, 0.98);
+  border-top: 1px solid var(--line);
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+}
+
+#invest[hidden] {
+  display: none;
+}
+
+#invest > header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 6px;
+}
+
+#invest h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+#invest-money {
+  flex: 1;
+  font-family: var(--mono);
+  color: var(--ok);
+}
+
+#invest-close {
+  min-width: 36px;
+}
+
+#invest-list {
+  overflow-y: auto;
+  padding: 0 12px 12px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.inv-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.inv-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.inv-title {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.inv-tag {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.inv-desc {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.inv-effect {
+  font-family: var(--mono);
+  font-size: 12px;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.inv-item .buy {
+  min-width: 84px;
+  min-height: 40px;
+  font-family: var(--mono);
+  font-weight: 700;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+}
+
+.inv-item .buy:disabled {
+  background: var(--panel-2);
+  border-color: var(--line);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 /* ---- ツールバー ---------------------------------------------------- */
 
 #hint {
@@ -238,8 +346,8 @@ button.active {
 
 #toolbar {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 6px;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 5px;
   padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
   background: var(--panel);
 }
@@ -254,10 +362,43 @@ button.active {
   line-height: 1.2;
 }
 
+#toolbar button {
+  position: relative;
+}
+
 #toolbar button small {
   font-size: 10px;
   opacity: 0.75;
   font-family: var(--mono);
+}
+
+#toolbar button small.short {
+  color: var(--bad);
+  opacity: 1;
+}
+
+#toolbar button.active small.short {
+  color: #7a1012;
+}
+
+#toolbar button.invest {
+  font-weight: 700;
+  border-color: #3b6ea8;
+}
+
+#toolbar .badge {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 2px var(--panel-2);
+}
+
+#toolbar .badge[hidden] {
+  display: none;
 }
 
 #toolbar .swatch {
@@ -298,34 +439,62 @@ button.active {
   font-size: 20px;
 }
 
-.modal-card .rank {
-  font-size: 56px;
-  font-weight: 800;
-  line-height: 1.1;
-  margin: 8px 0;
-}
-
-.modal-card .rows {
-  text-align: left;
-  margin: 12px 0 16px;
-  font-size: 13px;
-  line-height: 1.8;
-}
-
-.modal-card .rows div {
-  display: flex;
-  justify-content: space-between;
-  font-variant-numeric: tabular-nums;
-}
-
-.modal-card .rows span:first-child {
+.modal-card .lead {
+  margin: 8px 0 0;
   color: var(--muted);
+}
+
+.modal-card .big {
+  font-size: 40px;
+  font-weight: 800;
+  font-family: var(--mono);
+  color: var(--ok);
+  margin: 4px 0 8px;
+}
+
+.modal-card .note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  text-align: left;
+}
+
+.modal-card .howto {
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.7;
+  padding-left: 18px;
+  margin: 8px 0 12px;
+}
+
+.modal-card .stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.modal-card textarea {
+  width: 100%;
+  resize: vertical;
+  font: 12px var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.modal-card button.danger {
+  color: var(--bad);
+  border-color: #5a2326;
 }
 
 .modal-card .actions {
   display: flex;
   gap: 8px;
   justify-content: center;
+  margin-top: 12px;
 }
 
 .modal-card .actions button.primary {
@@ -355,7 +524,7 @@ button.active {
 
 @media (min-width: 900px) {
   #toolbar {
-    grid-template-columns: repeat(6, minmax(0, 110px));
+    grid-template-columns: repeat(7, minmax(0, 104px));
     justify-content: center;
   }
 }
@@ -383,5 +552,15 @@ button.active {
 
   .speed button {
     min-width: 36px;
+  }
+
+  #toolbar {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+
+  #toolbar button {
+    font-size: 12px;
+    padding: 4px 0;
   }
 }

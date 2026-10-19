@@ -1,8 +1,9 @@
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import type { History } from '../sim/metrics';
+import { compact } from './format';
 
-/** p99 レイテンシとエラー率の推移を表示する小さなグラフ */
+/** ユーザー数とエラー率の推移を表示する小さなグラフ */
 export class MetricsChart {
   private plot: uPlot | null = null;
   private lastLength = -1;
@@ -12,7 +13,7 @@ export class MetricsChart {
   update(history: History, force = false): void {
     if (!force && history.t.length === this.lastLength) return;
     this.lastLength = history.t.length;
-    const data: uPlot.AlignedData = [history.t, history.p99, history.errorRate.map((r) => r * 100)];
+    const data: uPlot.AlignedData = [history.t, history.users, history.errorRate.map((r) => r * 100)];
     if (!this.plot) this.create(data);
     else this.plot.setData(data);
   }
@@ -38,23 +39,31 @@ export class MetricsChart {
         ...this.size(),
         scales: {
           x: { time: false },
-          ms: { range: (_u, _min, max) => [0, Math.max(200, max * 1.1)] },
-          pct: { range: (_u, _min, max) => [0, Math.max(2, max * 1.2)] },
+          users: { range: (_u, _min, max) => [0, Math.max(100, max * 1.1)] },
+          pct: { range: (_u, _min, max) => [0, Math.max(5, max * 1.2)] },
         },
         series: [
           { label: '秒' },
-          { label: 'p99 (ms)', scale: 'ms', stroke: '#4aa3ff', width: 1.5, value: (_u, v) => (v == null ? '-' : `${v}`) },
+          {
+            label: 'ユーザー',
+            scale: 'users',
+            stroke: '#2ec4b6',
+            width: 1.5,
+            points: { show: false },
+            value: (_u, v) => (v == null ? '-' : compact(v)),
+          },
           {
             label: 'エラー率 (%)',
             scale: 'pct',
             stroke: '#ff4d4f',
             width: 1.5,
+            points: { show: false },
             value: (_u, v) => (v == null ? '-' : v.toFixed(2)),
           },
         ],
         axes: [
           { ...axis },
-          { ...axis, scale: 'ms', size: 44 },
+          { ...axis, scale: 'users', size: 48, values: (_u, vals) => vals.map((v) => compact(v)) },
           { ...axis, scale: 'pct', side: 1, size: 36, grid: { show: false } },
         ],
         cursor: { drag: { x: false, y: false } },

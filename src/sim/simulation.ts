@@ -1,25 +1,31 @@
 import {
+  BASE_REVENUE,
+  CHURN,
+  DAY_AMPLITUDE,
+  DAY_CYCLE_MS,
   GRID_H,
   GRID_W,
+  GROWTH_RATE,
   INTERNET_POS,
   MAX_HOPS,
   MIN_TRANSIT_MS,
+  MIN_USERS,
+  NODE_COST_GROWTH,
   NODE_DEFS,
-  REVENUE,
+  REQ_PER_USER,
   SELL_REFUND_RATE,
-  SLA_TARGET,
-  STAGE_DURATION_MS,
   START_MONEY,
+  START_USERS,
   TICK_MS,
   TIMEOUT_MS,
   TRANSIT_MS_PER_CELL,
   WRITE_SHARE,
-  trafficRps,
   type NodeKindDef,
 } from './config';
+import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades, upgradeCost } from './economy';
 import { Metrics } from './metrics';
 import { mulberry32, poisson } from './rng';
-import type { ErrorReason, NodeKind, Request } from './types';
+import type { ErrorReason, NodeKind, ReqKind, Request, UnlockId, UpgradeId } from './types';
 
 export interface Job {
   readonly req: Request;
@@ -32,6 +38,8 @@ export interface NodeRuntime {
   readonly def: NodeKindDef;
   readonly x: number;
   readonly y: number;
+  /** 購入時に払った額(撤去時の返金に使う) */
+  readonly paid: number;
   queue: Request[];
   busy: Job[];
   /** 接続先ノード ID */
@@ -52,8 +60,6 @@ export interface Transit {
   readonly end: number;
 }
 
-export type SimStatus = 'running' | 'cleared' | 'failed' | 'bankrupt';
-
 export interface ActionResult {
   ok: boolean;
   message?: string;
@@ -63,54 +69,164 @@ export interface ActionResult {
 export interface SimOptions {
   seed?: number;
   startMoney?: number;
-  durationMs?: number;
-  /** 時刻(ms)→ 平均流入量(rps)。テストで差し替えられるようにしている */
+  startUsers?: number;
+  /**
+   * 流入量(rps)を固定の関数で与える。指定するとユーザー数による流量計算と
+   * ユーザーの増減を行わない(主にテスト用)
+   */
   traffic?: (tMs: number) => number;
+  /** 書き込みの割合を固定する(テスト用) */
   writeShare?: number;
+  unlocks?: Iterable<UnlockId>;
+  upgrades?: Partial<Record<UpgradeId, number>>;
 }
 
 /**
  * 描画から独立したシミュレーション本体。
  * 固定刻み(TICK_MS)で進む離散時間モデルで、各ノードは
  * 「同時処理数(workers)・キュー・処理時間」を持つ待ち行列として振る舞う。
+ *
+ * 経済: ユーザー数 × REQ_PER_USER が流量になり、成功したリクエストが収益になる。
+ * ユーザーは市場規模に向かって自然に増え、エラーや遅延が多いと離脱する。
  */
 export class Simulation {
   time = 0;
   money: number;
-  status: SimStatus = 'running';
+  users: number;
+  /** 累計の売上 */
+  lifetimeEarned = 0;
   /** ノードや接続が変わるたびに増える。描画側の再構築判定に使う */
   layoutVersion = 0;
-  readonly startMoney: number;
-  readonly durationMs: number;
+  /** 投資(解放・強化)のたびに増える。UI の再構築判定に使う */
+  purchaseVersion = 0;
   readonly nodes = new Map<number, NodeRuntime>();
   transits: Transit[] = [];
   readonly metrics = new Metrics();
   readonly internetId: number;
+  readonly unlocks: Set<UnlockId>;
+  readonly upgrades: Record<UpgradeId, number>;
 
   private readonly rng: () => number;
-  private readonly traffic: (tMs: number) => number;
-  private readonly writeShare: number;
+  private readonly fixedTraffic: ((tMs: number) => number) | null;
+  private readonly fixedWriteShare: number | null;
   private nextNodeId = 1;
   private nextReqId = 1;
   private pendingMs = 0;
 
   constructor(opts: SimOptions = {}) {
     this.rng = mulberry32(opts.seed ?? 1);
-    this.startMoney = opts.startMoney ?? START_MONEY;
-    this.money = this.startMoney;
-    this.durationMs = opts.durationMs ?? STAGE_DURATION_MS;
-    this.traffic = opts.traffic ?? trafficRps;
-    this.writeShare = opts.writeShare ?? WRITE_SHARE;
-    this.internetId = this.createNode('internet', INTERNET_POS.x, INTERNET_POS.y).id;
+    this.money = opts.startMoney ?? START_MONEY;
+    this.users = opts.startUsers ?? START_USERS;
+    this.fixedTraffic = opts.traffic ?? null;
+    this.fixedWriteShare = opts.writeShare ?? null;
+    this.unlocks = new Set(opts.unlocks ?? []);
+    this.upgrades = { ...emptyUpgrades(), ...opts.upgrades };
+    this.internetId = this.createNode('internet', INTERNET_POS.x, INTERNET_POS.y, 0).id;
   }
 
-  // ---------------------------------------------------------------- 参照系
+  // ---------------------------------------------------------------- 経済の参照
+
+  /** 潜在ユーザー数。ユーザーはここに向かって増える */
+  get marketSize(): number {
+    return UPGRADE_BY_ID.marketing.effect(this.upgrades.marketing);
+  }
+
+  get revenueMultiplier(): number {
+    return UPGRADE_BY_ID.monetize.effect(this.upgrades.monetize);
+  }
+
+  /** 書き込みの割合。会員機能を解放し、DB を 1 台以上置いてから流れ始める */
+  get writeShare(): number {
+    if (this.fixedWriteShare !== null) return this.fixedWriteShare;
+    return this.unlocks.has('writes') && this.countOf('db') > 0 ? WRITE_SHARE : 0;
+  }
 
   get upkeepPerSec(): number {
     let sum = 0;
     for (const n of this.nodes.values()) sum += n.def.upkeepPerSec;
     return sum;
   }
+
+  /** 直近の収支(売上 − 維持費)/秒 */
+  get incomePerSec(): number {
+    return this.metrics.rolling.revenuePerSec - this.upkeepPerSec;
+  }
+
+  /** 時刻 t における平均流入量(rps) */
+  trafficAt(tMs: number): number {
+    if (this.fixedTraffic) return this.fixedTraffic(tMs);
+    const wave = 1 + DAY_AMPLITUDE * Math.sin((2 * Math.PI * tMs) / DAY_CYCLE_MS);
+    return this.users * REQ_PER_USER * wave;
+  }
+
+  revenueOf(kind: ReqKind): number {
+    return BASE_REVENUE[kind] * this.revenueMultiplier;
+  }
+
+  /** 強化を反映した処理時間(ms) */
+  serviceMs(node: NodeRuntime, kind: ReqKind): number {
+    const base = node.def.serviceMs[kind];
+    if (node.kind === 'web') return base / UPGRADE_BY_ID.webPerf.effect(this.upgrades.webPerf);
+    if (node.kind === 'db') return base / UPGRADE_BY_ID.dbPerf.effect(this.upgrades.dbPerf);
+    return base;
+  }
+
+  countOf(kind: NodeKind): number {
+    let n = 0;
+    for (const node of this.nodes.values()) if (node.kind === kind) n++;
+    return n;
+  }
+
+  /** 次の 1 台の価格 */
+  nodeCost(kind: NodeKind): number {
+    return Math.round(NODE_DEFS[kind].cost * NODE_COST_GROWTH ** this.countOf(kind));
+  }
+
+  isKindUnlocked(kind: NodeKind): boolean {
+    const req = NODE_DEFS[kind].requires;
+    return !req || this.unlocks.has(req);
+  }
+
+  // ---------------------------------------------------------------- 投資
+
+  upgradeCost(id: UpgradeId): number {
+    return upgradeCost(UPGRADE_BY_ID[id], this.upgrades[id]);
+  }
+
+  canBuyUpgrade(id: UpgradeId): string | null {
+    const def = UPGRADE_BY_ID[id];
+    if (def.requires && !this.unlocks.has(def.requires)) return `「${UNLOCK_BY_ID[def.requires].name}」が必要です`;
+    if (this.money < this.upgradeCost(id)) return '資金が足りません';
+    return null;
+  }
+
+  buyUpgrade(id: UpgradeId): ActionResult {
+    const err = this.canBuyUpgrade(id);
+    if (err) return { ok: false, message: err };
+    this.money -= this.upgradeCost(id);
+    this.upgrades[id]++;
+    this.purchaseVersion++;
+    return { ok: true, message: `${UPGRADE_BY_ID[id].name} Lv${this.upgrades[id]}` };
+  }
+
+  canUnlock(id: UnlockId): string | null {
+    const def = UNLOCK_BY_ID[id];
+    if (this.unlocks.has(id)) return '導入済みです';
+    if (def.requires && !this.unlocks.has(def.requires)) return `「${UNLOCK_BY_ID[def.requires].name}」が必要です`;
+    if (this.money < def.cost) return '資金が足りません';
+    return null;
+  }
+
+  unlock(id: UnlockId): ActionResult {
+    const err = this.canUnlock(id);
+    if (err) return { ok: false, message: err };
+    this.money -= UNLOCK_BY_ID[id].cost;
+    this.unlocks.add(id);
+    this.purchaseVersion++;
+    return { ok: true, message: `${UNLOCK_BY_ID[id].name}を導入しました` };
+  }
+
+  // ---------------------------------------------------------------- 盤面の参照
 
   nodeAt(x: number, y: number): NodeRuntime | undefined {
     for (const n of this.nodes.values()) if (n.x === x && n.y === y) return n;
@@ -134,18 +250,28 @@ export class Simulation {
     return null;
   }
 
-  // ---------------------------------------------------------------- 操作系
+  // ---------------------------------------------------------------- 盤面の操作
 
-  addNode(kind: NodeKind, x: number, y: number): ActionResult {
+  /**
+   * ノードを配置する。free を指定するとお金を払わない(セーブからの復元用)。
+   * paid は撤去時の返金計算に使う、購入時に払った額。
+   */
+  addNode(kind: NodeKind, x: number, y: number, opts: { free?: boolean; paid?: number } = {}): ActionResult {
     const def = NODE_DEFS[kind];
     if (!def.placeable) return { ok: false, message: `${def.name}は配置できません` };
+    if (!this.isKindUnlocked(kind) && !opts.free) {
+      return { ok: false, message: `投資メニューで「${UNLOCK_BY_ID[def.requires!].name}」を解放してください` };
+    }
     if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) {
       return { ok: false, message: '盤面の外です' };
     }
     if (this.nodeAt(x, y)) return { ok: false, message: 'そのマスは使用中です' };
-    if (this.money < def.cost) return { ok: false, message: `予算が足りません($${def.cost} 必要)` };
-    this.money -= def.cost;
-    const node = this.createNode(kind, x, y);
+    const cost = this.nodeCost(kind);
+    if (!opts.free) {
+      if (this.money < cost) return { ok: false, message: `資金が足りません($${cost} 必要)` };
+      this.money -= cost;
+    }
+    const node = this.createNode(kind, x, y, opts.paid ?? cost);
     return { ok: true, id: node.id };
   }
 
@@ -167,7 +293,7 @@ export class Simulation {
 
     this.nodes.delete(id);
     for (const n of this.nodes.values()) n.out = n.out.filter((o) => o !== id);
-    const refund = Math.floor(node.def.cost * SELL_REFUND_RATE);
+    const refund = Math.floor(node.paid * SELL_REFUND_RATE);
     this.money += refund;
     this.layoutVersion++;
     return { ok: true, message: `${node.def.name}を撤去しました(+$${refund})` };
@@ -202,9 +328,8 @@ export class Simulation {
 
   /** 経過時間 ms 分だけ進める(端数は次回へ持ち越し) */
   step(ms: number): void {
-    if (this.status !== 'running') return;
     this.pendingMs += ms;
-    while (this.pendingMs >= TICK_MS && this.status === 'running') {
+    while (this.pendingMs >= TICK_MS) {
       this.pendingMs -= TICK_MS;
       this.tick();
     }
@@ -214,13 +339,14 @@ export class Simulation {
     const now = this.time + TICK_MS;
 
     // 1. 流入
-    const lambda = (this.traffic(now) * TICK_MS) / 1000;
+    const lambda = (this.trafficAt(now) * TICK_MS) / 1000;
     const count = poisson(lambda, this.rng);
     const internet = this.nodes.get(this.internetId)!;
+    const writeShare = this.writeShare;
     for (let i = 0; i < count; i++) {
       const req: Request = {
         id: this.nextReqId++,
-        kind: this.rng() < this.writeShare ? 'write' : 'static',
+        kind: this.rng() < writeShare ? 'write' : 'static',
         createdAt: now,
         hops: 0,
       };
@@ -242,18 +368,24 @@ export class Simulation {
       if (node.kind !== 'internet') this.process(node, now);
     }
 
-    // 4. 維持費
-    this.money -= (this.upkeepPerSec * TICK_MS) / 1000;
+    // 4. 維持費とユーザーの増減
+    const dt = TICK_MS / 1000;
+    this.money -= this.upkeepPerSec * dt;
+    if (!this.fixedTraffic) this.updateUsers(dt);
 
     this.time = now;
-    this.metrics.advance(now);
+    this.metrics.advance(now, this.users);
+  }
 
-    // 5. 終了判定
-    if (this.money < 0) {
-      this.status = 'bankrupt';
-    } else if (this.time >= this.durationMs) {
-      this.status = this.metrics.availability >= SLA_TARGET ? 'cleared' : 'failed';
-    }
+  /** ロジスティック成長 − 品質による離脱 */
+  private updateUsers(dt: number): void {
+    const u = this.users;
+    const growth = GROWTH_RATE * u * (1 - u / this.marketSize);
+    const r = this.metrics.rolling;
+    let churnRate = 0;
+    if (r.errorRate > CHURN.errorThreshold) churnRate += CHURN.errorFactor * (r.errorRate - CHURN.errorThreshold);
+    if (r.p99 > CHURN.slowP99Ms) churnRate += CHURN.slowRate;
+    this.users = Math.max(MIN_USERS, u + (growth - churnRate * u) * dt);
   }
 
   private process(node: NodeRuntime, now: number): void {
@@ -271,7 +403,7 @@ export class Simulation {
         this.fail(req, 'timeout', node, now);
         continue;
       }
-      node.busy.push({ req, doneAt: now + node.def.serviceMs[req.kind] });
+      node.busy.push({ req, doneAt: now + this.serviceMs(node, req.kind) });
     }
   }
 
@@ -322,8 +454,11 @@ export class Simulation {
       this.fail(req, 'timeout', node, t);
       return;
     }
+    const revenue = this.revenueOf(req.kind);
     this.metrics.recordSuccess(req.kind, latency);
-    this.money += REVENUE[req.kind];
+    this.metrics.recordRevenue(revenue);
+    this.money += revenue;
+    this.lifetimeEarned += revenue;
   }
 
   private fail(_req: Request, reason: ErrorReason, node: NodeRuntime | undefined, t: number): void {
@@ -334,13 +469,14 @@ export class Simulation {
     }
   }
 
-  private createNode(kind: NodeKind, x: number, y: number): NodeRuntime {
+  private createNode(kind: NodeKind, x: number, y: number, paid: number): NodeRuntime {
     const node: NodeRuntime = {
       id: kind === 'internet' ? 0 : this.nextNodeId++,
       kind,
       def: NODE_DEFS[kind],
       x,
       y,
+      paid,
       queue: [],
       busy: [],
       out: [],

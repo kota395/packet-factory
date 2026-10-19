@@ -1,25 +1,38 @@
 import './style.css';
 import { BoardRenderer } from './render/board';
-import { NODE_DEFS, PLACEABLE_KINDS, REVENUE, SELL_REFUND_RATE, SLA_TARGET } from './sim/config';
-import { applyLayout, decodeLayout, encodeLayout, exportLayout, parseLayout, type SavedLayout } from './sim/layout';
-import { Simulation } from './sim/simulation';
+import { BASE_REVENUE, NODE_DEFS, OFFLINE, PLACEABLE_KINDS, SELL_REFUND_RATE } from './sim/config';
+import { UNLOCK_BY_ID } from './sim/economy';
+import {
+  createSave,
+  decodeSave,
+  encodeSave,
+  loadSave,
+  newGame,
+  offlineEarnings,
+  parseSave,
+  type SaveData,
+} from './sim/save';
+import type { Simulation } from './sim/simulation';
 import type { NodeKind } from './sim/types';
 import { MetricsChart } from './ui/chart';
+import { compact, duration, money, rate } from './ui/format';
+import { InvestPanel } from './ui/invest';
 
 type Tool = 'select' | NodeKind | 'connect' | 'delete';
 
-const fmt = new Intl.NumberFormat('ja-JP');
-const STORAGE_KEY = 'packet-factory:layout:v1';
-const HASH_PREFIX = '#l=';
+const SAVE_KEY = 'packet-factory:save:v2';
+const AUTOSAVE_MS = 5000;
+const CHURN_WARN_INTERVAL_MS = 20_000;
 
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const ui = {
   money: el('s-money'),
-  clock: el('s-clock'),
+  income: el('s-income'),
+  users: el('s-users'),
   rps: el('s-rps'),
+  err: el('s-err'),
   p99: el('s-p99'),
-  avail: el('s-avail'),
   board: el('board'),
   info: el('info'),
   toast: el('toast'),
@@ -32,54 +45,67 @@ const ui = {
 };
 
 const state = {
-  sim: new Simulation({ seed: newSeed() }),
-  tool: 'web' as Tool,
+  sim: newGame(newSeed()),
+  tool: 'select' as Tool,
   selectedId: null as number | null,
   connectFrom: null as number | null,
-  speed: 0,
-  started: false,
-  ended: false,
-  savedVersion: -1,
+  speed: 1,
+  lastChurnWarn: 0,
 };
 
 const renderer = new BoardRenderer();
 const chart = new MetricsChart(ui.chart);
+const invest = new InvestPanel(
+  el('invest'),
+  el('invest-list'),
+  el('invest-money'),
+  () => state.sim,
+  (message, ok) => {
+    if (message) toast(message);
+    if (ok) {
+      saveGame();
+      updateHud();
+    }
+  },
+);
 
 // ------------------------------------------------------------------ 起動
 
+buildToolbar();
 await renderer.init(ui.board);
 renderer.onCellTap = handleCellTap;
-buildToolbar();
 bindControls();
-restoreInitialLayout();
-setTool('web');
-setSpeed(0);
+const restored = restoreGame();
+setTool('select');
+setSpeed(1);
 updateHud();
+if (!restored) showWelcome();
 
 let hudTimer = 0;
+let saveTimer = 0;
 renderer.app.ticker.add((ticker) => {
   const sim = state.sim;
-  if (state.speed > 0 && sim.status === 'running') sim.step(Math.min(ticker.deltaMS, 100) * state.speed);
+  if (state.speed > 0) sim.step(Math.min(ticker.deltaMS, 100) * state.speed);
 
   renderer.draw(sim, { selectedId: state.selectedId, connectFrom: state.connectFrom });
-
-  if (sim.layoutVersion !== state.savedVersion) persistLayout();
 
   hudTimer += ticker.deltaMS;
   if (hudTimer >= 200) {
     hudTimer = 0;
     updateHud();
   }
-
-  if (sim.status !== 'running' && !state.ended) {
-    state.ended = true;
-    setSpeed(0);
-    updateHud();
-    showResult();
+  saveTimer += ticker.deltaMS;
+  if (saveTimer >= AUTOSAVE_MS) {
+    saveTimer = 0;
+    saveGame();
   }
 });
 
 window.addEventListener('resize', () => chart.resize());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') saveGame();
+});
+window.addEventListener('pagehide', saveGame);
 
 // ------------------------------------------------------------------ 盤面操作
 
@@ -128,23 +154,25 @@ function handleCellTap(x: number, y: number): void {
   }
   updateInfo();
   updateHint();
+  updateToolbar();
 }
 
 // ------------------------------------------------------------------ ツールバー
 
 function buildToolbar(): void {
-  const items: { tool: Tool; html: string }[] = [
+  const items: { tool: Tool | 'invest'; html: string }[] = [
     { tool: 'select', html: '選択' },
     ...PLACEABLE_KINDS.map((k) => {
       const d = NODE_DEFS[k];
       const hex = `#${d.color.toString(16).padStart(6, '0')}`;
       return {
         tool: k as Tool,
-        html: `<span><span class="swatch" style="background:${hex}"></span>${d.label}</span><small>$${d.cost}</small>`,
+        html: `<span><span class="swatch" style="background:${hex}"></span>${d.label}</span><small data-cost="${k}"></small>`,
       };
     }),
     { tool: 'connect', html: '接続' },
     { tool: 'delete', html: '撤去' },
+    { tool: 'invest', html: '投資<span class="badge" hidden></span>' },
   ];
   ui.toolbar.innerHTML = '';
   for (const item of items) {
@@ -152,7 +180,15 @@ function buildToolbar(): void {
     b.type = 'button';
     b.dataset.tool = item.tool;
     b.innerHTML = item.html;
-    b.addEventListener('click', () => setTool(item.tool));
+    if (item.tool === 'invest') {
+      b.classList.add('invest');
+      b.addEventListener('click', () => {
+        invest.toggle();
+        updateToolbar();
+      });
+    } else {
+      b.addEventListener('click', () => setTool(item.tool as Tool));
+    }
     ui.toolbar.appendChild(b);
   }
 }
@@ -160,17 +196,34 @@ function buildToolbar(): void {
 function setTool(tool: Tool): void {
   state.tool = tool;
   state.connectFrom = null;
-  for (const b of ui.toolbar.querySelectorAll<HTMLButtonElement>('button')) {
-    b.classList.toggle('active', b.dataset.tool === tool);
-  }
+  if (invest.isOpen) invest.toggle(false);
+  updateToolbar();
   updateHint();
 }
 
+function updateToolbar(): void {
+  const sim = state.sim;
+  for (const b of ui.toolbar.querySelectorAll<HTMLButtonElement>('button')) {
+    const t = b.dataset.tool!;
+    b.classList.toggle('active', t === 'invest' ? invest.isOpen : t === state.tool && !invest.isOpen);
+  }
+  for (const k of PLACEABLE_KINDS) {
+    const label = ui.toolbar.querySelector<HTMLElement>(`[data-cost="${k}"]`);
+    if (!label) continue;
+    const unlocked = sim.isKindUnlocked(k);
+    label.textContent = unlocked ? money(sim.nodeCost(k)) : '🔒';
+    label.classList.toggle('short', unlocked && sim.money < sim.nodeCost(k));
+  }
+  const badge = ui.toolbar.querySelector<HTMLElement>('.badge');
+  if (badge) badge.hidden = !invest.anyAffordable(sim);
+}
+
 function updateHint(): void {
+  const sim = state.sim;
   let text: string;
   switch (state.tool) {
     case 'select':
-      text = 'ノードをタップすると状態を確認できます。';
+      text = 'ノードをタップすると状態を確認できます。詰まってきたら増設、余裕があれば投資で伸ばしましょう。';
       break;
     case 'connect':
       text =
@@ -179,14 +232,17 @@ function updateHint(): void {
           : '接続先をタップ(続けて複数つなげます)。同じ線をもう一度つなぐと解除、空きマスで終了。';
       break;
     case 'delete':
-      text = `撤去するノードをタップ(費用の ${SELL_REFUND_RATE * 100}% を返金)。`;
+      text = `撤去するノードをタップ(購入額の ${SELL_REFUND_RATE * 100}% を返金)。`;
       break;
     default: {
       const d = NODE_DEFS[state.tool];
-      text = `空きマスをタップして${d.name}を配置($${d.cost}、維持費 $${d.upkeepPerSec}/秒)。${d.description}`;
+      if (!sim.isKindUnlocked(state.tool)) {
+        text = `🔒 ${d.name}は投資メニューの「${UNLOCK_BY_ID[d.requires!].name}」で解放できます。`;
+      } else {
+        text = `空きマスをタップして${d.name}を配置(${money(sim.nodeCost(state.tool))}、維持費 $${d.upkeepPerSec}/秒)。${d.description}`;
+      }
     }
   }
-  if (!state.started) text = `▶ で開始。${text}`;
   ui.hint.textContent = text;
 }
 
@@ -194,10 +250,7 @@ function updateHint(): void {
 
 function bindControls(): void {
   for (const b of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
-    b.addEventListener('click', () => {
-      if (state.ended) return;
-      setSpeed(Number(b.dataset.speed));
-    });
+    b.addEventListener('click', () => setSpeed(Number(b.dataset.speed)));
   }
 
   el('btn-chart').addEventListener('click', (e) => {
@@ -208,38 +261,44 @@ function bindControls(): void {
     chart.resize();
   });
 
-  el('btn-share').addEventListener('click', shareLayout);
-
-  el('btn-reset').addEventListener('click', () => {
-    if (confirm('構成を消して最初からやり直しますか?')) newGame(null);
+  el('btn-save').addEventListener('click', showSaveMenu);
+  el('invest-close').addEventListener('click', () => {
+    invest.toggle(false);
+    updateToolbar();
   });
 }
 
 function setSpeed(speed: number): void {
   state.speed = speed;
-  if (speed > 0) state.started = true;
   for (const b of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
     b.classList.toggle('active', Number(b.dataset.speed) === speed);
   }
-  updateHint();
 }
 
 function updateHud(): void {
   const sim = state.sim;
   const r = sim.metrics.rolling;
-  const avail = sim.metrics.availability;
-  const hasTraffic = sim.metrics.totalSuccess + sim.metrics.totalErrors > 0;
+  const income = sim.incomePerSec;
 
-  ui.money.textContent = `$${fmt.format(Math.floor(sim.money))}`;
-  ui.money.className = `v ${sim.money < 100 ? 'bad' : ''}`;
-  ui.clock.textContent = formatClock(sim.time, sim.durationMs);
-  ui.rps.textContent = `${Math.round(r.rps)}`;
-  ui.p99.textContent = hasTraffic ? `${r.p99}ms` : '-';
-  ui.p99.className = `v ${r.p99 > 800 ? 'bad' : r.p99 > 400 ? 'warn' : ''}`;
-  ui.avail.textContent = hasTraffic ? `${(avail * 100).toFixed(2)}%` : '-';
-  ui.avail.className = `v ${!hasTraffic ? '' : avail >= SLA_TARGET ? 'ok' : 'bad'}`;
+  ui.money.textContent = money(sim.money);
+  ui.money.className = `v ${sim.money < 0 ? 'bad' : ''}`;
+  ui.income.textContent = rate(income);
+  ui.income.className = `v ${income < 0 ? 'bad' : 'ok'}`;
+  ui.users.textContent = `${compact(sim.users)} / ${compact(sim.marketSize)}`;
+  ui.rps.textContent = compact(r.rps);
+  ui.err.textContent = `${(r.errorRate * 100).toFixed(1)}%`;
+  ui.err.className = `v ${r.errorRate > 0.05 ? 'bad' : r.errorRate > 0.01 ? 'warn' : ''}`;
+  ui.p99.textContent = r.rps > 0 ? `${r.p99}ms` : '-';
+  ui.p99.className = `v ${r.p99 > 1000 ? 'bad' : r.p99 > 500 ? 'warn' : ''}`;
+
+  if (r.errorRate > 0.05 && performance.now() - state.lastChurnWarn > CHURN_WARN_INTERVAL_MS) {
+    state.lastChurnWarn = performance.now();
+    toast('エラーが多く、ユーザーが離脱しています');
+  }
 
   if (!ui.chartPanel.hidden) chart.update(sim.metrics.history);
+  invest.update();
+  updateToolbar();
   updateInfo();
 }
 
@@ -250,22 +309,24 @@ function updateInfo(): void {
     delete ui.info.dataset.key;
     return;
   }
+  const sim = state.sim;
   const d = node.def;
   const rows: [string, string][] = [];
   if (node.kind !== 'internet') {
     rows.push(['処理中', `${node.busy.length} / ${d.workers}`]);
     rows.push(['キュー', `${node.queue.length} / ${d.queueMax}`]);
-    rows.push(['処理数', fmt.format(node.processed)]);
+    rows.push(['処理数', compact(node.processed)]);
     rows.push(['維持費', `$${d.upkeepPerSec}/秒`]);
+  } else {
+    rows.push(['流入', `${compact(sim.trafficAt(sim.time), 1)} rps`]);
   }
-  rows.push(['エラー', fmt.format(node.errors)]);
-  const outs = node.out.map((id) => state.sim.nodes.get(id)?.def.label ?? '?');
+  rows.push(['エラー', compact(node.errors)]);
+  const outs = node.out.map((id) => sim.nodes.get(id)?.def.label ?? '?');
   rows.push(['接続先', outs.length ? summarize(outs) : 'なし']);
-
   const rowsHtml = rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
 
   // ボタンを作り直すとタップを取りこぼすので、選択が変わったときだけ全体を組み立てる
-  const key = `${node.id}@${state.sim.layoutVersion}`;
+  const key = `${node.id}@${sim.layoutVersion}`;
   if (ui.info.dataset.key === key) {
     ui.info.querySelector('.rows-box')!.innerHTML = rowsHtml;
     return;
@@ -276,7 +337,7 @@ function updateInfo(): void {
     <div class="desc">${d.description}</div>
     <div class="rows-box">${rowsHtml}</div>
     <div class="actions">
-      ${node.kind === 'internet' ? '' : `<button type="button" id="info-remove">撤去 +$${Math.floor(d.cost * SELL_REFUND_RATE)}</button>`}
+      ${node.kind === 'internet' ? '' : `<button type="button" id="info-remove">撤去 +${money(Math.floor(node.paid * SELL_REFUND_RATE))}</button>`}
       <button type="button" id="info-close">閉じる</button>
     </div>`;
   ui.info.hidden = false;
@@ -293,131 +354,121 @@ function updateInfo(): void {
   });
 }
 
-// ------------------------------------------------------------------ ゲーム進行
+// ------------------------------------------------------------------ セーブ
 
-function newGame(layout: SavedLayout | null): void {
-  state.sim = new Simulation({ seed: newSeed() });
-  state.selectedId = null;
-  state.connectFrom = null;
-  state.ended = false;
-  state.started = false;
-  if (layout) {
-    const r = applyLayout(state.sim, layout);
-    if (r.skipped) toast(`予算不足などで ${r.skipped} 個のノードを復元できませんでした`);
-  }
-  chart.reset();
-  if (!ui.chartPanel.hidden) chart.update(state.sim.metrics.history, true);
-  ui.modal.hidden = true;
-  setSpeed(0);
-  updateHud();
-}
-
-function showResult(): void {
-  const sim = state.sim;
-  const m = sim.metrics;
-  const avail = m.availability;
-  const p99 = m.overall.percentile(0.99);
-  const profit = sim.money - sim.startMoney;
-
-  let title: string;
-  let rank: string;
-  let color: string;
-  if (sim.status === 'bankrupt') {
-    title = '予算が尽きました';
-    rank = '破産';
-    color = 'var(--bad)';
-  } else if (sim.status === 'failed') {
-    title = `SLA ${SLA_TARGET * 100}% 未達`;
-    rank = 'C';
-    color = 'var(--bad)';
-  } else {
-    title = 'ステージクリア';
-    rank = avail >= 0.999 && p99 <= 400 ? 'S' : avail >= 0.995 ? 'A' : 'B';
-    color = rank === 'S' ? 'var(--warn)' : 'var(--ok)';
-  }
-
-  ui.modalCard.innerHTML = `
-    <h2>${title}</h2>
-    <div class="rank" style="color:${color}">${rank}</div>
-    <div class="rows">
-      <div><span>可用性</span><span>${(avail * 100).toFixed(3)}%</span></div>
-      <div><span>p99 レイテンシ</span><span>${p99}ms</span></div>
-      <div><span>成功</span><span>${fmt.format(m.totalSuccess)}</span></div>
-      <div><span>失敗(溢れ / 時間切れ / 行き先なし)</span><span>${m.errorsByReason.drop} / ${m.errorsByReason.timeout} / ${m.errorsByReason['no-route']}</span></div>
-      <div><span>収支</span><span>${profit >= 0 ? '+' : ''}$${fmt.format(Math.round(profit))}</span></div>
-    </div>
-    <div class="actions">
-      <button type="button" class="primary" id="m-retry">同じ構成で再挑戦</button>
-      <button type="button" id="m-new">最初から</button>
-    </div>`;
-  ui.modal.hidden = false;
-  el('m-retry').addEventListener('click', () => newGame(exportLayout(sim)));
-  el('m-new').addEventListener('click', () => newGame(null));
-}
-
-// ------------------------------------------------------------------ 保存・共有
-
-function restoreInitialLayout(): void {
-  let layout: SavedLayout | null = null;
-  if (location.hash.startsWith(HASH_PREFIX)) {
-    layout = decodeLayout(location.hash.slice(HASH_PREFIX.length));
-    if (!layout) toast('共有リンクの構成を読み込めませんでした');
-    history.replaceState(null, '', location.pathname + location.search);
-  } else {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) layout = parseLayout(JSON.parse(raw));
-    } catch {
-      layout = null;
-    }
-  }
-  if (layout) newGame(layout);
-  showWelcome(layout !== null);
-}
-
-function persistLayout(): void {
-  state.savedVersion = state.sim.layoutVersion;
+function saveGame(): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(exportLayout(state.sim)));
+    localStorage.setItem(SAVE_KEY, JSON.stringify(createSave(state.sim)));
   } catch {
     // 保存できない環境(プライベートブラウズなど)では何もしない
   }
 }
 
-async function shareLayout(): Promise<void> {
-  const url = `${location.origin}${location.pathname}${HASH_PREFIX}${encodeLayout(exportLayout(state.sim))}`;
+/** 保存データがあれば復元し、放置収入を加える。復元できたら true */
+function restoreGame(): boolean {
+  let save: SaveData | null = null;
   try {
-    await navigator.clipboard.writeText(url);
-    toast('構成の共有リンクをコピーしました');
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (raw) save = parseSave(JSON.parse(raw));
   } catch {
-    prompt('この URL で構成を共有できます', url);
+    save = null;
   }
+  if (!save) return false;
+  switchTo(loadSave(save, newSeed()));
+  const { elapsedMs, gained } = offlineEarnings(save, Date.now());
+  if (gained > 0) {
+    state.sim.money += gained;
+    showModal(`
+      <h2>おかえりなさい</h2>
+      <p class="lead">離れていた ${duration(elapsedMs)} の間に</p>
+      <div class="big">+${money(gained)}</div>
+      <p class="note">放置中は直前の収支の ${OFFLINE.efficiency * 100}% を、最大 ${OFFLINE.maxMs / 3_600_000} 時間分まで受け取れます。</p>
+      <div class="actions"><button type="button" class="primary" data-close>受け取る</button></div>`);
+  }
+  return true;
 }
 
-function showWelcome(restored: boolean): void {
-  if (restored) return;
-  ui.modalCard.innerHTML = `
-    <h2>packet-factory</h2>
-    <p style="color:var(--muted);font-size:13px;line-height:1.7;text-align:left">
-      インターネットから流れ込むリクエストを捌くインフラを組み立てましょう。
-      ゲーム内の 24 時間、可用性 ${SLA_TARGET * 100}% 以上を保てばクリアです。
-    </p>
-    <div class="legend">
-      <span><span class="dot" style="background:var(--accent)"></span>静的(WEB で完了, $${REVENUE.static})</span>
-      <span><span class="dot" style="background:var(--write)"></span>書き込み(DB まで, $${REVENUE.write})</span>
+function switchTo(sim: Simulation): void {
+  state.sim = sim;
+  state.selectedId = null;
+  state.connectFrom = null;
+  chart.reset();
+  if (!ui.chartPanel.hidden) chart.update(sim.metrics.history, true);
+  updateHud();
+  updateHint();
+}
+
+function showSaveMenu(): void {
+  showModal(`
+    <h2>セーブ</h2>
+    <p class="note">進行状況はこのブラウザに自動保存されています。別の端末へ移すときは、セーブコードをコピーして移動先で読み込んでください。</p>
+    <div class="stack">
+      <button type="button" id="sv-export">セーブコードをコピー</button>
+      <textarea id="sv-code" rows="3" placeholder="ここにセーブコードを貼り付け"></textarea>
+      <button type="button" id="sv-import">貼り付けたコードを読み込む</button>
+      <button type="button" id="sv-reset" class="danger">最初からやり直す</button>
     </div>
-    <p style="color:var(--muted);font-size:12px;line-height:1.7;text-align:left">
-      例: NET → LB → WEB → DB とつなぐ。流量は時間とともに増えるので、
-      詰まり始めたら WEB や DB を増設してください。
-    </p>
-    <div class="actions"><button type="button" class="primary" id="m-start">はじめる</button></div>`;
-  ui.modal.hidden = false;
-  el('m-start').addEventListener('click', () => {
-    ui.modal.hidden = true;
+    <div class="actions"><button type="button" data-close>閉じる</button></div>`);
+
+  el('sv-export').addEventListener('click', async () => {
+    const code = encodeSave(createSave(state.sim));
+    try {
+      await navigator.clipboard.writeText(code);
+      toast('セーブコードをコピーしました');
+    } catch {
+      el<HTMLTextAreaElement>('sv-code').value = code;
+      toast('コードを下の欄に表示しました。手動でコピーしてください');
+    }
+  });
+  el('sv-import').addEventListener('click', () => {
+    const save = decodeSave(el<HTMLTextAreaElement>('sv-code').value);
+    if (!save) {
+      toast('セーブコードを読み込めませんでした');
+      return;
+    }
+    if (!confirm('今の進行状況を上書きして読み込みますか?')) return;
+    switchTo(loadSave(save, newSeed()));
+    saveGame();
+    closeModal();
+    toast('セーブを読み込みました');
+  });
+  el('sv-reset').addEventListener('click', () => {
+    if (!confirm('すべての進行状況を消して最初からやり直しますか?')) return;
+    switchTo(newGame(newSeed()));
+    saveGame();
+    closeModal();
   });
 }
 
+function showWelcome(): void {
+  showModal(`
+    <h2>packet-factory</h2>
+    <p class="note">小さな Web サービスを運営して、データセンターを育てましょう。</p>
+    <ul class="howto">
+      <li>ユーザーが増えるほどリクエストが増え、捌いた分だけ収入になります</li>
+      <li>稼いだお金を<b>投資</b>して、広告で市場を広げたり、単価や性能を上げたりできます</li>
+      <li>捌ききれずエラーが増えると、ユーザーが離れていきます。詰まったら WEB を増設しましょう</li>
+      <li>閉じている間も収入の一部が貯まります</li>
+    </ul>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--accent)"></span>静的 $${BASE_REVENUE.static}</span>
+      <span><span class="dot" style="background:var(--write)"></span>書き込み $${BASE_REVENUE.write}(会員機能で解放)</span>
+    </div>
+    <div class="actions"><button type="button" class="primary" data-close>はじめる</button></div>`);
+}
+
 // ------------------------------------------------------------------ ユーティリティ
+
+function showModal(html: string): void {
+  ui.modalCard.innerHTML = html;
+  ui.modal.hidden = false;
+  for (const b of ui.modalCard.querySelectorAll('[data-close]')) b.addEventListener('click', closeModal);
+}
+
+function closeModal(): void {
+  ui.modal.hidden = true;
+  ui.modalCard.innerHTML = '';
+}
 
 let toastTimer = 0;
 function toast(message: string): void {
@@ -425,11 +476,6 @@ function toast(message: string): void {
   ui.toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => ui.toast.classList.remove('show'), 2200);
-}
-
-function formatClock(timeMs: number, durationMs: number): string {
-  const minutes = Math.min(24 * 60, Math.floor((timeMs / durationMs) * 24 * 60));
-  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 }
 
 function summarize(labels: string[]): string {

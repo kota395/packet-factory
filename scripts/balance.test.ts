@@ -1,0 +1,109 @@
+/**
+ * バランス確認用のボット。貪欲に投資しながら遊び、進行の速さをログに出す。
+ *   npm run balance               # 60 分ぶん
+ *   BOT_MIN=20 npm run balance    # 時間を指定
+ * 調整値(src/sim/config.ts, economy.ts)を変えたら、ログの節目の時刻を見比べる。
+ */
+import { it } from 'vitest';
+import { UNLOCK_BY_ID } from '../src/sim/economy';
+import { newGame } from '../src/sim/save';
+import type { NodeRuntime, Simulation } from '../src/sim/simulation';
+
+// Node の型定義を入れずに環境変数だけ読む
+declare const process: { env: Record<string, string | undefined> };
+
+const MINUTES = Number(process.env.BOT_MIN ?? 60);
+const SEED = Number(process.env.BOT_SEED ?? 11);
+
+const ofKind = (s: Simulation, kind: string) => [...s.nodes.values()].filter((n) => n.kind === kind);
+
+/** 処理中 + キューの埋まり具合の平均(0〜2) */
+const load = (ns: NodeRuntime[]) =>
+  ns.length ? ns.reduce((a, n) => a + n.busy.length / n.def.workers + n.queue.length / n.def.queueMax, 0) / ns.length : 0;
+
+/** col 列目以降で空いているマス(中央の行から優先) */
+function freeCell(s: Simulation, col: number): [number, number] | null {
+  for (let x = col; x < 16; x++) for (const y of [4, 3, 5, 2, 6, 1, 7, 0, 8]) if (!s.nodeAt(x, y)) return [x, y];
+  return null;
+}
+
+it(`balance bot (${MINUTES} min)`, () => {
+  const s = newGame(SEED);
+  const log: string[] = [];
+  const event = (m: string) => log.push(`${(s.time / 60000).toFixed(1).padStart(5)}m  ${m}`);
+  let lb: number | null = null;
+
+  /** 1 回投資できたら true */
+  const act = (): boolean => {
+    const webs = ofKind(s, 'web');
+    const dbs = ofKind(s, 'db');
+    const r = s.metrics.rolling;
+
+    // 1. WEB が詰まっていたら増設(2 台目以降は LB が必要)
+    if (load(webs) > 0.5 || (r.errorRate > 0.02 && load(webs) > 0.3)) {
+      if (!s.unlocks.has('lb')) {
+        if (s.unlock('lb').ok) event('解放: LB');
+        return false;
+      }
+      if (lb === null) {
+        const id = s.addNode('lb', 1, 4).id;
+        if (id === undefined) return false;
+        lb = id;
+        for (const o of [...s.nodes.get(s.internetId)!.out]) s.disconnect(s.internetId, o);
+        s.connect(s.internetId, lb);
+        for (const w of webs) s.connect(lb, w.id);
+        event('LB 経由に配線');
+        return true;
+      }
+      const p = freeCell(s, 3);
+      if (p && s.money >= s.nodeCost('web')) {
+        const id = s.addNode('web', p[0], p[1]).id!;
+        s.connect(lb, id);
+        for (const d of dbs) s.connect(id, d.id);
+        return true;
+      }
+    }
+
+    // 2. 書き込みを解放済みで DB が足りなければ増設
+    if (s.unlocks.has('writes') && (dbs.length === 0 || load(dbs) > 0.5) && s.money >= s.nodeCost('db')) {
+      const p = freeCell(s, 9);
+      if (p) {
+        const id = s.addNode('db', p[0], p[1]).id!;
+        for (const w of webs) s.connect(w.id, id);
+        if (dbs.length === 0) event('DB 設置(書き込み開始)');
+        return true;
+      }
+    }
+
+    // 3. それ以外は一番安い投資を買う
+    const options: [string, number, () => boolean][] = [];
+    if (s.users > 0.7 * s.marketSize) options.push(['広告', s.upgradeCost('marketing'), () => s.buyUpgrade('marketing').ok]);
+    options.push(['収益化', s.upgradeCost('monetize'), () => s.buyUpgrade('monetize').ok]);
+    if (webs.length >= 3) options.push(['WEB 強化', s.upgradeCost('webPerf'), () => s.buyUpgrade('webPerf').ok]);
+    if (dbs.length >= 2) options.push(['DB 強化', s.upgradeCost('dbPerf'), () => s.buyUpgrade('dbPerf').ok]);
+    if (s.unlocks.has('lb') && !s.unlocks.has('writes')) {
+      options.push(['会員機能', UNLOCK_BY_ID.writes.cost, () => s.unlock('writes').ok]);
+    }
+    options.sort((a, b) => a[1] - b[1]);
+    const [name, cost, buy] = options[0] ?? [];
+    if (name && s.money >= cost! && buy!()) {
+      event(`${name} ($${cost})`);
+      return true;
+    }
+    return false;
+  };
+
+  for (let sec = 0; sec <= MINUTES * 60; sec++) {
+    if (sec % 300 === 0) {
+      const r = s.metrics.rolling;
+      log.push(
+        `== ${String(sec / 60).padStart(3)}m  $${Math.round(s.money)}  収支 ${s.incomePerSec.toFixed(1)}/s  ` +
+          `ユーザー ${Math.round(s.users)}/${Math.round(s.marketSize)}  ${Math.round(r.rps)} rps  ` +
+          `err ${(r.errorRate * 100).toFixed(1)}%  p99 ${r.p99}ms  WEB ${ofKind(s, 'web').length} DB ${ofKind(s, 'db').length}`,
+      );
+    }
+    s.step(1000);
+    for (let i = 0; i < 20 && act(); i++);
+  }
+  console.log(log.join('\n'));
+});

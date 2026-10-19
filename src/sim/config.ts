@@ -1,15 +1,15 @@
-import type { NodeKind, ReqKind } from './types';
+import type { NodeKind, ReqKind, UnlockId } from './types';
 
 // ---- 盤面 -------------------------------------------------------------
 export const GRID_W = 16;
 export const GRID_H = 9;
 export const INTERNET_POS = { x: 0, y: 4 } as const;
+/** 新規ゲームで最初から置いてある WEB の位置 */
+export const STARTER_WEB_POS = { x: 3, y: 4 } as const;
 
 // ---- 時間 -------------------------------------------------------------
 /** シミュレーションの固定刻み(ms) */
 export const TICK_MS = 10;
-/** 1 ステージの長さ(シミュレーション時間)。ゲーム内では 24 時間として表示する */
-export const STAGE_DURATION_MS = 300_000;
 /** これを超えたリクエストはタイムアウト扱い */
 export const TIMEOUT_MS = 1500;
 /** ノード間を 1 マス移動するのにかかる時間。配置の距離がレイテンシに効く */
@@ -18,26 +18,50 @@ export const MIN_TRANSIT_MS = 10;
 /** これ以上ノードを経由したらループとみなして破棄 */
 export const MAX_HOPS = 12;
 
-// ---- 経済 -------------------------------------------------------------
-export const START_MONEY = 800;
+// ---- ユーザーとトラフィック ---------------------------------------------
+export const START_USERS = 300;
+/** ユーザーがこれ以下には減らない(サービスを続けている限りの固定客) */
+export const MIN_USERS = 50;
+/** ユーザー 1 人あたりの平均リクエスト数(/秒) */
+export const REQ_PER_USER = 0.01;
+/** 1 日の周期(シミュレーション時間)。流量はこの周期で波打つ */
+export const DAY_CYCLE_MS = 120_000;
+export const DAY_AMPLITUDE = 0.2;
+/** 市場規模(潜在ユーザー数)の初期値 */
+export const BASE_MARKET = 1500;
+/** 口コミによる自然増加率(/秒)。市場規模に近づくほど鈍る(ロジスティック成長) */
+export const GROWTH_RATE = 0.03;
+/** 書き込み機能を解放したあとの書き込みリクエストの割合 */
+export const WRITE_SHARE = 0.3;
+
+/** 品質が悪いときの離脱 */
+export const CHURN = {
+  /** エラー率がこれを超えると離脱が始まる */
+  errorThreshold: 0.01,
+  /** 超過したエラー率 1 あたりの離脱率(/秒) */
+  errorFactor: 0.3,
+  /** p99 がこれを超えると遅さによる離脱が起きる */
+  slowP99Ms: 1000,
+  slowRate: 0.003,
+} as const;
+
+// ---- お金 -------------------------------------------------------------
+export const START_MONEY = 60;
 export const SELL_REFUND_RATE = 0.5;
-/** 成功 1 件あたりの収益 */
-export const REVENUE: Record<ReqKind, number> = { static: 0.025, write: 0.06 };
+/** 成功 1 件あたりの基本収益 */
+export const BASE_REVENUE: Record<ReqKind, number> = { static: 0.05, write: 0.15 };
+/** 同じ種類のノードを 1 台増やすごとの価格上昇率 */
+export const NODE_COST_GROWTH = 1.15;
 
-// ---- 目標 -------------------------------------------------------------
-/** ステージ終了時に必要な可用性 */
-export const SLA_TARGET = 0.99;
-
-// ---- トラフィック -----------------------------------------------------
-export const WRITE_SHARE = 0.25;
-
-/** 時刻 t(ms)における平均流入量(リクエスト/秒)。徐々に増え、緩やかに波打つ */
-export function trafficRps(tMs: number): number {
-  const p = Math.min(1, Math.max(0, tMs / STAGE_DURATION_MS));
-  const base = 15 + 205 * Math.pow(p, 1.4);
-  const wave = 1 + 0.12 * Math.sin(tMs / 9000);
-  return base * wave;
-}
+/** 放置(ページを閉じている間)の収入 */
+export const OFFLINE = {
+  /** これより短い不在は数えない */
+  minMs: 30_000,
+  /** 最大で何時間分まで */
+  maxMs: 8 * 60 * 60 * 1000,
+  /** 最後の収入/秒に対する効率 */
+  efficiency: 0.5,
+} as const;
 
 // ---- ノード定義 -------------------------------------------------------
 export interface NodeKindDef {
@@ -46,12 +70,13 @@ export interface NodeKindDef {
   readonly label: string;
   readonly name: string;
   readonly description: string;
+  /** 1 台目の価格。2 台目以降は NODE_COST_GROWTH 倍ずつ上がる */
   readonly cost: number;
   readonly upkeepPerSec: number;
   /** 同時に処理できる数 */
   readonly workers: number;
   readonly queueMax: number;
-  /** 種類ごとの処理時間(ms) */
+  /** 種類ごとの処理時間(ms)。強化前の値 */
   readonly serviceMs: Readonly<Record<ReqKind, number>>;
   /** 受け付けるリクエストの種類 */
   readonly accepts: readonly ReqKind[];
@@ -61,6 +86,8 @@ export interface NodeKindDef {
   readonly connectsTo: readonly NodeKind[];
   readonly maxOut: number;
   readonly placeable: boolean;
+  /** 配置に必要な解放 */
+  readonly requires?: UnlockId;
   /** 盤面上の色 */
   readonly color: number;
 }
@@ -70,7 +97,7 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     kind: 'internet',
     label: 'NET',
     name: 'インターネット',
-    description: 'リクエストの流入元。接続先は 1 つだけ。',
+    description: 'ユーザーからのリクエストの流入元。接続先は 1 つだけ。',
     cost: 0,
     upkeepPerSec: 0,
     workers: 0,
@@ -98,6 +125,7 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     connectsTo: ['web', 'lb'],
     maxOut: 8,
     placeable: true,
+    requires: 'lb',
     color: 0x9d8cff,
   },
   web: {
@@ -105,8 +133,8 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     label: 'WEB',
     name: 'Web サーバー',
     description: '静的リクエストを処理する。書き込みは DB へ転送。',
-    cost: 100,
-    upkeepPerSec: 0.15,
+    cost: 50,
+    upkeepPerSec: 0.05,
     workers: 4,
     queueMax: 40,
     serviceMs: { static: 60, write: 30 },
@@ -122,8 +150,8 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     label: 'DB',
     name: 'データベース',
     description: '書き込みを処理する。静的リクエストは受け付けない。',
-    cost: 300,
-    upkeepPerSec: 0.4,
+    cost: 400,
+    upkeepPerSec: 0.3,
     workers: 4,
     queueMax: 40,
     serviceMs: { static: 0, write: 80 },
@@ -132,6 +160,7 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     connectsTo: [],
     maxOut: 0,
     placeable: true,
+    requires: 'writes',
     color: 0xf4a261,
   },
 };

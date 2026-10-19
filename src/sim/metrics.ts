@@ -38,10 +38,11 @@ export class LatencyHistogram {
 interface Bucket {
   success: number;
   errors: number;
+  revenue: number;
   hist: LatencyHistogram;
 }
 
-const newBucket = (): Bucket => ({ success: 0, errors: 0, hist: new LatencyHistogram() });
+const newBucket = (): Bucket => ({ success: 0, errors: 0, revenue: 0, hist: new LatencyHistogram() });
 
 export interface RollingStats {
   /** 直近の流量(成功+失敗 / 秒) */
@@ -50,6 +51,8 @@ export interface RollingStats {
   p99: number;
   /** 0〜1 */
   errorRate: number;
+  /** 直近の売上(/秒)。維持費は含まない */
+  revenuePerSec: number;
 }
 
 /** 1 秒ごとの推移。グラフ表示用 */
@@ -58,6 +61,7 @@ export interface History {
   rps: number[];
   p99: number[];
   errorRate: number[];
+  users: number[];
 }
 
 export class Metrics {
@@ -66,12 +70,12 @@ export class Metrics {
   readonly successByKind: Record<ReqKind, number> = { static: 0, write: 0 };
   readonly errorsByReason: Record<ErrorReason, number> = { drop: 0, timeout: 0, 'no-route': 0 };
   readonly overall = new LatencyHistogram();
-  readonly history: History = { t: [], rps: [], p99: [], errorRate: [] };
+  readonly history: History = { t: [], rps: [], p99: [], errorRate: [], users: [] };
 
   private window: Bucket[] = [];
   private current: Bucket = newBucket();
   private second = 0;
-  private stats: RollingStats = { rps: 0, p50: 0, p99: 0, errorRate: 0 };
+  private stats: RollingStats = { rps: 0, p50: 0, p99: 0, errorRate: 0, revenuePerSec: 0 };
 
   recordSuccess(kind: ReqKind, latencyMs: number): void {
     this.totalSuccess++;
@@ -81,6 +85,10 @@ export class Metrics {
     this.current.hist.add(latencyMs);
   }
 
+  recordRevenue(amount: number): void {
+    this.current.revenue += amount;
+  }
+
   recordError(reason: ErrorReason): void {
     this.totalErrors++;
     this.errorsByReason[reason]++;
@@ -88,7 +96,7 @@ export class Metrics {
   }
 
   /** シミュレーション時刻を進める。秒の境目で直近の統計と履歴を更新する */
-  advance(timeMs: number): void {
+  advance(timeMs: number, users = 0): void {
     const sec = Math.floor(timeMs / 1000);
     while (this.second < sec) {
       this.window.push(this.current);
@@ -96,7 +104,7 @@ export class Metrics {
       this.current = newBucket();
       this.second++;
       this.recompute();
-      this.pushHistory(this.second);
+      this.pushHistory(this.second, users);
     }
   }
 
@@ -114,10 +122,12 @@ export class Metrics {
     const hist = new LatencyHistogram();
     let success = 0;
     let errors = 0;
+    let revenue = 0;
     for (const b of this.window) {
       hist.addAll(b.hist);
       success += b.success;
       errors += b.errors;
+      revenue += b.revenue;
     }
     const n = success + errors;
     this.stats = {
@@ -125,20 +135,19 @@ export class Metrics {
       p50: hist.percentile(0.5),
       p99: hist.percentile(0.99),
       errorRate: n ? errors / n : 0,
+      revenuePerSec: this.window.length ? revenue / this.window.length : 0,
     };
   }
 
-  private pushHistory(sec: number): void {
+  private pushHistory(sec: number, users: number): void {
     const h = this.history;
     h.t.push(sec);
     h.rps.push(this.stats.rps);
     h.p99.push(this.stats.p99);
     h.errorRate.push(this.stats.errorRate);
+    h.users.push(users);
     if (h.t.length > HISTORY_MAX) {
-      h.t.shift();
-      h.rps.shift();
-      h.p99.shift();
-      h.errorRate.shift();
+      for (const series of Object.values(h)) series.shift();
     }
   }
 }

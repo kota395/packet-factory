@@ -1,12 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { NODE_DEFS, START_MONEY } from '../src/sim/config';
-import { applyLayout, decodeLayout, encodeLayout, exportLayout } from '../src/sim/layout';
+import { BASE_MARKET, NODE_COST_GROWTH, NODE_DEFS, OFFLINE } from '../src/sim/config';
+import { UPGRADE_BY_ID, upgradeCost } from '../src/sim/economy';
+import { createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation, type SimOptions } from '../src/sim/simulation';
 
 const constant = (rps: number) => () => rps;
 
+/** 流量固定・全解放・資金たっぷりのテスト用シミュレーション */
 function sim(opts: SimOptions = {}) {
-  return new Simulation({ seed: 42, startMoney: 10_000, durationMs: 60_000, ...opts });
+  return new Simulation({
+    seed: 42,
+    startMoney: 1_000_000,
+    unlocks: ['lb', 'writes'],
+    writeShare: 0.25,
+    ...opts,
+  });
 }
 
 /** NET → LB → WEB×webs → DB×dbs の標準構成を作る */
@@ -100,18 +108,32 @@ describe('接続ルール', () => {
   });
 });
 
-describe('経済', () => {
-  it('配置で費用が引かれ、撤去で半額戻る', () => {
-    const s = new Simulation({ seed: 1 });
-    const id = s.addNode('db', 3, 3).id!;
-    expect(s.money).toBe(START_MONEY - NODE_DEFS.db.cost);
+describe('ノードの購入', () => {
+  it('同じ種類を買うたびに価格が上がり、撤去で払った額の半分が戻る', () => {
+    const s = new Simulation({ seed: 1, startMoney: 1000 });
+    const first = s.nodeCost('web');
+    expect(first).toBe(NODE_DEFS.web.cost);
+    s.addNode('web', 2, 2);
+    const second = s.nodeCost('web');
+    expect(second).toBe(Math.round(NODE_DEFS.web.cost * NODE_COST_GROWTH));
+    const id = s.addNode('web', 2, 3).id!;
+    const before = s.money;
     s.removeNode(id);
-    expect(s.money).toBe(START_MONEY - NODE_DEFS.db.cost / 2);
+    expect(s.money).toBe(before + Math.floor(second / 2));
   });
 
-  it('予算が足りなければ配置できない', () => {
-    const s = new Simulation({ seed: 1, startMoney: 50 });
+  it('資金が足りなければ配置できない', () => {
+    const s = new Simulation({ seed: 1, startMoney: 10 });
     expect(s.addNode('web', 2, 2).ok).toBe(false);
+  });
+
+  it('解放前の LB / DB は配置できない', () => {
+    const s = new Simulation({ seed: 1, startMoney: 10_000 });
+    expect(s.addNode('lb', 2, 2).ok).toBe(false);
+    expect(s.addNode('db', 3, 2).ok).toBe(false);
+    expect(s.unlock('lb').ok).toBe(true);
+    expect(s.addNode('lb', 2, 2).ok).toBe(true);
+    expect(s.addNode('db', 3, 2).ok).toBe(false);
   });
 
   it('撤去したノードへの接続も消える', () => {
@@ -121,55 +143,132 @@ describe('経済', () => {
     s.removeNode(web);
     expect(s.nodes.get(s.internetId)!.out).toEqual([]);
   });
-
-  it('予算が尽きると破産で終了する', () => {
-    const s = new Simulation({ seed: 1, startMoney: 300, traffic: constant(0) });
-    s.addNode('db', 3, 3);
-    s.step(10_000);
-    expect(s.status).toBe('bankrupt');
-  });
 });
 
-describe('ステージ終了', () => {
-  it('SLA を満たせばクリア、満たさなければ失敗', () => {
-    const ok = sim({ traffic: constant(20), durationMs: 10_000 });
-    build(ok, 1, 1);
-    ok.step(11_000);
-    expect(ok.status).toBe('cleared');
-
-    const ng = sim({ traffic: constant(20), durationMs: 10_000 });
-    ng.step(11_000);
-    expect(ng.status).toBe('failed');
+describe('投資', () => {
+  it('強化は買うたびに価格が上がり、効果が反映される', () => {
+    const s = new Simulation({ seed: 1, startMoney: 10_000 });
+    const def = UPGRADE_BY_ID.marketing;
+    expect(s.marketSize).toBe(BASE_MARKET);
+    const cost0 = s.upgradeCost('marketing');
+    expect(s.buyUpgrade('marketing').ok).toBe(true);
+    expect(s.money).toBe(10_000 - cost0);
+    expect(s.marketSize).toBeCloseTo(def.effect(1));
+    expect(s.upgradeCost('marketing')).toBe(upgradeCost(def, 1));
+    expect(s.upgradeCost('marketing')).toBeGreaterThan(cost0);
   });
 
-  it('同じシードなら結果が再現する', () => {
-    const run = () => {
-      const s = sim({ traffic: constant(80) });
-      build(s, 2, 1);
+  it('前提の解放が無い強化は買えない', () => {
+    const s = new Simulation({ seed: 1, startMoney: 1_000_000 });
+    expect(s.buyUpgrade('dbPerf').ok).toBe(false);
+    expect(s.unlock('writes').ok).toBe(false); // LB が先
+    s.unlock('lb');
+    s.unlock('writes');
+    expect(s.buyUpgrade('dbPerf').ok).toBe(true);
+  });
+
+  it('書き込みは会員機能を解放して DB を置くまで流れない', () => {
+    const s = new Simulation({ seed: 1, startMoney: 1_000_000 });
+    expect(s.writeShare).toBe(0);
+    s.unlock('lb');
+    s.unlock('writes');
+    expect(s.writeShare).toBe(0); // DB を置くまでは流れない
+    s.addNode('db', 5, 5);
+    expect(s.writeShare).toBeGreaterThan(0);
+  });
+
+  it('WEB チューニングで 1 台あたりの処理能力が上がる', () => {
+    const run = (level: number) => {
+      const s = sim({ traffic: constant(110), writeShare: 0, upgrades: { webPerf: level } });
+      const w = s.addNode('web', 2, 4).id!;
+      s.connect(s.internetId, w);
       s.step(20_000);
-      return [s.metrics.totalSuccess, s.metrics.totalErrors, s.money];
+      return s.metrics.availability;
     };
-    expect(run()).toEqual(run());
+    expect(run(4)).toBeGreaterThan(run(0) + 0.2);
+  });
+
+  it('収益化の改善で 1 件あたりの収益が増える', () => {
+    const s = new Simulation({ seed: 1, startMoney: 1000 });
+    const base = s.revenueOf('static');
+    s.buyUpgrade('monetize');
+    expect(s.revenueOf('static')).toBeCloseTo(base * UPGRADE_BY_ID.monetize.effect(1));
   });
 });
 
-describe('構成の保存と共有', () => {
-  it('エンコード → デコード → 適用で同じ構成になる', () => {
-    const a = sim();
-    build(a, 3, 2);
-    const layout = exportLayout(a);
-    const decoded = decodeLayout(encodeLayout(layout));
-    expect(decoded).toEqual(layout);
+describe('ユーザー', () => {
+  it('余裕のある構成ならユーザーは市場規模に向かって増える', () => {
+    const s = newGame(3);
+    const start = s.users;
+    s.step(120_000);
+    expect(s.users).toBeGreaterThan(start * 2);
+    expect(s.users).toBeLessThanOrEqual(s.marketSize * 1.01);
+    expect(s.money).toBeGreaterThan(0);
+  });
 
-    const b = sim();
-    const r = applyLayout(b, decoded!);
-    expect(r.skipped).toBe(0);
-    expect(exportLayout(b)).toEqual(layout);
+  it('捌けないと離脱して減る', () => {
+    const s = new Simulation({ seed: 3, startUsers: 5000 });
+    s.step(30_000); // 接続先なし = 全部エラー
+    expect(s.users).toBeLessThan(1000);
+  });
+
+  it('処理能力を超えるユーザーは定着しない', () => {
+    // WEB 1 台(約 66 rps = 6,600 人)に対して市場規模を大きくしておく
+    const s = new Simulation({ seed: 5, upgrades: { marketing: 8 } });
+    const w = s.addNode('web', 2, 4, { free: true }).id!;
+    s.connect(s.internetId, w);
+    s.users = 3000;
+    s.step(300_000);
+    expect(s.marketSize).toBeGreaterThan(30_000);
+    expect(s.users).toBeLessThan(12_000);
+  });
+});
+
+describe('セーブ', () => {
+  it('保存 → 文字列化 → 復元で同じ状態になる', () => {
+    const a = sim({ traffic: undefined });
+    build(a, 3, 2);
+    a.buyUpgrade('marketing');
+    a.step(5_000);
+    const save = createSave(a, 1_000);
+    const decoded = decodeSave(encodeSave(save));
+    expect(decoded).toEqual(save);
+
+    const b = loadSave(decoded!, 7);
+    const again = createSave(b, 1_000);
+    expect({ ...again, incomePerSec: 0 }).toEqual({ ...save, incomePerSec: 0 });
+    expect(b.money).toBe(a.money); // 復元でお金は引かれない
+  });
+
+  it('localStorage 経由(JSON)でも検証して読み込める', () => {
+    const save = createSave(newGame(1), 1_000);
+    expect(parseSave(JSON.parse(JSON.stringify(save)))).toEqual(save);
   });
 
   it('壊れたデータは null になる', () => {
-    expect(decodeLayout('not-base64!!')).toBeNull();
-    expect(decodeLayout(encodeLayout({ v: 1, nodes: [['internet' as never, 1, 1]], edges: [] }))).toBeNull();
-    expect(decodeLayout(encodeLayout({ v: 1, nodes: [['web', 99, 1]], edges: [] }))).toBeNull();
+    expect(decodeSave('not-base64!!')).toBeNull();
+    const save = createSave(newGame(1), 1_000);
+    expect(parseSave({ ...save, v: 1 })).toBeNull();
+    expect(parseSave({ ...save, nodes: [['internet', 1, 1, 0]] })).toBeNull();
+    expect(parseSave({ ...save, nodes: [['web', 99, 1, 0]] })).toBeNull();
+    expect(parseSave({ ...save, unlocks: ['cheat'] })).toBeNull();
   });
+
+  it('放置収入は効率と上限を反映する', () => {
+    const save = { ...createSave(newGame(1), 0), incomePerSec: 2 };
+    expect(offlineEarnings(save, 10_000).gained).toBe(0); // 短すぎる
+    expect(offlineEarnings(save, 100_000).gained).toBeCloseTo(2 * 100 * OFFLINE.efficiency);
+    const capped = offlineEarnings(save, OFFLINE.maxMs * 3).gained;
+    expect(capped).toBeCloseTo(2 * (OFFLINE.maxMs / 1000) * OFFLINE.efficiency);
+    expect(offlineEarnings({ ...save, incomePerSec: -1 }, 100_000).gained).toBe(0);
+  });
+});
+
+it('同じシードなら結果が再現する', () => {
+  const run = () => {
+    const s = newGame(9);
+    s.step(60_000);
+    return [s.metrics.totalSuccess, s.metrics.totalErrors, s.money, s.users];
+  };
+  expect(run()).toEqual(run());
 });

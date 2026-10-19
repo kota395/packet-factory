@@ -4,18 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0b0f14" />
-    <meta name="description" content="データセンターを組み上げてトラフィックを捌くブラウザゲーム" />
+    <meta name="description" content="データセンターを育てるインクリメンタルゲーム" />
     <title>packet-factory</title>
   </head>
   <body>
     <div id="app">
       <header id="hud">
         <div class="stats">
-          <div class="stat"><span class="k">予算</span><span class="v" id="s-money">$0</span></div>
-          <div class="stat"><span class="k">時刻</span><span class="v" id="s-clock">00:00</span></div>
+          <div class="stat"><span class="k">資金</span><span class="v" id="s-money">$0</span></div>
+          <div class="stat"><span class="k">収支</span><span class="v" id="s-income">-</span></div>
+          <div class="stat"><span class="k">ユーザー</span><span class="v" id="s-users">0</span></div>
           <div class="stat"><span class="k">流量</span><span class="v" id="s-rps">0</span></div>
+          <div class="stat"><span class="k">エラー</span><span class="v" id="s-err">-</span></div>
           <div class="stat"><span class="k">p99</span><span class="v" id="s-p99">-</span></div>
-          <div class="stat"><span class="k">可用性</span><span class="v" id="s-avail">-</span></div>
         </div>
         <div class="controls">
           <div class="speed" role="group" aria-label="速度">
@@ -26,8 +27,7 @@
           </div>
           <div class="menu">
             <button type="button" id="btn-chart">グラフ</button>
-            <button type="button" id="btn-share">共有</button>
-            <button type="button" id="btn-reset">リセット</button>
+            <button type="button" id="btn-save">セーブ</button>
           </div>
         </div>
       </header>
@@ -36,6 +36,14 @@
 
       <main id="board">
         <aside id="info" hidden></aside>
+        <section id="invest" hidden aria-label="投資">
+          <header>
+            <h2>投資</h2>
+            <span id="invest-money"></span>
+            <button type="button" id="invest-close" aria-label="閉じる">✕</button>
+          </header>
+          <div id="invest-list"></div>
+        </section>
         <div id="toast" role="status" aria-live="polite"></div>
       </main>
 
