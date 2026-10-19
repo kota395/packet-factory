@@ -17,6 +17,8 @@ export interface SaveData {
   /** 保存時点の収支/秒。放置収入の計算に使う */
   incomePerSec: number;
   unlocks: UnlockId[];
+  /** 解放済みだがオフにしている配信コンテンツ */
+  disabled: UnlockId[];
   upgrades: Record<UpgradeId, number>;
   /** [種類, x, y, 購入額] */
   nodes: [NodeKind, number, number, number][];
@@ -52,6 +54,7 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     lifetimeEarned: sim.lifetimeEarned,
     incomePerSec: sim.incomePerSec,
     unlocks: [...sim.unlocks],
+    disabled: [...sim.disabledFeatures],
     upgrades: { ...sim.upgrades },
     nodes,
     edges,
@@ -64,6 +67,7 @@ export function loadSave(save: SaveData, seed: number): Simulation {
     startMoney: save.money,
     startUsers: save.users,
     unlocks: save.unlocks,
+    disabledFeatures: save.disabled,
     upgrades: save.upgrades,
   });
   sim.lifetimeEarned = save.lifetimeEarned;
@@ -117,16 +121,24 @@ export function parseSave(data: unknown): SaveData | null {
   if (!Array.isArray(d.unlocks) || !Array.isArray(d.nodes) || !Array.isArray(d.edges)) return null;
   if (!d.upgrades || typeof d.upgrades !== 'object') return null;
 
-  const unlocks: UnlockId[] = [];
-  for (const u of d.unlocks) {
-    if (typeof u !== 'string' || !(u in UNLOCK_BY_ID)) return null;
-    unlocks.push(u as UnlockId);
-  }
+  // 知らない解放・強化(名前が変わった・無くなったもの)は読み飛ばし、他の進行は残す
+  const unlockIds = (list: unknown[]): UnlockId[] | null => {
+    const ids: UnlockId[] = [];
+    for (const u of list) {
+      if (typeof u !== 'string') return null;
+      if (u in UNLOCK_BY_ID) ids.push(u as UnlockId);
+    }
+    return ids;
+  };
+  const unlocks = unlockIds(d.unlocks);
+  const disabled = Array.isArray(d.disabled) ? unlockIds(d.disabled) : [];
+  if (!unlocks || !disabled) return null;
 
   const upgrades = emptyUpgrades();
-  for (const [k, v] of Object.entries(d.upgrades as Record<string, unknown>)) {
-    if (!(k in UPGRADE_BY_ID) || !isInt(v) || v < 0 || v > 1000) return null;
-    upgrades[k as UpgradeId] = v;
+  for (const [key, v] of Object.entries(d.upgrades as Record<string, unknown>)) {
+    if (!isInt(v) || v < 0 || v > 1000) return null;
+    const k = UPGRADE_RENAMES[key] ?? key;
+    if (k in UPGRADE_BY_ID) upgrades[k as UpgradeId] = v;
   }
 
   if (d.nodes.length > GRID_W * GRID_H) return null;
@@ -156,8 +168,15 @@ export function parseSave(data: unknown): SaveData | null {
     lifetimeEarned: d.lifetimeEarned,
     incomePerSec: d.incomePerSec,
     unlocks,
+    disabled,
     upgrades,
     nodes,
     edges,
   };
 }
+
+/** 名前を変えた強化の、古い名前 → 新しい名前 */
+const UPGRADE_RENAMES: Record<string, UpgradeId> = {
+  // LB の強化は「処理速度」から「帯域」に変わった
+  lbPerf: 'lbBandwidth',
+};

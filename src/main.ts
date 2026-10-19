@@ -15,7 +15,7 @@ import {
 import type { Simulation } from './sim/simulation';
 import type { NodeKind } from './sim/types';
 import { MetricsChart } from './ui/chart';
-import { compact, duration, money, rate } from './ui/format';
+import { bandwidth, compact, dataSize, duration, money, rate } from './ui/format';
 import { InvestPanel } from './ui/invest';
 
 type Tool = 'select' | NodeKind | 'connect' | 'delete';
@@ -244,7 +244,7 @@ function updateHint(): void {
     default: {
       const d = NODE_DEFS[state.tool];
       if (sim.isKindUnlocked(state.tool) && sim.isAtMaxCount(state.tool)) {
-        text = `${d.name}はサービス 1 つにつき ${d.maxCount} 台までです。性能は投資の「LB チューニング」で上げられます。`;
+        text = `${d.name}はサービス 1 つにつき ${d.maxCount} 台までです。帯域は投資の「LB 回線増強」で増やせます。`;
       } else if (!sim.isKindUnlocked(state.tool)) {
         text = `🔒 ${d.name}は投資メニューの「${UNLOCK_BY_ID[d.requires!].name}」で解放できます。`;
       } else {
@@ -323,15 +323,23 @@ function updateInfo(): void {
   const rows: [string, string][] = [];
   const inRps = sim.inRpsOf(node);
   const cap = sim.capacityRpsOf(node);
+  const loadSpan = (ratio: number) =>
+    `<span class="${ratio >= 0.9 ? 'bad' : ratio >= 0.7 ? 'warn' : 'ok'}">${Math.round(ratio * 100)}%</span>`;
   if (node.kind === 'internet') {
     rows.push(['送出', `${compact(inRps, 1)} rps`]);
+    rows.push(['データ量', `${bandwidth(node.inKBps / 1000)}(平均 ${dataSize(inRps > 0 ? node.inKBps / inRps : 0)}/件)`]);
   } else {
     rows.push(['受信', `${compact(inRps, 1)} rps`]);
     if (Number.isFinite(cap)) {
-      const ratio = inRps / cap;
-      const cls = ratio >= 0.9 ? 'bad' : ratio >= 0.7 ? 'warn' : 'ok';
       rows.push(['上限', `${compact(cap, 1)} rps`]);
-      rows.push(['負荷', `<span class="${cls}">${Math.round(ratio * 100)}%</span>(余裕 ${compact(Math.max(0, cap - inRps), 1)} rps)`]);
+      rows.push(['負荷', `${loadSpan(inRps / cap)}(余裕 ${compact(Math.max(0, cap - inRps), 1)} rps)`]);
+    }
+    const bw = sim.bandwidthMBpsOf(node);
+    if (Number.isFinite(bw)) {
+      // 帯域を持つノードは、処理と帯域のどちらで詰まっているかを分けて出す
+      const usedMB = node.inKBps / 1000;
+      rows.push(['帯域', `${loadSpan(usedMB / bw)} ${bandwidth(usedMB)} / ${bandwidth(bw)}`]);
+      rows.push(['処理', `${loadSpan(inRps / sim.cpuCapacityRpsOf(node))} 上限 ${compact(sim.cpuCapacityRpsOf(node))} rps`]);
     }
     rows.push(['処理中', `${node.busy.length} / ${d.workers}`]);
     rows.push(['キュー', `${node.queue.length} / ${d.queueMax}`]);

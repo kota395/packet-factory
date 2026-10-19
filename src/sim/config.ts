@@ -1,3 +1,11 @@
+/**
+ * ゲームの調整値。数値はここで変えれば全体に反映される。
+ *  - ノードの性能・価格 …… NODE_DEFS
+ *  - 1 件あたりのデータ量 …… DATA_SIZE_KB(画像・動画の倍率は economy.ts の UNLOCKS)
+ *  - ユーザーの増減 …… ユーザーとトラフィック / CHURN
+ *  - 投資の価格と効果 …… economy.ts
+ * 変えたら `npm run balance` で進行の速さを確認する。
+ */
 import type { NodeKind, ReqKind, UnlockId } from './types';
 
 // ---- 盤面 -------------------------------------------------------------
@@ -45,6 +53,18 @@ export const CHURN = {
   slowRate: 0.003,
 } as const;
 
+// ---- データ量 ---------------------------------------------------------
+/**
+ * 1 件あたりのデータ量(KB)の基準値。テキスト中心の Web サービスを想定。
+ * 画像投稿・動画配信を解放すると economy.ts の倍率が掛かって重くなる。
+ */
+export const DATA_SIZE_KB: Record<ReqKind, number> = { static: 20, write: 5 };
+/**
+ * 帯域を持つノード(LB)の送信待ちの上限(ms)。
+ * 回線が混んでこれ以上待つことになるリクエストは捨てる(パケットロス)。
+ */
+export const LINK_BUFFER_MS = 100;
+
 // ---- お金 -------------------------------------------------------------
 export const START_MONEY = 60;
 export const SELL_REFUND_RATE = 0.5;
@@ -78,6 +98,11 @@ export interface NodeKindDef {
   readonly queueMax: number;
   /** 種類ごとの処理時間(ms)。強化前の値 */
   readonly serviceMs: Readonly<Record<ReqKind, number>>;
+  /**
+   * 帯域(MB/秒)。指定したノードは、処理のあとデータを回線に流してから次へ送る。
+   * 1 件ずつ「データ量 ÷ 帯域」だけ回線を占有するので、重いコンテンツほど詰まりやすい
+   */
+  readonly bandwidthMBps?: number;
   /** 受け付けるリクエストの種類 */
   readonly accepts: readonly ReqKind[];
   /** ここで処理が完了する(=レスポンスを返せる)種類。それ以外は次へ転送 */
@@ -116,12 +141,15 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     kind: 'lb',
     label: 'LB',
     name: 'ロードバランサー',
-    description: '接続先の WEB へ順番に振り分ける。サービス 1 つにつき 1 台。',
+    description: '接続先の WEB へ順番に振り分ける。処理は速いが、通せるデータ量(帯域)に限りがある。',
     cost: 150,
     upkeepPerSec: 0.1,
-    workers: 8,
-    queueMax: 200,
-    serviceMs: { static: 20, write: 20 },
+    // 処理能力は十分高く(64 並列 × 2ms = 32,000 rps)、詰まるのは主に帯域
+    workers: 64,
+    queueMax: 500,
+    serviceMs: { static: 2, write: 2 },
+    // 50 MB/秒 = 400 Mbps。テキストのみ(平均 15KB 前後)なら約 3,000 rps 通せる
+    bandwidthMBps: 50,
     accepts: ['static', 'write'],
     terminates: [],
     connectsTo: ['web'],

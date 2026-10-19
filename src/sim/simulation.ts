@@ -1,12 +1,14 @@
 import {
   BASE_REVENUE,
   CHURN,
+  DATA_SIZE_KB,
   DAY_AMPLITUDE,
   DAY_CYCLE_MS,
   GRID_H,
   GRID_W,
   GROWTH_RATE,
   INTERNET_POS,
+  LINK_BUFFER_MS,
   MAX_HOPS,
   MIN_TRANSIT_MS,
   MIN_USERS,
@@ -22,7 +24,7 @@ import {
   WRITE_SHARE,
   type NodeKindDef,
 } from './config';
-import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades, upgradeCost } from './economy';
+import { UNLOCKS, UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades, upgradeCost, type FeatureEffect } from './economy';
 import { Metrics } from './metrics';
 import { mulberry32, poisson } from './rng';
 import type { ErrorReason, NodeKind, ReqKind, Request, UnlockId, UpgradeId } from './types';
@@ -53,6 +55,12 @@ export interface NodeRuntime {
   arrivals: Record<ReqKind, number>;
   /** 届いているリクエスト数/秒(種類別、直近数秒の平滑値) */
   inRps: Record<ReqKind, number>;
+  /** 今の 1 秒間に届いたデータ量(KB) */
+  arrivalsKB: number;
+  /** 届いているデータ量(KB/秒、平滑値) */
+  inKBps: number;
+  /** 帯域を持つノードで、回線が次に空く時刻 */
+  linkFreeAt: number;
 }
 
 /** 受信量の平滑化係数(1 秒ごと)。大きいほど直近の値を重視する */
@@ -85,6 +93,8 @@ export interface SimOptions {
   /** 書き込みの割合を固定する(テスト用) */
   writeShare?: number;
   unlocks?: Iterable<UnlockId>;
+  /** 解放済みだがオフにしている配信コンテンツ */
+  disabledFeatures?: Iterable<UnlockId>;
   upgrades?: Partial<Record<UpgradeId, number>>;
 }
 
@@ -112,6 +122,7 @@ export class Simulation {
   readonly internetId: number;
   readonly unlocks: Set<UnlockId>;
   readonly upgrades: Record<UpgradeId, number>;
+  readonly disabledFeatures: Set<UnlockId>;
 
   private readonly rng: () => number;
   private readonly fixedTraffic: ((tMs: number) => number) | null;
@@ -128,6 +139,7 @@ export class Simulation {
     this.fixedWriteShare = opts.writeShare ?? null;
     this.unlocks = new Set(opts.unlocks ?? []);
     this.upgrades = { ...emptyUpgrades(), ...opts.upgrades };
+    this.disabledFeatures = new Set(opts.disabledFeatures ?? []);
     this.internetId = this.createNode('internet', INTERNET_POS.x, INTERNET_POS.y, 0).id;
   }
 
@@ -166,14 +178,37 @@ export class Simulation {
     return this.users * REQ_PER_USER * wave;
   }
 
+  /** 1 件あたりの収益(収益化の強化と配信コンテンツの倍率込み) */
   revenueOf(kind: ReqKind): number {
-    return BASE_REVENUE[kind] * this.revenueMultiplier;
+    return BASE_REVENUE[kind] * this.revenueMultiplier * this.featureMultiplier('revenue', kind);
+  }
+
+  /** 1 件あたりのデータ量(KB)。配信コンテンツで重くなる */
+  dataSizeKB(kind: ReqKind): number {
+    return DATA_SIZE_KB[kind] * this.featureMultiplier('dataSize', kind);
+  }
+
+  /** 解放済みでオンになっている配信コンテンツの倍率の積 */
+  private featureMultiplier(field: keyof FeatureEffect, kind: ReqKind): number {
+    let m = 1;
+    for (const u of UNLOCKS) {
+      const factor = u.effect?.[field]?.[kind];
+      if (factor !== undefined && this.isFeatureActive(u.id)) m *= factor;
+    }
+    return m;
+  }
+
+  /** 帯域(MB/秒)。帯域の制限がないノードは Infinity */
+  bandwidthMBpsOf(node: NodeRuntime): number {
+    const base = node.def.bandwidthMBps;
+    if (base === undefined) return Infinity;
+    if (node.kind === 'lb') return base * UPGRADE_BY_ID.lbBandwidth.effect(this.upgrades.lbBandwidth);
+    return base;
   }
 
   /** 強化を反映した処理時間(ms) */
   serviceMs(node: NodeRuntime, kind: ReqKind): number {
     const base = node.def.serviceMs[kind];
-    if (node.kind === 'lb') return base / UPGRADE_BY_ID.lbPerf.effect(this.upgrades.lbPerf);
     if (node.kind === 'web') return base / UPGRADE_BY_ID.webPerf.effect(this.upgrades.webPerf);
     if (node.kind === 'db') return base / UPGRADE_BY_ID.dbPerf.effect(this.upgrades.dbPerf);
     return base;
@@ -240,6 +275,22 @@ export class Simulation {
     return { ok: true, message: `${UNLOCK_BY_ID[id].name}を導入しました` };
   }
 
+  /** 解放済みで、オフにしていないか */
+  isFeatureActive(id: UnlockId): boolean {
+    return this.unlocks.has(id) && !this.disabledFeatures.has(id);
+  }
+
+  /** 配信コンテンツ(効果のある解放)のオン/オフを切り替える */
+  setFeatureEnabled(id: UnlockId, enabled: boolean): ActionResult {
+    const def = UNLOCK_BY_ID[id];
+    if (!def.effect) return { ok: false, message: `${def.name}は切り替えられません` };
+    if (!this.unlocks.has(id)) return { ok: false, message: `${def.name}はまだ導入していません` };
+    if (enabled) this.disabledFeatures.delete(id);
+    else this.disabledFeatures.add(id);
+    this.purchaseVersion++;
+    return { ok: true, message: `${def.name}を${enabled ? 'オン' : 'オフ'}にしました` };
+  }
+
   // ---------------------------------------------------------------- 盤面の参照
 
   /** そのノードに届いているリクエスト数/秒(internet は送り出している数) */
@@ -252,6 +303,31 @@ export class Simulation {
    * 平均は実際に届いている種類の割合で重み付けする。上限が実質ないノードは Infinity。
    */
   capacityRpsOf(node: NodeRuntime): number {
+    return Math.min(this.cpuCapacityRpsOf(node), this.bandwidthCapacityRpsOf(node));
+  }
+
+  /** 届いているデータ量(KB/秒) */
+  inKBpsOf(node: NodeRuntime): number {
+    return node.inKBps;
+  }
+
+  /** 帯域から見た上限(リクエスト/秒)= 帯域 ÷ 平均データ量 */
+  bandwidthCapacityRpsOf(node: NodeRuntime): number {
+    const bw = this.bandwidthMBpsOf(node);
+    if (!Number.isFinite(bw)) return Infinity;
+    const inRps = this.inRpsOf(node);
+    let avgKB = 0;
+    if (inRps > 0 && node.inKBps > 0) {
+      avgKB = node.inKBps / inRps;
+    } else {
+      for (const k of node.def.accepts) avgKB += this.expectedShare(node, k) * this.dataSizeKB(k);
+    }
+    // 1 MB/秒 = 1,000 KB/秒
+    return avgKB > 0 ? (bw * 1000) / avgKB : Infinity;
+  }
+
+  /** 処理能力から見た上限(リクエスト/秒)= 同時処理数 ÷ 平均処理時間 */
+  cpuCapacityRpsOf(node: NodeRuntime): number {
     if (node.kind === 'internet') return Infinity;
     const accepted = node.def.accepts;
     let total = 0;
@@ -405,15 +481,19 @@ export class Simulation {
     const count = poisson(lambda, this.rng);
     const internet = this.nodes.get(this.internetId)!;
     const writeShare = this.writeShare;
+    const size = { static: this.dataSizeKB('static'), write: this.dataSizeKB('write') };
     for (let i = 0; i < count; i++) {
+      const kind: ReqKind = this.rng() < writeShare ? 'write' : 'static';
       const req: Request = {
         id: this.nextReqId++,
-        kind: this.rng() < writeShare ? 'write' : 'static',
+        kind,
         createdAt: now,
         hops: 0,
         readyAt: now,
+        sizeKB: size[kind],
       };
       internet.arrivals[req.kind]++;
+      internet.arrivalsKB += req.sizeKB;
       this.route(internet, req, now);
     }
 
@@ -449,6 +529,8 @@ export class Simulation {
         n.inRps[k] += IN_RPS_SMOOTHING * (n.arrivals[k] - n.inRps[k]);
         n.arrivals[k] = 0;
       }
+      n.inKBps += IN_RPS_SMOOTHING * (n.arrivalsKB - n.inKBps);
+      n.arrivalsKB = 0;
     }
   }
 
@@ -505,8 +587,24 @@ export class Simulation {
 
   private complete(node: NodeRuntime, req: Request, t: number): void {
     node.processed++;
-    if (node.def.terminates.includes(req.kind)) this.succeed(req, node, t);
-    else this.route(node, req, t);
+    if (node.def.terminates.includes(req.kind)) {
+      this.succeed(req, node, t);
+      return;
+    }
+    const bw = this.bandwidthMBpsOf(node);
+    if (Number.isFinite(bw)) {
+      // 回線は 1 本で、データ量 ÷ 帯域 だけ占有する。混みすぎていたら捨てる
+      const start = Math.max(node.linkFreeAt, t);
+      if (start - t > LINK_BUFFER_MS) {
+        this.fail(req, 'drop', node, t);
+        return;
+      }
+      // 1 MB/秒 = 1 KB/ms
+      node.linkFreeAt = start + req.sizeKB / bw;
+      this.route(node, req, node.linkFreeAt);
+      return;
+    }
+    this.route(node, req, t);
   }
 
   /** 接続先のうち、その種類を受け付けるノードへラウンドロビンで送る */
@@ -538,6 +636,7 @@ export class Simulation {
       return;
     }
     target.arrivals[t.req.kind]++;
+    target.arrivalsKB += t.req.sizeKB;
     if (target.queue.length >= target.def.queueMax) {
       this.fail(t.req, 'drop', target, now);
       return;
@@ -584,6 +683,9 @@ export class Simulation {
       lastErrorAt: -Infinity,
       arrivals: { static: 0, write: 0 },
       inRps: { static: 0, write: 0 },
+      arrivalsKB: 0,
+      inKBps: 0,
+      linkFreeAt: 0,
     };
     this.nodes.set(node.id, node);
     this.layoutVersion++;

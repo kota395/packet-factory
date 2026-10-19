@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BASE_MARKET, NODE_COST_GROWTH, NODE_DEFS, OFFLINE } from '../src/sim/config';
+import { BASE_MARKET, DATA_SIZE_KB, NODE_COST_GROWTH, NODE_DEFS, OFFLINE } from '../src/sim/config';
 import { UPGRADE_BY_ID, upgradeCost } from '../src/sim/economy';
 import { createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation, type SimOptions } from '../src/sim/simulation';
@@ -65,19 +65,35 @@ describe('ルーティング', () => {
     expect(s.metrics.availability).toBeLessThan(0.9);
   });
 
-  it('LB の処理上限を超えると LB で溢れ、LB チューニングで解消する', () => {
-    const run = (lbPerf: number) => {
-      const s = sim({ traffic: constant(700), writeShare: 0, upgrades: { lbPerf, webPerf: 6 } });
+  it('LB は処理能力が高く、テキストだけなら大量に流しても詰まらない', () => {
+    const s = sim({ traffic: constant(700), writeShare: 0, upgrades: { webPerf: 6 } });
+    build(s, 6, 0);
+    s.step(15_000);
+    const lb = [...s.nodes.values()].find((n) => n.kind === 'lb')!;
+    expect(lb.errors).toBe(0);
+    expect(s.cpuCapacityRpsOf(lb)).toBeCloseTo((64 * 1000) / 2, 0); // 32,000 rps
+    // 50 MB/秒 ÷ 20 KB = 2,500 rps
+    expect(s.bandwidthCapacityRpsOf(lb)).toBeCloseTo((50 * 1000) / 20, -1);
+  });
+
+  it('画像で重くなると LB の帯域で溢れ、回線増強で解消する', () => {
+    const run = (lbBandwidth: number) => {
+      const s = sim({
+        traffic: constant(700),
+        writeShare: 0,
+        unlocks: ['lb', 'writes', 'images'],
+        upgrades: { lbBandwidth, webPerf: 6 },
+      });
       build(s, 6, 0);
       s.step(15_000);
       const lb = [...s.nodes.values()].find((n) => n.kind === 'lb')!;
       return { lbErrors: lb.errors, cap: s.capacityRpsOf(lb) };
     };
     const base = run(0);
-    expect(base.cap).toBeCloseTo((8 * 1000) / 20, 0); // 400 rps
+    expect(base.cap).toBeCloseTo((50 * 1000) / 100, -1); // 画像込み 100KB → 500 rps
     expect(base.lbErrors).toBeGreaterThan(0);
-    const tuned = run(4);
-    expect(tuned.cap).toBeGreaterThan(900);
+    const tuned = run(2); // ×2.25 → 約 1,125 rps
+    expect(tuned.cap).toBeGreaterThan(1000);
     expect(tuned.lbErrors).toBe(0);
   });
 });
@@ -249,6 +265,23 @@ describe('投資', () => {
     expect(run(4)).toBeGreaterThan(run(0) + 0.2);
   });
 
+  it('配信コンテンツで単価とデータ量が上がり、オフにすると戻る', () => {
+    const s = new Simulation({ seed: 1, startMoney: 1_000_000 });
+    const rev = s.revenueOf('static');
+    const size = s.dataSizeKB('static');
+    s.unlock('lb');
+    expect(s.unlock('video').ok).toBe(false); // 画像が先
+    expect(s.unlock('images').ok).toBe(true);
+    expect(s.revenueOf('static')).toBeCloseTo(rev * 2);
+    expect(s.dataSizeKB('static')).toBeCloseTo(size * 5);
+    expect(s.dataSizeKB('write')).toBe(DATA_SIZE_KB.write); // 書き込みは変わらない
+    s.unlock('video');
+    expect(s.dataSizeKB('static')).toBeCloseTo(size * 40);
+    expect(s.setFeatureEnabled('video', false).ok).toBe(true);
+    expect(s.dataSizeKB('static')).toBeCloseTo(size * 5);
+    expect(s.setFeatureEnabled('lb', false).ok).toBe(false); // 効果のない解放は切り替えられない
+  });
+
   it('収益化の改善で 1 件あたりの収益が増える', () => {
     const s = new Simulation({ seed: 1, startMoney: 1000 });
     const base = s.revenueOf('static');
@@ -290,6 +323,8 @@ describe('セーブ', () => {
     const a = sim({ traffic: undefined });
     build(a, 3, 2);
     a.buyUpgrade('marketing');
+    a.unlock('images');
+    a.setFeatureEnabled('images', false);
     a.step(5_000);
     const save = createSave(a, 1_000);
     const decoded = decodeSave(encodeSave(save));
@@ -312,7 +347,18 @@ describe('セーブ', () => {
     expect(parseSave({ ...save, v: 1 })).toBeNull();
     expect(parseSave({ ...save, nodes: [['internet', 1, 1, 0]] })).toBeNull();
     expect(parseSave({ ...save, nodes: [['web', 99, 1, 0]] })).toBeNull();
-    expect(parseSave({ ...save, unlocks: ['cheat'] })).toBeNull();
+    expect(parseSave({ ...save, unlocks: [42] })).toBeNull();
+  });
+
+  it('知らない解放は読み飛ばし、名前を変えた強化は引き継ぐ', () => {
+    const save = createSave(newGame(1), 1_000);
+    const old = { ...save, unlocks: ['lb', 'removed-feature'], upgrades: { marketing: 2, lbPerf: 3 } };
+    delete (old as Partial<typeof old>).disabled; // 古いセーブには無い
+    const parsed = parseSave(old)!;
+    expect(parsed.unlocks).toEqual(['lb']);
+    expect(parsed.disabled).toEqual([]);
+    expect(parsed.upgrades.lbBandwidth).toBe(3);
+    expect(parsed.upgrades.marketing).toBe(2);
   });
 
   it('放置収入は効率と上限を反映する', () => {

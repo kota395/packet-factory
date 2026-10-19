@@ -1,13 +1,39 @@
-import { UNLOCKS, UNLOCK_BY_ID, UPGRADES, UPGRADE_BY_ID, type UpgradeDef } from '../sim/economy';
+import { NODE_DEFS } from '../sim/config';
+import { UNLOCKS, UNLOCK_BY_ID, UPGRADES, UPGRADE_BY_ID, type FeatureEffect, type UpgradeDef } from '../sim/economy';
 import type { Simulation } from '../sim/simulation';
-import type { UnlockId, UpgradeId } from '../sim/types';
-import { compact, money } from './format';
+import type { ReqKind, UnlockId, UpgradeId } from '../sim/types';
+import { bandwidth, compact, money } from './format';
 
 type Item = { type: 'unlock'; id: UnlockId } | { type: 'upgrade'; id: UpgradeId };
 
-const formatEffect = (def: UpgradeDef, v: number) => (def.unit === 'users' ? `${compact(v)} 人` : `×${v.toFixed(2)}`);
+const KIND_LABEL: Record<ReqKind, string> = { static: '静的', write: '書き込み' };
 
-/** 投資(解放・強化)の一覧。購入があったときだけ組み直し、それ以外はボタンの状態だけ更新する */
+function formatEffect(def: UpgradeDef, v: number): string {
+  if (def.unit === 'users') return `${compact(v)} 人`;
+  if (def.unit === 'bandwidth') return bandwidth((NODE_DEFS.lb.bandwidthMBps ?? 0) * v);
+  return `×${v.toFixed(2)}`;
+}
+
+/** 「静的: 単価 ×2・データ量 ×5」のような説明 */
+function describeFeature(effect: FeatureEffect): string {
+  const kinds = new Set<ReqKind>([
+    ...(Object.keys(effect.revenue ?? {}) as ReqKind[]),
+    ...(Object.keys(effect.dataSize ?? {}) as ReqKind[]),
+  ]);
+  return [...kinds]
+    .map((k) => {
+      const parts: string[] = [];
+      if (effect.revenue?.[k]) parts.push(`単価 ×${effect.revenue[k]}`);
+      if (effect.dataSize?.[k]) parts.push(`データ量 ×${effect.dataSize[k]}`);
+      return `${KIND_LABEL[k]}: ${parts.join('・')}`;
+    })
+    .join(' / ');
+}
+
+/**
+ * 投資(解放・強化)の一覧と、導入済みの配信コンテンツのオン/オフ。
+ * 購入や切り替えがあったときだけ組み直し、それ以外はボタンの状態だけ更新する。
+ */
 export class InvestPanel {
   private builtFor: Simulation | null = null;
   private builtVersion = -1;
@@ -23,10 +49,13 @@ export class InvestPanel {
       const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-type]');
       if (!button || button.disabled) return;
       const sim = this.getSim();
+      const id = button.dataset.id!;
       const r =
         button.dataset.type === 'unlock'
-          ? sim.unlock(button.dataset.id as UnlockId)
-          : sim.buyUpgrade(button.dataset.id as UpgradeId);
+          ? sim.unlock(id as UnlockId)
+          : button.dataset.type === 'feature'
+            ? sim.setFeatureEnabled(id as UnlockId, !sim.isFeatureActive(id as UnlockId))
+            : sim.buyUpgrade(id as UpgradeId);
       this.onResult(r.message, r.ok);
       this.update();
     });
@@ -51,7 +80,7 @@ export class InvestPanel {
     if (sim !== this.builtFor || sim.purchaseVersion !== this.builtVersion) this.rebuild(sim);
     if (!this.isOpen) return;
     this.moneyLabel.textContent = money(sim.money);
-    for (const button of this.list.querySelectorAll<HTMLButtonElement>('button[data-type]')) {
+    for (const button of this.list.querySelectorAll<HTMLButtonElement>('button.buy')) {
       const item = { type: button.dataset.type, id: button.dataset.id } as Item;
       const blocker = this.blocker(sim, item);
       button.disabled = blocker !== null;
@@ -73,36 +102,61 @@ export class InvestPanel {
   private rebuild(sim: Simulation): void {
     this.builtFor = sim;
     this.builtVersion = sim.purchaseVersion;
+    const html: string[] = [];
 
-    const html = this.items(sim).map((item) => {
+    // 導入済みの配信コンテンツ(オン/オフ)
+    const features = UNLOCKS.filter((u) => u.effect && sim.unlocks.has(u.id));
+    if (features.length) {
+      html.push('<div class="inv-section">配信コンテンツ</div>');
+      for (const def of features) {
+        const on = sim.isFeatureActive(def.id);
+        html.push(`
+          <div class="inv-item">
+            <div class="inv-main">
+              <div class="inv-title">${def.name}</div>
+              <div class="inv-effect">${describeFeature(def.effect!)}</div>
+            </div>
+            <button type="button" class="toggle ${on ? 'on' : ''}" data-type="feature" data-id="${def.id}" aria-pressed="${on}">${on ? 'オン' : 'オフ'}</button>
+          </div>`);
+      }
+      html.push('<div class="inv-section">投資</div>');
+    }
+
+    for (const item of this.items(sim)) {
       if (item.type === 'unlock') {
         const def = UNLOCK_BY_ID[item.id];
         const needs = def.requires && !sim.unlocks.has(def.requires) ? `要: ${UNLOCK_BY_ID[def.requires].name}` : '';
-        return row({
-          tag: '解放',
-          title: def.name,
-          desc: def.description,
-          effect: needs,
-          cost: def.cost,
-          type: 'unlock',
-          id: def.id,
-        });
+        const effect = def.effect ? describeFeature(def.effect) : '';
+        html.push(
+          row({
+            tag: def.effect ? 'コンテンツ' : '解放',
+            title: def.name,
+            desc: def.description,
+            effect: [effect, needs].filter(Boolean).join(' ・ '),
+            cost: def.cost,
+            type: 'unlock',
+            id: def.id,
+          }),
+        );
+        continue;
       }
       const def = UPGRADE_BY_ID[item.id];
       const level = sim.upgrades[item.id];
       const locked = def.requires && !sim.unlocks.has(def.requires);
-      return row({
-        tag: `Lv ${level}`,
-        title: def.name,
-        desc: def.description,
-        effect: locked
-          ? `要: ${UNLOCK_BY_ID[def.requires!].name}`
-          : `${formatEffect(def, def.effect(level))} → ${formatEffect(def, def.effect(level + 1))}`,
-        cost: sim.upgradeCost(item.id),
-        type: 'upgrade',
-        id: def.id,
-      });
-    });
+      html.push(
+        row({
+          tag: `Lv ${level}`,
+          title: def.name,
+          desc: def.description,
+          effect: locked
+            ? `要: ${UNLOCK_BY_ID[def.requires!].name}`
+            : `${formatEffect(def, def.effect(level))} → ${formatEffect(def, def.effect(level + 1))}`,
+          cost: sim.upgradeCost(item.id),
+          type: 'upgrade',
+          id: def.id,
+        }),
+      );
+    }
     this.list.innerHTML = html.join('');
   }
 }

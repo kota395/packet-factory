@@ -46,11 +46,11 @@ it(`balance bot (${MINUTES} min)`, () => {
     const dbs = ofKind(s, 'db');
     const lbs = ofKind(s, 'lb');
 
-    // 1. LB が詰まっていたら LB チューニングを最優先(買えるまで他に使わない)
+    // 1. LB が詰まっていたら回線増強を最優先(買えるまで他に使わない)
     if (lbs.length && load(s, lbs) > 0.7) {
-      const cost = s.upgradeCost('lbPerf');
-      if (s.buyUpgrade('lbPerf').ok) {
-        event(`LB 強化 ($${cost})`);
+      const cost = s.upgradeCost('lbBandwidth');
+      if (s.buyUpgrade('lbBandwidth').ok) {
+        event(`LB 回線増強 ($${cost})`);
         return true;
       }
       return false;
@@ -101,6 +101,14 @@ it(`balance bot (${MINUTES} min)`, () => {
     if (s.unlocks.has('lb') && !s.unlocks.has('writes')) {
       options.push(['会員機能', UNLOCK_BY_ID.writes.cost, () => s.unlock('writes').ok]);
     }
+    // 配信コンテンツは LB の帯域に余裕があるときだけ増やす
+    if (lbs.length && load(s, lbs) < 0.4) {
+      for (const id of ['images', 'video'] as const) {
+        if (!s.unlocks.has(id) && s.canUnlock(id) !== '「' + UNLOCK_BY_ID[UNLOCK_BY_ID[id].requires!]?.name + '」が必要です') {
+          options.push([UNLOCK_BY_ID[id].name, UNLOCK_BY_ID[id].cost, () => s.unlock(id).ok]);
+        }
+      }
+    }
     options.sort((a, b) => a[1] - b[1]);
     const [name, cost, buy] = options[0] ?? [];
     if (name && s.money >= cost! && buy!()) {
@@ -117,7 +125,7 @@ it(`balance bot (${MINUTES} min)`, () => {
         `== ${String(sec / 60).padStart(3)}m  $${Math.round(s.money)}  収支 ${s.incomePerSec.toFixed(1)}/s  ` +
           `ユーザー ${Math.round(s.users)}/${Math.round(s.marketSize)}  ${Math.round(r.rps)} rps  ` +
           `err ${(r.errorRate * 100).toFixed(1)}%  p99 ${r.p99}ms  WEB ${ofKind(s, 'web').length} DB ${ofKind(s, 'db').length}  ` +
-          `LB強化 ${s.upgrades.lbPerf}`,
+          `LB回線 ${s.upgrades.lbBandwidth}  コンテンツ ${[...s.unlocks].filter((u) => u === 'images' || u === 'video').join(',') || '-'}`,
       );
     }
     s.step(1000);

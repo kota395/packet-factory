@@ -33,3 +33,16 @@ export function duration(ms: number): string {
   if (h === 0) return `${m} 分`;
   return m ? `${h} 時間 ${m} 分` : `${h} 時間`;
 }
+
+/** 帯域の表示。引数は MB/秒(= 8 Mbps) */
+export function bandwidth(mbPerSec: number): string {
+  const mbps = mbPerSec * 8;
+  if (mbps >= 1000) return `${(mbps / 1000).toFixed(mbps >= 10_000 ? 0 : 1)} Gbps`;
+  return `${mbps.toFixed(mbps >= 10 ? 0 : 1)} Mbps`;
+}
+
+/** データ量の表示。引数は KB */
+export function dataSize(kb: number): string {
+  if (kb >= 1000) return `${(kb / 1000).toFixed(kb >= 10_000 ? 0 : 1)} MB`;
+  return `${Math.round(kb)} KB`;
+}

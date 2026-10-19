@@ -8,10 +8,10 @@ export type NodeKind = 'internet' | 'lb' | 'web' | 'db';
 export type ErrorReason = 'drop' | 'timeout' | 'no-route';
 
 /** 一度買えば解放される機能 */
-export type UnlockId = 'lb' | 'writes';
+export type UnlockId = 'lb' | 'writes' | 'images' | 'video';
 
 /** 何度でも買える強化 */
-export type UpgradeId = 'marketing' | 'monetize' | 'lbPerf' | 'webPerf' | 'dbPerf';
+export type UpgradeId = 'marketing' | 'monetize' | 'lbBandwidth' | 'webPerf' | 'dbPerf';
 
 export interface Request {
   readonly id: number;
@@ -22,4 +22,6 @@ export interface Request {
   hops: number;
   /** 今いるノードのキューに入った時刻。処理開始はこれより前にならない */
   readyAt: number;
+  /** データ量(KB)。生成時の配信内容で決まる */
+  readonly sizeKB: number;
 }
