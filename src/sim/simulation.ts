@@ -173,6 +173,7 @@ export class Simulation {
   /** 強化を反映した処理時間(ms) */
   serviceMs(node: NodeRuntime, kind: ReqKind): number {
     const base = node.def.serviceMs[kind];
+    if (node.kind === 'lb') return base / UPGRADE_BY_ID.lbPerf.effect(this.upgrades.lbPerf);
     if (node.kind === 'web') return base / UPGRADE_BY_ID.webPerf.effect(this.upgrades.webPerf);
     if (node.kind === 'db') return base / UPGRADE_BY_ID.dbPerf.effect(this.upgrades.dbPerf);
     return base;
@@ -187,6 +188,12 @@ export class Simulation {
   /** 次の 1 台の価格 */
   nodeCost(kind: NodeKind): number {
     return Math.round(NODE_DEFS[kind].cost * NODE_COST_GROWTH ** this.countOf(kind));
+  }
+
+  /** これ以上置けないか */
+  isAtMaxCount(kind: NodeKind): boolean {
+    const max = NODE_DEFS[kind].maxCount;
+    return max !== undefined && this.countOf(kind) >= max;
   }
 
   isKindUnlocked(kind: NodeKind): boolean {
@@ -245,7 +252,7 @@ export class Simulation {
    * 平均は実際に届いている種類の割合で重み付けする。上限が実質ないノードは Infinity。
    */
   capacityRpsOf(node: NodeRuntime): number {
-    if (node.kind === 'internet' || node.kind === 'lb') return Infinity;
+    if (node.kind === 'internet') return Infinity;
     const accepted = node.def.accepts;
     let total = 0;
     for (const k of accepted) total += node.inRps[k];
@@ -302,6 +309,10 @@ export class Simulation {
       return { ok: false, message: '盤面の外です' };
     }
     if (this.nodeAt(x, y)) return { ok: false, message: 'そのマスは使用中です' };
+    // セーブからの復元(free)では、昔の上限で置かれたノードもそのまま戻す
+    if (!opts.free && this.isAtMaxCount(kind)) {
+      return { ok: false, message: `${def.name}は ${def.maxCount} 台までです` };
+    }
     const cost = this.nodeCost(kind);
     if (!opts.free) {
       if (this.money < cost) return { ok: false, message: `資金が足りません($${cost} 必要)` };
@@ -400,6 +411,7 @@ export class Simulation {
         kind: this.rng() < writeShare ? 'write' : 'static',
         createdAt: now,
         hops: 0,
+        readyAt: now,
       };
       internet.arrivals[req.kind]++;
       this.route(internet, req, now);
@@ -451,23 +463,44 @@ export class Simulation {
     this.users = Math.max(MIN_USERS, u + (growth - churnRate * u) * dt);
   }
 
+  /**
+   * 1 刻み分の処理。空いた作業枠は「空いた時刻」から次の仕事を始めるので、
+   * 処理時間が刻み(TICK_MS)より短くても 1 刻みに何件でも正確にこなせる。
+   */
   private process(node: NodeRuntime, now: number): void {
-    if (node.busy.length) {
-      const remaining: Job[] = [];
-      for (const job of node.busy) {
-        if (job.doneAt <= now) this.complete(node, job.req, job.doneAt);
-        else remaining.push(job);
+    // この刻みの中で空いている(空く)作業枠の時刻
+    const free: number[] = [];
+    const busy: Job[] = [];
+    for (const job of node.busy) {
+      if (job.doneAt <= now) {
+        this.complete(node, job.req, job.doneAt);
+        free.push(job.doneAt);
+      } else {
+        busy.push(job);
       }
-      node.busy = remaining;
     }
-    while (node.busy.length < node.def.workers && node.queue.length) {
+    for (let i = node.busy.length; i < node.def.workers; i++) free.push(this.time);
+
+    while (free.length && node.queue.length) {
+      // 一番早く空く枠を使う
+      let slot = 0;
+      for (let i = 1; i < free.length; i++) if (free[i] < free[slot]) slot = i;
       const req = node.queue.shift()!;
-      if (now - req.createdAt > TIMEOUT_MS) {
-        this.fail(req, 'timeout', node, now);
+      const start = Math.max(free[slot], req.readyAt);
+      if (start - req.createdAt > TIMEOUT_MS) {
+        this.fail(req, 'timeout', node, start);
         continue;
       }
-      node.busy.push({ req, doneAt: now + this.serviceMs(node, req.kind) });
+      const doneAt = start + this.serviceMs(node, req.kind);
+      if (doneAt <= now) {
+        this.complete(node, req, doneAt);
+        free[slot] = doneAt;
+      } else {
+        busy.push({ req, doneAt });
+        free.splice(slot, 1);
+      }
     }
+    node.busy = busy;
   }
 
   private complete(node: NodeRuntime, req: Request, t: number): void {
@@ -509,6 +542,7 @@ export class Simulation {
       this.fail(t.req, 'drop', target, now);
       return;
     }
+    t.req.readyAt = t.end;
     target.queue.push(t.req);
   }
 

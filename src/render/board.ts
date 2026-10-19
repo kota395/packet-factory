@@ -328,6 +328,10 @@ export class BoardRenderer {
       v.stats.text = `${compact(inRps)}/s`;
       v.stats.style.fill = COLORS.muted;
     }
+    // 桁が増えても枠からはみ出さないように縮める
+    v.stats.scale.set(1);
+    const maxWidth = size * 0.9;
+    if (v.stats.width > maxWidth) v.stats.scale.set(maxWidth / v.stats.width);
   }
 
   private drawDropTarget(sim: Simulation): void {

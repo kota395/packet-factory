@@ -11,7 +11,7 @@ export type ErrorReason = 'drop' | 'timeout' | 'no-route';
 export type UnlockId = 'lb' | 'writes';
 
 /** 何度でも買える強化 */
-export type UpgradeId = 'marketing' | 'monetize' | 'webPerf' | 'dbPerf';
+export type UpgradeId = 'marketing' | 'monetize' | 'lbPerf' | 'webPerf' | 'dbPerf';
 
 export interface Request {
   readonly id: number;
@@ -20,4 +20,6 @@ export interface Request {
   readonly createdAt: number;
   /** 経由したノード数。ループ検出に使う */
   hops: number;
+  /** 今いるノードのキューに入った時刻。処理開始はこれより前にならない */
+  readyAt: number;
 }

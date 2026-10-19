@@ -17,9 +17,16 @@ const SEED = Number(process.env.BOT_SEED ?? 11);
 
 const ofKind = (s: Simulation, kind: string) => [...s.nodes.values()].filter((n) => n.kind === kind);
 
-/** 処理中 + キューの埋まり具合の平均(0〜2) */
-const load = (ns: NodeRuntime[]) =>
-  ns.length ? ns.reduce((a, n) => a + n.busy.length / n.def.workers + n.queue.length / n.def.queueMax, 0) / ns.length : 0;
+/** ノード群の負荷率(届いている量の合計 / 捌ける上限の合計)。プレイヤーがノードの数字から読むのと同じ値 */
+function load(s: Simulation, ns: NodeRuntime[]): number {
+  let inRps = 0;
+  let cap = 0;
+  for (const n of ns) {
+    inRps += s.inRpsOf(n);
+    cap += s.capacityRpsOf(n);
+  }
+  return cap > 0 ? inRps / cap : 0;
+}
 
 /** col 列目以降で空いているマス(中央の行から優先) */
 function freeCell(s: Simulation, col: number): [number, number] | null {
@@ -37,10 +44,20 @@ it(`balance bot (${MINUTES} min)`, () => {
   const act = (): boolean => {
     const webs = ofKind(s, 'web');
     const dbs = ofKind(s, 'db');
-    const r = s.metrics.rolling;
+    const lbs = ofKind(s, 'lb');
 
-    // 1. WEB が詰まっていたら増設(2 台目以降は LB が必要)
-    if (load(webs) > 0.5 || (r.errorRate > 0.02 && load(webs) > 0.3)) {
+    // 1. LB が詰まっていたら LB チューニングを最優先(買えるまで他に使わない)
+    if (lbs.length && load(s, lbs) > 0.7) {
+      const cost = s.upgradeCost('lbPerf');
+      if (s.buyUpgrade('lbPerf').ok) {
+        event(`LB 強化 ($${cost})`);
+        return true;
+      }
+      return false;
+    }
+
+    // 2. WEB が詰まっていたら増設(2 台目以降は LB が必要)
+    if (load(s, webs) > 0.7) {
       if (!s.unlocks.has('lb')) {
         if (s.unlock('lb').ok) event('解放: LB');
         return false;
@@ -64,8 +81,8 @@ it(`balance bot (${MINUTES} min)`, () => {
       }
     }
 
-    // 2. 書き込みを解放済みで DB が足りなければ増設
-    if (s.unlocks.has('writes') && (dbs.length === 0 || load(dbs) > 0.5) && s.money >= s.nodeCost('db')) {
+    // 3. 書き込みを解放済みで DB が足りなければ増設
+    if (s.unlocks.has('writes') && (dbs.length === 0 || load(s, dbs) > 0.7) && s.money >= s.nodeCost('db')) {
       const p = freeCell(s, 9);
       if (p) {
         const id = s.addNode('db', p[0], p[1]).id!;
@@ -75,7 +92,7 @@ it(`balance bot (${MINUTES} min)`, () => {
       }
     }
 
-    // 3. それ以外は一番安い投資を買う
+    // 4. それ以外は一番安い投資を買う
     const options: [string, number, () => boolean][] = [];
     if (s.users > 0.7 * s.marketSize) options.push(['広告', s.upgradeCost('marketing'), () => s.buyUpgrade('marketing').ok]);
     options.push(['収益化', s.upgradeCost('monetize'), () => s.buyUpgrade('monetize').ok]);
@@ -99,7 +116,8 @@ it(`balance bot (${MINUTES} min)`, () => {
       log.push(
         `== ${String(sec / 60).padStart(3)}m  $${Math.round(s.money)}  収支 ${s.incomePerSec.toFixed(1)}/s  ` +
           `ユーザー ${Math.round(s.users)}/${Math.round(s.marketSize)}  ${Math.round(r.rps)} rps  ` +
-          `err ${(r.errorRate * 100).toFixed(1)}%  p99 ${r.p99}ms  WEB ${ofKind(s, 'web').length} DB ${ofKind(s, 'db').length}`,
+          `err ${(r.errorRate * 100).toFixed(1)}%  p99 ${r.p99}ms  WEB ${ofKind(s, 'web').length} DB ${ofKind(s, 'db').length}  ` +
+          `LB強化 ${s.upgrades.lbPerf}`,
       );
     }
     s.step(1000);

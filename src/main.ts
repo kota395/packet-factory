@@ -217,8 +217,9 @@ function updateToolbar(): void {
     const label = ui.toolbar.querySelector<HTMLElement>(`[data-cost="${k}"]`);
     if (!label) continue;
     const unlocked = sim.isKindUnlocked(k);
-    label.textContent = unlocked ? money(sim.nodeCost(k)) : '🔒';
-    label.classList.toggle('short', unlocked && sim.money < sim.nodeCost(k));
+    const maxed = unlocked && sim.isAtMaxCount(k);
+    label.textContent = !unlocked ? '🔒' : maxed ? '設置済' : money(sim.nodeCost(k));
+    label.classList.toggle('short', unlocked && !maxed && sim.money < sim.nodeCost(k));
   }
   const badge = ui.toolbar.querySelector<HTMLElement>('.badge');
   if (badge) badge.hidden = !invest.anyAffordable(sim);
@@ -242,7 +243,9 @@ function updateHint(): void {
       break;
     default: {
       const d = NODE_DEFS[state.tool];
-      if (!sim.isKindUnlocked(state.tool)) {
+      if (sim.isKindUnlocked(state.tool) && sim.isAtMaxCount(state.tool)) {
+        text = `${d.name}はサービス 1 つにつき ${d.maxCount} 台までです。性能は投資の「LB チューニング」で上げられます。`;
+      } else if (!sim.isKindUnlocked(state.tool)) {
         text = `🔒 ${d.name}は投資メニューの「${UNLOCK_BY_ID[d.requires!].name}」で解放できます。`;
       } else {
         text = `空きマスをタップして${d.name}を配置(${money(sim.nodeCost(state.tool))}、維持費 $${d.upkeepPerSec}/秒)。${d.description}`;

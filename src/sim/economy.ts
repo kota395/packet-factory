@@ -60,6 +60,16 @@ export const UPGRADES: readonly UpgradeDef[] = [
     unit: 'multiplier',
   },
   {
+    id: 'lbPerf',
+    name: 'LB チューニング',
+    description: 'ロードバランサーの処理速度を上げる。',
+    baseCost: 300,
+    growth: 2.0,
+    requires: 'lb',
+    effect: (l) => 1.25 ** l,
+    unit: 'multiplier',
+  },
+  {
     id: 'webPerf',
     name: 'WEB チューニング',
     description: 'すべての WEB の処理速度を上げる。',
@@ -90,6 +100,7 @@ export function upgradeCost(def: UpgradeDef, level: number): number {
 export const emptyUpgrades = (): Record<UpgradeId, number> => ({
   marketing: 0,
   monetize: 0,
+  lbPerf: 0,
   webPerf: 0,
   dbPerf: 0,
 });

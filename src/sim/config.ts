@@ -85,6 +85,8 @@ export interface NodeKindDef {
   /** 接続できる先のノード種別 */
   readonly connectsTo: readonly NodeKind[];
   readonly maxOut: number;
+  /** 置ける台数の上限(なければ無制限) */
+  readonly maxCount?: number;
   readonly placeable: boolean;
   /** 配置に必要な解放 */
   readonly requires?: UnlockId;
@@ -114,16 +116,18 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     kind: 'lb',
     label: 'LB',
     name: 'ロードバランサー',
-    description: '接続先へ順番に振り分ける。',
+    description: '接続先の WEB へ順番に振り分ける。サービス 1 つにつき 1 台。',
     cost: 150,
     upkeepPerSec: 0.1,
-    workers: 1000,
-    queueMax: 2000,
-    serviceMs: { static: 1, write: 1 },
+    workers: 8,
+    queueMax: 200,
+    serviceMs: { static: 20, write: 20 },
     accepts: ['static', 'write'],
     terminates: [],
-    connectsTo: ['web', 'lb'],
-    maxOut: 8,
+    connectsTo: ['web'],
+    maxOut: 64,
+    // インターネット(=サービス)が 1 つの間は LB も 1 台で足りる。サービスが増えたら見直す
+    maxCount: 1,
     placeable: true,
     requires: 'lb',
     color: 0x9d8cff,

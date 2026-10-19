@@ -65,16 +65,20 @@ describe('ルーティング', () => {
     expect(s.metrics.availability).toBeLessThan(0.9);
   });
 
-  it('LB 同士のループは MAX_HOPS で打ち切られる', () => {
-    const s = sim({ traffic: constant(10) });
-    const a = s.addNode('lb', 2, 2).id!;
-    const b = s.addNode('lb', 3, 2).id!;
-    s.connect(s.internetId, a);
-    s.connect(a, b);
-    s.connect(b, a);
-    s.step(5_000);
-    expect(s.metrics.totalSuccess).toBe(0);
-    expect(s.metrics.errorsByReason['no-route']).toBeGreaterThan(0);
+  it('LB の処理上限を超えると LB で溢れ、LB チューニングで解消する', () => {
+    const run = (lbPerf: number) => {
+      const s = sim({ traffic: constant(700), writeShare: 0, upgrades: { lbPerf, webPerf: 6 } });
+      build(s, 6, 0);
+      s.step(15_000);
+      const lb = [...s.nodes.values()].find((n) => n.kind === 'lb')!;
+      return { lbErrors: lb.errors, cap: s.capacityRpsOf(lb) };
+    };
+    const base = run(0);
+    expect(base.cap).toBeCloseTo((8 * 1000) / 20, 0); // 400 rps
+    expect(base.lbErrors).toBeGreaterThan(0);
+    const tuned = run(4);
+    expect(tuned.cap).toBeGreaterThan(900);
+    expect(tuned.lbErrors).toBe(0);
   });
 });
 
@@ -88,6 +92,7 @@ describe('接続ルール', () => {
     expect(s.connect(db, web).ok).toBe(false); // DB からは出せない
     expect(s.connect(s.internetId, db).ok).toBe(false); // NET → DB
     expect(s.connect(lb, lb).ok).toBe(false); // 自己ループ
+    expect(s.connect(lb, db).ok).toBe(false); // LB → DB
   });
 
   it('インターネットの接続先は 1 つだけ', () => {
@@ -172,6 +177,15 @@ describe('ノードの購入', () => {
   it('資金が足りなければ配置できない', () => {
     const s = new Simulation({ seed: 1, startMoney: 10 });
     expect(s.addNode('web', 2, 2).ok).toBe(false);
+  });
+
+  it('LB はサービス 1 つにつき 1 台まで(復元は例外)', () => {
+    const s = sim();
+    expect(s.addNode('lb', 2, 2).ok).toBe(true);
+    expect(s.isAtMaxCount('lb')).toBe(true);
+    expect(s.addNode('lb', 2, 3).ok).toBe(false);
+    expect(s.addNode('lb', 2, 3, { free: true }).ok).toBe(true); // 古いセーブの復元
+    expect(s.addNode('web', 2, 5).ok).toBe(true); // WEB は無制限
   });
 
   it('解放前の LB / DB は配置できない', () => {
