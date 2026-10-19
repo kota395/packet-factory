@@ -36,8 +36,8 @@ export interface NodeRuntime {
   readonly id: number;
   readonly kind: NodeKind;
   readonly def: NodeKindDef;
-  readonly x: number;
-  readonly y: number;
+  x: number;
+  y: number;
   /** 購入時に払った額(撤去時の返金に使う) */
   readonly paid: number;
   queue: Request[];
@@ -49,7 +49,14 @@ export interface NodeRuntime {
   processed: number;
   errors: number;
   lastErrorAt: number;
+  /** 今の 1 秒間に届いた数(internet は送り出した数) */
+  arrivals: Record<ReqKind, number>;
+  /** 届いているリクエスト数/秒(種類別、直近数秒の平滑値) */
+  inRps: Record<ReqKind, number>;
 }
+
+/** 受信量の平滑化係数(1 秒ごと)。大きいほど直近の値を重視する */
+const IN_RPS_SMOOTHING = 0.5;
 
 /** ノード間を移動中のリクエスト */
 export interface Transit {
@@ -228,6 +235,35 @@ export class Simulation {
 
   // ---------------------------------------------------------------- 盤面の参照
 
+  /** そのノードに届いているリクエスト数/秒(internet は送り出している数) */
+  inRpsOf(node: NodeRuntime): number {
+    return node.inRps.static + node.inRps.write;
+  }
+
+  /**
+   * そのノードが捌ける上限(リクエスト/秒)。同時処理数 ÷ 平均処理時間で、
+   * 平均は実際に届いている種類の割合で重み付けする。上限が実質ないノードは Infinity。
+   */
+  capacityRpsOf(node: NodeRuntime): number {
+    if (node.kind === 'internet' || node.kind === 'lb') return Infinity;
+    const accepted = node.def.accepts;
+    let total = 0;
+    for (const k of accepted) total += node.inRps[k];
+    let avgMs = 0;
+    for (const k of accepted) {
+      // まだ何も届いていなければ、今の流入の割合で見積もる
+      const share = total > 0 ? node.inRps[k] / total : this.expectedShare(node, k);
+      avgMs += share * this.serviceMs(node, k);
+    }
+    return avgMs > 0 ? (node.def.workers * 1000) / avgMs : Infinity;
+  }
+
+  private expectedShare(node: NodeRuntime, kind: ReqKind): number {
+    if (node.def.accepts.length === 1) return node.def.accepts[0] === kind ? 1 : 0;
+    const w = this.writeShare;
+    return kind === 'write' ? w : 1 - w;
+  }
+
   nodeAt(x: number, y: number): NodeRuntime | undefined {
     for (const n of this.nodes.values()) if (n.x === x && n.y === y) return n;
     return undefined;
@@ -273,6 +309,21 @@ export class Simulation {
     }
     const node = this.createNode(kind, x, y, opts.paid ?? cost);
     return { ok: true, id: node.id };
+  }
+
+  /** ノードを空いているマスへ動かす。接続はそのまま */
+  moveNode(id: number, x: number, y: number): ActionResult {
+    const node = this.nodes.get(id);
+    if (!node) return { ok: false, message: 'ノードが見つかりません' };
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) {
+      return { ok: false, message: '盤面の外です' };
+    }
+    if (node.x === x && node.y === y) return { ok: true };
+    if (this.nodeAt(x, y)) return { ok: false, message: 'そのマスは使用中です' };
+    node.x = x;
+    node.y = y;
+    this.layoutVersion++;
+    return { ok: true };
   }
 
   removeNode(id: number): ActionResult {
@@ -350,6 +401,7 @@ export class Simulation {
         createdAt: now,
         hops: 0,
       };
+      internet.arrivals[req.kind]++;
       this.route(internet, req, now);
     }
 
@@ -373,8 +425,19 @@ export class Simulation {
     this.money -= this.upkeepPerSec * dt;
     if (!this.fixedTraffic) this.updateUsers(dt);
 
+    if (Math.floor(now / 1000) !== Math.floor(this.time / 1000)) this.rollNodeStats();
     this.time = now;
     this.metrics.advance(now, this.users);
+  }
+
+  /** 1 秒ごとに各ノードの受信量を平滑化して更新する */
+  private rollNodeStats(): void {
+    for (const n of this.nodes.values()) {
+      for (const k of ['static', 'write'] as const) {
+        n.inRps[k] += IN_RPS_SMOOTHING * (n.arrivals[k] - n.inRps[k]);
+        n.arrivals[k] = 0;
+      }
+    }
   }
 
   /** ロジスティック成長 − 品質による離脱 */
@@ -441,6 +504,7 @@ export class Simulation {
       this.fail(t.req, 'drop', undefined, now);
       return;
     }
+    target.arrivals[t.req.kind]++;
     if (target.queue.length >= target.def.queueMax) {
       this.fail(t.req, 'drop', target, now);
       return;
@@ -484,6 +548,8 @@ export class Simulation {
       processed: 0,
       errors: 0,
       lastErrorAt: -Infinity,
+      arrivals: { static: 0, write: 0 },
+      inRps: { static: 0, write: 0 },
     };
     this.nodes.set(node.id, node);
     this.layoutVersion++;

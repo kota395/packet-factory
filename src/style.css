@@ -183,8 +183,18 @@ button.active {
   font-variant-numeric: tabular-nums;
 }
 
-#info .row span:first-child {
+#info .row > span:first-child {
   color: var(--muted);
+}
+
+#info .ok {
+  color: var(--ok);
+}
+#info .warn {
+  color: var(--warn);
+}
+#info .bad {
+  color: var(--bad);
 }
 
 #info .desc {
@@ -562,5 +572,41 @@ button.active {
   #toolbar button {
     font-size: 12px;
     padding: 4px 0;
+  }
+}
+
+/* 縦長の画面では盤面の上側にノードが集まるので、詳細は下に小さく出す */
+@media (max-width: 480px) {
+  #info {
+    top: auto;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  #info .desc {
+    display: none;
+  }
+
+  #info .rows-box {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 14px;
+  }
+
+  #info .actions {
+    margin-top: 6px;
+  }
+
+  #info .actions button {
+    min-height: 32px;
+  }
+
+  #toast {
+    top: 10px;
+    bottom: auto;
   }
 }

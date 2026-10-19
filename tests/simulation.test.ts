@@ -108,6 +108,53 @@ describe('接続ルール', () => {
   });
 });
 
+describe('ノードの移動と受信量', () => {
+  it('空いているマスへ移動でき、接続は保たれる', () => {
+    const s = sim();
+    const web = s.addNode('web', 3, 4).id!;
+    s.connect(s.internetId, web);
+    expect(s.moveNode(web, 6, 2).ok).toBe(true);
+    expect(s.nodeAt(6, 2)?.id).toBe(web);
+    expect(s.nodeAt(3, 4)).toBeUndefined();
+    expect(s.hasEdge(s.internetId, web)).toBe(true);
+    expect(s.moveNode(s.internetId, 0, 0).ok).toBe(true); // インターネットも動かせる
+  });
+
+  it('使用中のマスや盤面の外には動かせない', () => {
+    const s = sim();
+    const a = s.addNode('web', 3, 4).id!;
+    s.addNode('web', 4, 4);
+    expect(s.moveNode(a, 4, 4).ok).toBe(false);
+    expect(s.moveNode(a, -1, 0).ok).toBe(false);
+    expect(s.moveNode(a, 99, 0).ok).toBe(false);
+  });
+
+  it('届いている量と処理上限を測れる', () => {
+    const s = sim({ traffic: constant(30), writeShare: 0 });
+    const web = s.addNode('web', 3, 4).id!;
+    s.connect(s.internetId, web);
+    s.step(10_000);
+    const node = s.nodes.get(web)!;
+    expect(s.inRpsOf(node)).toBeGreaterThan(22);
+    expect(s.inRpsOf(node)).toBeLessThan(38);
+    expect(s.inRpsOf(s.nodes.get(s.internetId)!)).toBeGreaterThan(22);
+    // 4 並列 × 60ms → 約 66.7 rps
+    expect(s.capacityRpsOf(node)).toBeCloseTo((4 * 1000) / 60, 0);
+  });
+
+  it('処理上限は届く種類の割合と強化を反映する', () => {
+    const s = sim({ traffic: constant(40), writeShare: 0.5, upgrades: { webPerf: 2 } });
+    build(s, 1, 1);
+    s.step(10_000);
+    const web = [...s.nodes.values()].find((n) => n.kind === 'web')!;
+    const db = [...s.nodes.values()].find((n) => n.kind === 'db')!;
+    // 静的 60ms と書き込み 30ms が半々 → 平均 45ms、×1.44 で速くなる
+    expect(s.capacityRpsOf(web)).toBeGreaterThan(110);
+    expect(s.capacityRpsOf(web)).toBeLessThan(145);
+    expect(s.capacityRpsOf(db)).toBeCloseTo((4 * 1000) / 80, 0);
+  });
+});
+
 describe('ノードの購入', () => {
   it('同じ種類を買うたびに価格が上がり、撤去で払った額の半分が戻る', () => {
     const s = new Simulation({ seed: 1, startMoney: 1000 });

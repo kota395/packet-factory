@@ -74,6 +74,12 @@ const invest = new InvestPanel(
 buildToolbar();
 await renderer.init(ui.board);
 renderer.onCellTap = handleCellTap;
+renderer.onNodeMove = (id, x, y) => {
+  const r = state.sim.moveNode(id, x, y);
+  if (!r.ok && r.message) toast(r.message);
+  state.selectedId = id;
+  updateInfo();
+};
 bindControls();
 const restored = restoreGame();
 setTool('select');
@@ -223,7 +229,7 @@ function updateHint(): void {
   let text: string;
   switch (state.tool) {
     case 'select':
-      text = 'ノードをタップすると状態を確認できます。詰まってきたら増設、余裕があれば投資で伸ばしましょう。';
+      text = 'ノードをタップで状態を確認、ドラッグで移動。数字は「届いている量/捌ける上限」(rps)です。';
       break;
     case 'connect':
       text =
@@ -312,13 +318,21 @@ function updateInfo(): void {
   const sim = state.sim;
   const d = node.def;
   const rows: [string, string][] = [];
-  if (node.kind !== 'internet') {
+  const inRps = sim.inRpsOf(node);
+  const cap = sim.capacityRpsOf(node);
+  if (node.kind === 'internet') {
+    rows.push(['送出', `${compact(inRps, 1)} rps`]);
+  } else {
+    rows.push(['受信', `${compact(inRps, 1)} rps`]);
+    if (Number.isFinite(cap)) {
+      const ratio = inRps / cap;
+      const cls = ratio >= 0.9 ? 'bad' : ratio >= 0.7 ? 'warn' : 'ok';
+      rows.push(['上限', `${compact(cap, 1)} rps`]);
+      rows.push(['負荷', `<span class="${cls}">${Math.round(ratio * 100)}%</span>(余裕 ${compact(Math.max(0, cap - inRps), 1)} rps)`]);
+    }
     rows.push(['処理中', `${node.busy.length} / ${d.workers}`]);
     rows.push(['キュー', `${node.queue.length} / ${d.queueMax}`]);
-    rows.push(['処理数', compact(node.processed)]);
     rows.push(['維持費', `$${d.upkeepPerSec}/秒`]);
-  } else {
-    rows.push(['流入', `${compact(sim.trafficAt(sim.time), 1)} rps`]);
   }
   rows.push(['エラー', compact(node.errors)]);
   const outs = node.out.map((id) => sim.nodes.get(id)?.def.label ?? '?');
