@@ -1,0 +1,387 @@
+:root {
+  --bg: #0b0f14;
+  --panel: #121a23;
+  --panel-2: #18222e;
+  --line: #243142;
+  --text: #e8edf2;
+  --muted: #8b98a5;
+  --accent: #4aa3ff;
+  --write: #ff9f43;
+  --ok: #2ecc71;
+  --warn: #f1c40f;
+  --bad: #ff4d4f;
+  --radius: 10px;
+  --font: system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  -webkit-text-size-adjust: 100%;
+  touch-action: manipulation;
+  overscroll-behavior: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-height: 36px;
+  padding: 0 10px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:hover {
+  border-color: #3a4a5e;
+}
+
+button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: 700;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+}
+
+/* ---- HUD ---------------------------------------------------------- */
+
+#hud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.stats {
+  display: flex;
+  gap: 4px 14px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 52px;
+}
+
+.stat .k {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.stat .v {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.v.ok {
+  color: var(--ok);
+}
+.v.warn {
+  color: var(--warn);
+}
+.v.bad {
+  color: var(--bad);
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.speed,
+.menu {
+  display: flex;
+  gap: 4px;
+}
+
+.speed button {
+  min-width: 40px;
+  font-size: 12px;
+  letter-spacing: -2px;
+}
+
+/* ---- グラフ -------------------------------------------------------- */
+
+#chart-panel {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 4px 6px 0;
+}
+
+#chart .u-legend {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ---- 盤面 ---------------------------------------------------------- */
+
+#board {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#board canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  touch-action: none;
+}
+
+#info {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  min-width: 180px;
+  max-width: calc(100% - 16px);
+  padding: 10px 12px;
+  background: rgba(18, 26, 35, 0.94);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+#info h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+#info .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+#info .row span:first-child {
+  color: var(--muted);
+}
+
+#info .desc {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 2px 0 6px;
+}
+
+#info .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+#toast {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  z-index: 3;
+  transform: translate(-50%, 8px);
+  max-width: calc(100% - 24px);
+  padding: 8px 14px;
+  background: rgba(24, 34, 46, 0.96);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s, transform 0.18s;
+}
+
+#toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* ---- ツールバー ---------------------------------------------------- */
+
+#hint {
+  margin: 0;
+  padding: 6px 12px;
+  min-height: 30px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+#toolbar {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+  padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
+  background: var(--panel);
+}
+
+#toolbar button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 4px 2px;
+  line-height: 1.2;
+}
+
+#toolbar button small {
+  font-size: 10px;
+  opacity: 0.75;
+  font-family: var(--mono);
+}
+
+#toolbar .swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 4px;
+}
+
+/* ---- モーダル ------------------------------------------------------ */
+
+#modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(5, 8, 12, 0.7);
+}
+
+#modal[hidden] {
+  display: none;
+}
+
+.modal-card {
+  width: min(360px, 100%);
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  text-align: center;
+}
+
+.modal-card h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.modal-card .rank {
+  font-size: 56px;
+  font-weight: 800;
+  line-height: 1.1;
+  margin: 8px 0;
+}
+
+.modal-card .rows {
+  text-align: left;
+  margin: 12px 0 16px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.modal-card .rows div {
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
+}
+
+.modal-card .rows span:first-child {
+  color: var(--muted);
+}
+
+.modal-card .actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.modal-card .actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: 700;
+}
+
+.legend {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: 1px;
+}
+
+@media (min-width: 900px) {
+  #toolbar {
+    grid-template-columns: repeat(6, minmax(0, 110px));
+    justify-content: center;
+  }
+}
+
+@media (max-width: 480px) {
+  #hud {
+    padding: 6px 8px;
+  }
+
+  .stats {
+    gap: 2px 10px;
+  }
+
+  .controls {
+    gap: 6px;
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .controls button {
+    min-height: 34px;
+    padding: 0 8px;
+    font-size: 13px;
+  }
+
+  .speed button {
+    min-width: 36px;
+  }
+}

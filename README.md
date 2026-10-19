@@ -3,7 +3,36 @@
 データセンター/ネットワークを題材にした、ブラウザで遊べる「ライン自動化」ゲーム。
 GitHub Pages などの静的ホスティングだけで動くことを前提にする。
 
-> ステータス: 企画段階(方向性のみ。技術選定・実装はこれから)
+> ステータス: 最小プロトタイプ(LB / WEB / DB、2 種類のリクエスト、1 ステージ)
+>
+> 技術選定とライセンス方針は [docs/tech-stack.md](docs/tech-stack.md) を参照。
+
+## 開発
+
+```sh
+npm install
+npm run dev      # 開発サーバー
+npm test         # シミュレーションのユニットテスト
+npm run build    # 型チェック + dist/ へビルド(依存ライセンスの検査込み)
+npm run preview  # ビルド結果の確認
+```
+
+### GitHub Pages で公開する
+
+1. リポジトリの Settings → Pages で Source を「GitHub Actions」にする
+   (プライベートのまま公開するには GitHub Pro 以上が必要)
+2. Settings → Secrets and variables → Actions → Variables に `DEPLOY_PAGES` = `true` を追加
+3. `main` に push すると自動でビルド・公開される
+
+`DEPLOY_PAGES` が未設定の間は、テストとビルドだけを実行する。
+
+## 遊び方(プロトタイプ)
+
+- 下のツールバーでノードを選び、空きマスをタップして配置する
+- 「接続」で接続元 → 接続先の順にタップしてつなぐ(同じ線をもう一度つなぐと解除)
+- 接続できる向き: NET → LB / WEB、LB → WEB / LB、WEB → DB
+- ▶ で開始。ゲーム内 24 時間(実時間 5 分、早送り可)を可用性 99% 以上で乗り切ればクリア
+- 「共有」で今の構成を URL としてコピーできる。構成はブラウザにも自動保存される
 
 ## コンセプト
 

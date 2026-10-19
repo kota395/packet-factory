@@ -1,0 +1,49 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      # 型チェック + ビルド。許可外ライセンスの依存が入るとここで失敗する
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v5
+        if: github.ref == 'refs/heads/main' && vars.DEPLOY_PAGES == 'true'
+        with:
+          path: dist
+
+  # GitHub Pages を有効にし、リポジトリ変数 DEPLOY_PAGES=true を設定したときだけ公開する。
+  # (プライベートリポジトリの Pages は有料プランが必要なので、それまではビルド確認のみ)
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_PAGES == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+      - id: deployment
+        uses: actions/deploy-pages@v5
