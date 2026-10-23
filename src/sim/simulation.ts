@@ -8,6 +8,7 @@ import {
   REVENUE_PER_PV,
   START_USERS,
   TICK_MS,
+  VIRT,
 } from './config';
 import {
   UNLOCKS,
@@ -29,7 +30,7 @@ import {
   growingPrice,
   modelPrice,
 } from './pricing';
-import type { ModelId, PortRef, RoleId, UnlockId, UpgradeId } from './types';
+import type { DiskKind, ModelId, PortRef, RoleId, UnlockId, UpgradeId, VmSize } from './types';
 
 export interface ActionResult {
   ok: boolean;
@@ -48,7 +49,7 @@ export interface SimOptions {
 }
 
 /** 役割を割り当てるのに必要な解放(web と db は最初から使える) */
-const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = { lb: 'lb', cache: 'cache' };
+const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = { lb: 'lb', cache: 'cache', replica: 'replication' };
 
 /**
  * ゲーム全体の状態。物理層(Facility)と、流量モデルによる計算、お金とユーザーを持つ。
@@ -220,6 +221,8 @@ export class Simulation {
     const d = this.facility.devices.get(id);
     if (!d) return { ok: false, message: '機器が見つかりません' };
     if (MODEL_BY_ID[d.model].category === 'handoff') return { ok: false, message: '回線終端は撤去できません' };
+    const vms = this.facility.vmsOn(id);
+    if (vms.length) return { ok: false, message: `${d.name} には VM が ${vms.length} 台載っています。先に移すか消してください` };
     const refund = Math.floor(d.paid * SELL_REFUND_RATE);
     const cables = this.facility.remove(id);
     this.money += refund;
@@ -254,6 +257,11 @@ export class Simulation {
   roleError(id: number, role: RoleId): string | null {
     const d = this.facility.devices.get(id);
     if (!d || MODEL_BY_ID[d.model].category !== 'server') return '役割はサーバにだけ割り当てられます';
+    if (d.hv) return 'ハイパーバイザには役割を付けられません。VM に付けてください';
+    return this.roleUnlockError(role);
+  }
+
+  private roleUnlockError(role: RoleId): string | null {
     const unlock = ROLE_UNLOCK[role];
     if (unlock && !this.unlocks.has(unlock)) return `投資の「${UNLOCK_BY_ID[unlock].name}」が必要です`;
     return null;
@@ -268,6 +276,99 @@ export class Simulation {
     this.facility.setRoles(id, roles);
     this.refreshFlow();
     return { ok: true };
+  }
+
+  // ---------------------------------------------------------------- 仮想化
+
+  hvError(id: number, on: boolean): string | null {
+    const d = this.facility.devices.get(id);
+    if (!d || MODEL_BY_ID[d.model].category !== 'server') return 'ハイパーバイザにできるのはサーバだけです';
+    if (on && !this.unlocks.has('virtualization')) return `投資の「${UNLOCK_BY_ID.virtualization.name}」が必要です`;
+    if (!on && this.facility.vmsOn(id).length) return 'VM が載っている間はやめられません';
+    return null;
+  }
+
+  /** サーバをハイパーバイザにする / やめる。する場合、付けていた役割は外れる */
+  setHv(id: number, on: boolean): ActionResult {
+    const err = this.hvError(id, on);
+    if (err) return { ok: false, message: err };
+    const d = this.facility.devices.get(id)!;
+    const dropped = d.roles.length;
+    this.facility.setHv(id, on);
+    this.refreshFlow();
+    const note = on && dropped ? '(役割は外れました。VM に付けてください)' : '';
+    return { ok: true, message: `${d.name} を${on ? 'ハイパーバイザにしました' : '物理サーバに戻しました'}${note}` };
+  }
+
+  createVm(host: number, size: VmSize): ActionResult {
+    const err = this.facility.vmPlaceError(host, size);
+    if (err) return { ok: false, message: err };
+    const vm = this.facility.createVm(host, size);
+    this.refreshFlow();
+    return { ok: true, id: vm.id, message: `${vm.name}(${VIRT.sizes[size].label})を作りました` };
+  }
+
+  deleteVm(id: number): ActionResult {
+    const vm = this.facility.vms.get(id);
+    if (!vm) return { ok: false, message: 'VM が見つかりません' };
+    this.facility.removeVm(id);
+    this.refreshFlow();
+    return { ok: true, message: `${vm.name} を消しました` };
+  }
+
+  /** 別のホストへの移し方: 共有ストレージなら止めずに(ライブマイグレーション)、ローカルディスクならコピーの間止まる */
+  vmMoveInfo(id: number, host: number): { error: string | null; downtimeMs: number } {
+    const vm = this.facility.vms.get(id);
+    if (!vm) return { error: 'VM が見つかりません', downtimeMs: 0 };
+    if (vm.host === host) return { error: 'すでにそのホストにいます', downtimeMs: 0 };
+    if (vm.downUntil > this.time) return { error: '移している途中です', downtimeMs: 0 };
+    return {
+      error: this.facility.vmPlaceError(host, vm.size, id),
+      downtimeMs: vm.disk === 'shared' ? 0 : VIRT.migrateDowntimeMs,
+    };
+  }
+
+  moveVm(id: number, host: number): ActionResult {
+    const { error, downtimeMs } = this.vmMoveInfo(id, host);
+    if (error) return { ok: false, message: error };
+    const vm = this.facility.vms.get(id)!;
+    this.facility.moveVm(id, host, this.time + downtimeMs);
+    this.refreshFlow();
+    const to = this.facility.devices.get(host)!.name;
+    return {
+      ok: true,
+      message: downtimeMs
+        ? `${vm.name} を ${to} へ移しています(ディスクのコピーで ${downtimeMs / 1000} 秒止まります)`
+        : `${vm.name} を ${to} へライブマイグレーションしました`,
+    };
+  }
+
+  vmRoleError(id: number, role: RoleId): string | null {
+    if (!this.facility.vms.has(id)) return 'VM が見つかりません';
+    return this.roleUnlockError(role);
+  }
+
+  toggleVmRole(id: number, role: RoleId): ActionResult {
+    const vm = this.facility.vms.get(id);
+    const err = this.vmRoleError(id, role);
+    if (!vm || err) return { ok: false, message: err ?? 'VM が見つかりません' };
+    this.facility.setVmRoles(id, vm.roles.includes(role) ? vm.roles.filter((r) => r !== role) : [...vm.roles, role]);
+    this.refreshFlow();
+    return { ok: true };
+  }
+
+  setVmDisk(id: number, disk: DiskKind): ActionResult {
+    const vm = this.facility.vms.get(id);
+    if (!vm) return { ok: false, message: 'VM が見つかりません' };
+    if (disk === 'shared' && !this.unlocks.has('storage')) {
+      return { ok: false, message: `投資の「${UNLOCK_BY_ID.storage.name}」が必要です` };
+    }
+    this.facility.setVmDisk(id, disk);
+    this.refreshFlow();
+    return {
+      ok: true,
+      message: disk === 'shared' ? `${vm.name} のディスクを共有ストレージへ移しました` : `${vm.name} のディスクをローカルへ戻しました`,
+    };
   }
 
   // ---------------------------------------------------------------- 投資
@@ -341,6 +442,7 @@ export class Simulation {
       images: this.isFeatureActive('images'),
       comments: this.isFeatureActive('comments'),
       roles: this.availableRoles,
+      now: this.time,
     });
   }
 

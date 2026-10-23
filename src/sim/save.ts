@@ -2,7 +2,7 @@ import { MODEL_BY_ID, portsOf } from './catalog';
 import { OFFLINE, RACK, ROW } from './config';
 import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades } from './economy';
 import { Simulation } from './simulation';
-import { ROLE_IDS, type ModelId, type RoleId, type UnlockId, type UpgradeId } from './types';
+import { ROLE_IDS, type DiskKind, type ModelId, type RoleId, type UnlockId, type UpgradeId, type VmSize } from './types';
 
 /**
  * セーブデータ。構成(ラック・機器・ケーブル)・お金・ユーザー数・投資状況を残す。
@@ -21,8 +21,10 @@ export interface SaveData {
   upgrades: Record<UpgradeId, number>;
   /** 借りているラックの位置 */
   racks: number[];
-  /** [ID, 機種, ラック, U, 役割, 購入額, 名前] */
-  devices: [number, ModelId, number, number, RoleId[], number, string][];
+  /** [ID, 機種, ラック, U, 役割, 購入額, 名前, ハイパーバイザか] */
+  devices: [number, ModelId, number, number, RoleId[], number, string, boolean][];
+  /** [ID, 名前, ホスト, 大きさ, 役割, ディスク] */
+  vms: [number, string, number, VmSize, RoleId[], DiskKind][];
   /** [ID, 機器 A, ポート A, 機器 B, ポート B, 購入額] */
   cables: [number, number, number, number, number, number][];
 }
@@ -55,7 +57,8 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     disabled: [...sim.disabledFeatures],
     upgrades: { ...sim.upgrades },
     racks: [...f.racks.keys()],
-    devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name]),
+    devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name, d.hv]),
+    vms: [...f.vms.values()].map((v) => [v.id, v.name, v.host, v.size, [...v.roles], v.disk]),
     cables: [...f.cables.values()].map((c) => [c.id, c.a.device, c.a.port, c.b.device, c.b.port, c.paid]),
   };
 }
@@ -71,11 +74,16 @@ export function loadSave(save: SaveData): Simulation {
   sim.lifetimeEarned = save.lifetimeEarned;
   const f = sim.facility;
   for (const slot of save.racks) f.rent(slot);
-  for (const [id, model, slot, u, roles, paid, name] of save.devices) {
+  for (const [id, model, slot, u, roles, paid, name, hv] of save.devices) {
     // 壊れた配置(重なり・ラック外)は読み飛ばす。電力は昔の上限で置いたものもそのまま戻す
     if (f.placeError(model, slot, u, Infinity) !== null) continue;
     const d = f.place(model, slot, u, paid, { id, name });
+    if (hv) f.setHv(d.id, true);
     f.setRoles(d.id, roles);
+  }
+  for (const [id, name, host, size, roles, disk] of save.vms) {
+    if (!f.devices.get(host)?.hv) continue;
+    f.createVm(host, size, { id, name, roles, disk });
   }
   for (const [id, da, pa, db, pb, paid] of save.cables) {
     const a = { device: da, port: pa };
@@ -152,13 +160,24 @@ export function parseSave(data: unknown): SaveData | null {
   }
 
   const devices: SaveData['devices'] = [];
+  const okRoles = (roles: unknown[]) => roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId));
   for (const item of d.devices as unknown[]) {
-    if (!Array.isArray(item) || item.length !== 7) return null;
-    const [id, model, slot, u, roles, paid, name] = item;
+    // 仮想化の前のセーブは 7 要素(ハイパーバイザの印がない)
+    if (!Array.isArray(item) || (item.length !== 7 && item.length !== 8)) return null;
+    const [id, model, slot, u, roles, paid, name, hv] = item;
     if (!isInt(id) || id < 0 || typeof model !== 'string' || !(model in MODEL_BY_ID)) return null;
     if (!isInt(slot) || !isInt(u) || !Array.isArray(roles) || !isNum(paid) || typeof name !== 'string') return null;
-    const okRoles = roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId));
-    devices.push([id, model as ModelId, slot, u, okRoles, paid, name.slice(0, 32)]);
+    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true]);
+  }
+
+  const vms: SaveData['vms'] = [];
+  for (const item of (Array.isArray(d.vms) ? d.vms : []) as unknown[]) {
+    if (!Array.isArray(item) || item.length !== 6) return null;
+    const [id, name, host, size, roles, disk] = item;
+    if (!isInt(id) || id < 1 || typeof name !== 'string' || !isInt(host) || !Array.isArray(roles)) return null;
+    if (size !== 's' && size !== 'm' && size !== 'l') return null;
+    if (disk !== 'local' && disk !== 'shared') return null;
+    vms.push([id, name.slice(0, 32), host, size, okRoles(roles), disk]);
   }
 
   const cables: SaveData['cables'] = [];
@@ -185,6 +204,7 @@ export function parseSave(data: unknown): SaveData | null {
     upgrades,
     racks,
     devices,
+    vms,
     cables,
   };
 }

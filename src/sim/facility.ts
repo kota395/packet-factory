@@ -2,8 +2,8 @@
  * 物理層: 列・ラック・機器・ポート・ケーブル。お金や電力契約は扱わず、置けるか・つなげるかだけを判断する。
  */
 import { MODEL_BY_ID, portsOf, type PortDef } from './catalog';
-import { CABLE, RACK, ROW } from './config';
-import type { ModelId, PortRef, RoleId } from './types';
+import { CABLE, RACK, ROW, VIRT } from './config';
+import type { DiskKind, ModelId, PortRef, RoleId, VmSize } from './types';
 
 export interface Rack {
   /** 列の中の位置(0 始まり) */
@@ -17,11 +17,26 @@ export interface Device {
   slot: number;
   /** 一番下の U(1 始まり)。2U の機器は u と u+1 を使う */
   u: number;
-  /** 割り当てた役割(サーバのみ) */
+  /** 割り当てた役割(サーバのみ。ハイパーバイザにしたサーバは役割を持たず、VM が持つ) */
   roles: RoleId[];
+  /** ハイパーバイザ(VM を載せるホスト)にしているか */
+  hv: boolean;
   /** 買ったときの値段(売却時の返金に使う) */
   readonly paid: number;
   readonly name: string;
+}
+
+/** 仮想マシン。ハイパーバイザにしたサーバの上で動き、役割を持つ */
+export interface Vm {
+  readonly id: number;
+  readonly name: string;
+  /** 載っているホスト(機器 ID) */
+  host: number;
+  readonly size: VmSize;
+  roles: RoleId[];
+  disk: DiskKind;
+  /** 別のホストへ移している間は止まる。この時刻(シミュレーション時間)まで */
+  downUntil: number;
 }
 
 export interface Cable {
@@ -42,6 +57,7 @@ function namePrefix(model: ModelId): string {
   const m = MODEL_BY_ID[model];
   if (m.category === 'handoff') return 'isp';
   if (model === 'agg-10g') return 'agg';
+  if (m.category === 'storage') return 'nas';
   return m.category === 'switch' ? 'sw' : 'srv';
 }
 
@@ -49,11 +65,13 @@ export class Facility {
   readonly racks = new Map<number, Rack>();
   readonly devices = new Map<number, Device>();
   readonly cables = new Map<number, Cable>();
+  readonly vms = new Map<number, Vm>();
   /** 配置・配線が変わるたびに増える。描画や経路の作り直しの判定に使う */
   version = 0;
   private readonly portToCable = new Map<string, number>();
   private nextDeviceId = 1;
   private nextCableId = 1;
+  private nextVmId = 1;
 
   // ---------------------------------------------------------------- ラック
 
@@ -118,7 +136,7 @@ export class Facility {
   place(model: ModelId, slot: number, u: number, paid: number, opts: { id?: number; name?: string } = {}): Device {
     const id = opts.id ?? this.nextDeviceId;
     this.nextDeviceId = Math.max(this.nextDeviceId, id + 1);
-    const device: Device = { id, model, slot, u, roles: [], paid, name: opts.name ?? this.newName(model) };
+    const device: Device = { id, model, slot, u, roles: [], hv: false, paid, name: opts.name ?? this.newName(model) };
     this.devices.set(id, device);
     this.version++;
     return device;
@@ -147,6 +165,89 @@ export class Facility {
     const d = this.devices.get(id);
     if (!d) return;
     d.roles = roles;
+    this.version++;
+  }
+
+  setHv(id: number, on: boolean): void {
+    const d = this.devices.get(id);
+    if (!d) return;
+    d.hv = on;
+    if (on) d.roles = [];
+    this.version++;
+  }
+
+  // ---------------------------------------------------------------- 仮想マシン
+
+  vmsOn(host: number): Vm[] {
+    return [...this.vms.values()].filter((v) => v.host === host);
+  }
+
+  /** ホストで VM に割り当て済みのメモリ(GB)と vCPU */
+  hostUsage(host: number, ignore?: number): { memGB: number; vcpu: number } {
+    let memGB = 0;
+    let vcpu = 0;
+    for (const v of this.vms.values()) {
+      if (v.host !== host || v.id === ignore) continue;
+      memGB += VIRT.sizes[v.size].memGB;
+      vcpu += VIRT.sizes[v.size].vcpu;
+    }
+    return { memGB, vcpu };
+  }
+
+  /** そのホストに size の VM を載せられない理由 */
+  vmPlaceError(host: number, size: VmSize, ignore?: number): string | null {
+    const d = this.devices.get(host);
+    if (!d || MODEL_BY_ID[d.model].category !== 'server') return 'VM を載せられるのはサーバだけです';
+    if (!d.hv) return `${d.name} はハイパーバイザになっていません`;
+    const m = MODEL_BY_ID[d.model];
+    const used = this.hostUsage(host, ignore);
+    const s = VIRT.sizes[size];
+    const memFree = m.memGB! - VIRT.hostMemGB - used.memGB;
+    if (s.memGB > memFree) return `${d.name} のメモリが足りません(空き ${Math.max(0, memFree)}GB)`;
+    const vcpuMax = m.cores! * VIRT.vcpuOvercommit;
+    if (used.vcpu + s.vcpu > vcpuMax) return `${d.name} の vCPU が足りません(上限 ${vcpuMax})`;
+    return null;
+  }
+
+  createVm(host: number, size: VmSize, opts: { id?: number; name?: string; roles?: RoleId[]; disk?: DiskKind } = {}): Vm {
+    const id = opts.id ?? this.nextVmId;
+    this.nextVmId = Math.max(this.nextVmId, id + 1);
+    const used = new Set([...this.vms.values()].map((v) => v.name));
+    let name = opts.name;
+    for (let n = 1; !name; n++) {
+      const candidate = `vm${String(n).padStart(2, '0')}`;
+      if (!used.has(candidate)) name = candidate;
+    }
+    const vm: Vm = { id, name, host, size, roles: opts.roles ?? [], disk: opts.disk ?? 'local', downUntil: 0 };
+    this.vms.set(id, vm);
+    this.version++;
+    return vm;
+  }
+
+  moveVm(id: number, host: number, downUntil: number): void {
+    const v = this.vms.get(id);
+    if (!v) return;
+    v.host = host;
+    v.downUntil = downUntil;
+    this.version++;
+  }
+
+  removeVm(id: number): void {
+    this.vms.delete(id);
+    this.version++;
+  }
+
+  setVmRoles(id: number, roles: RoleId[]): void {
+    const v = this.vms.get(id);
+    if (!v) return;
+    v.roles = roles;
+    this.version++;
+  }
+
+  setVmDisk(id: number, disk: DiskKind): void {
+    const v = this.vms.get(id);
+    if (!v) return;
+    v.disk = disk;
     this.version++;
   }
 

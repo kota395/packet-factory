@@ -91,6 +91,12 @@ renderer.onConnect = (a, b) => {
   if (r.ok && r.id !== undefined) select({ kind: 'cable', id: r.id });
   saveGame();
 };
+renderer.onVmMove = (vm, host) => {
+  const r = state.sim.moveVm(vm, host);
+  if (r.message) toast(r.message);
+  select({ kind: 'vm', id: vm });
+  saveGame();
+};
 el('btn-zoom-in').addEventListener('click', () => renderer.zoomBy(1.25));
 el('btn-zoom-out').addEventListener('click', () => renderer.zoomBy(0.8));
 el('btn-fit').addEventListener('click', () => renderer.fit());
@@ -195,7 +201,7 @@ function updateToolbar(): void {
 function updateHint(): void {
   ui.hint.textContent =
     state.face === 'front'
-      ? '前面: 空いている U をタップして機器を設置、機器はドラッグで移動。点線の区画をタップしてラックを借りる。'
+      ? '前面: 空いている U をタップして機器を設置、機器はドラッグで移動(VM の札は別のホストへドラッグで移動)。点線の区画をタップしてラックを借りる。'
       : '背面: ポートから別のポートへドラッグして配線。ケーブルやポートをタップすると詳細と「抜く」。';
 }
 
@@ -253,6 +259,7 @@ function updateHud(): void {
   const sel = state.selected;
   if (sel?.kind === 'device' && !sim.facility.devices.has(sel.id)) state.selected = null;
   if (sel?.kind === 'cable' && !sim.facility.cables.has(sel.id)) state.selected = null;
+  if (sel?.kind === 'vm' && !sim.facility.vms.has(sel.id)) state.selected = null;
   info.update(state.selected);
   updateToolbar();
 }

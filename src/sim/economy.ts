@@ -60,6 +60,19 @@ export const UNLOCKS: readonly UnlockDef[] = [
     role: 'cache',
   },
   {
+    id: 'replication',
+    name: 'MySQL レプリケーション',
+    description:
+      '役割「replica」を割り当てられる。db(プライマリ)の複製で、読み込みを肩代わりする。書き込みはすべてのレプリカに複製されるので、書き込みが多いとレプリカも忙しい。',
+    role: 'replica',
+  },
+  {
+    id: 'virtualization',
+    name: '仮想化(ハイパーバイザ)',
+    description:
+      'サーバをハイパーバイザにして VM を載せられる。役割は VM に付ける。仮想化ホスト向けの大きな機種も買えるようになる。',
+  },
+  {
     id: 'tenGig',
     name: '10G 機器',
     description: '10G のアップリンクを持つ 48 ポートスイッチを買えるようになる。',
@@ -69,6 +82,13 @@ export const UNLOCKS: readonly UnlockDef[] = [
     name: '集約ネットワーク',
     description: 'ラックごとの ToR スイッチをまとめる 10G 集約スイッチを買えるようになる。',
     requires: 'tenGig',
+  },
+  {
+    id: 'storage',
+    name: '共有ストレージ',
+    description:
+      'ストレージアプライアンスを買えるようになり、VM のディスクを共有ストレージに置ける。共有ディスクの VM はホストを止めずに移せる。',
+    requires: 'virtualization',
   },
 ];
 
@@ -141,6 +161,24 @@ export const STAGES: readonly StageDef[] = [
     summary: '電力が尽きたら 2 本目のラックへ。ToR スイッチを集約スイッチでまとめ、ラック間の帯域を考える。',
     unlocks: ['tenGig', 'agg'],
   },
+  {
+    id: 5,
+    name: 'DB の冗長化',
+    summary: 'プライマリは 1 台のまま、読み込みをリードレプリカに分ける。書き込みは全レプリカに複製される。',
+    unlocks: ['replication'],
+  },
+  {
+    id: 6,
+    name: '仮想化',
+    summary: '大きなホストに VM をまとめ、U と電力を節約する。同じホストの VM 同士はネットワークを通らない。',
+    unlocks: ['virtualization'],
+  },
+  {
+    id: 7,
+    name: '共有ストレージ',
+    summary: 'VM のディスクを共有ストレージへ。止めずに移せるが、IO がネットワークを通るのでストレージ用の経路を分けたい。',
+    unlocks: ['storage'],
+  },
 ];
 
 /** 投資メニューのタブ */
@@ -171,14 +209,14 @@ export const LINES: readonly LineDef[] = [
     id: 'software',
     name: 'ソフトウェア',
     summary: 'サーバに割り当てられる役割を増やす。',
-    unlocks: ['lb', 'cache'],
+    unlocks: ['lb', 'cache', 'replication', 'virtualization'],
     upgrades: [],
   },
   {
     id: 'hardware',
     name: '機器',
     summary: '買える機種を増やす。サーバの機種は前面の空き U から買う。',
-    unlocks: ['tenGig', 'agg'],
+    unlocks: ['tenGig', 'agg', 'storage'],
     upgrades: [],
   },
 ];

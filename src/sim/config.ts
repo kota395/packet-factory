@@ -75,8 +75,35 @@ export const BLOG = {
   cacheCpuMs: 0.05,
 } as const;
 
-/** 役割ごとに使うメモリ(GB)。db はサーバの残りのメモリを読み込みのキャッシュに使う */
-export const ROLE_MEM_GB: Readonly<Record<RoleId, number>> = { web: 1, lb: 0.5, cache: 2, db: 1 };
+/** 役割ごとに使うメモリ(GB)。db とレプリカはサーバの残りのメモリを読み込みのキャッシュに使う */
+export const ROLE_MEM_GB: Readonly<Record<RoleId, number>> = { web: 1, lb: 0.5, cache: 2, db: 1, replica: 1 };
+
+/** レプリケーション: レプリカが書き込みを反映するときの CPU と IO(元の書き込みに対する割合) */
+export const REPLICATION = {
+  applyCpu: 0.5,
+  applyIo: 1,
+} as const;
+
+// ---- 仮想化とストレージ ----------------------------------------------
+export const VIRT = {
+  /** VM の大きさ: vCPU とメモリ(GB) */
+  sizes: {
+    s: { vcpu: 2, memGB: 4, label: 'S' },
+    m: { vcpu: 4, memGB: 16, label: 'M' },
+    l: { vcpu: 8, memGB: 48, label: 'L' },
+  },
+  /** ハイパーバイザ自身が使うメモリ(GB) */
+  hostMemGB: 8,
+  /** vCPU はホストのコア数の何倍まで割り当てられるか(オーバーコミット) */
+  vcpuOvercommit: 2,
+  /** VM の CPU 負荷にかかる仮想化のオーバーヘッド */
+  cpuOverhead: 1.1,
+  /** ローカルディスクの VM を別のホストへ移すときに止まる時間(ms)。共有ストレージなら止まらない */
+  migrateDowntimeMs: 20_000,
+  /** 共有ストレージへの IO 1 回あたりのデータ(KB)と待ち時間(ms) */
+  storageIoKB: 16,
+  storageMs: 1.5,
+} as const;
 
 export const NET = {
   /** 利用者とのやり取りの往復時間(ms) */

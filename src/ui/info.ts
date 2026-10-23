@@ -4,11 +4,12 @@
  * (ボタンを作り直すとタップを取りこぼすため)。
  */
 import { BUYABLE_MODELS, MODEL_BY_ID, portsOf, type ModelDef } from '../sim/catalog';
-import { BLOG, RACK } from '../sim/config';
-import type { Device } from '../sim/facility';
+import { BLOG, RACK, VIRT } from '../sim/config';
+import type { Device, Vm } from '../sim/facility';
+import { nodeName, type NodeLoad } from '../sim/flow';
 import { SELL_REFUND_RATE, UPKEEP } from '../sim/pricing';
 import type { Simulation } from '../sim/simulation';
-import { ROLE_IDS, type ModelId, type PortRef, type RoleId } from '../sim/types';
+import { ROLE_IDS, type DiskKind, type ModelId, type PortRef, type RoleId, type VmSize } from '../sim/types';
 import type { Target } from '../render/row';
 import { compact, money, rate } from './format';
 
@@ -20,7 +21,38 @@ export interface InfoActions {
   changed(): void;
 }
 
-const ROLE_LABEL: Record<RoleId, string> = { lb: 'lb(LVS)', web: 'web', cache: 'cache(memcached)', db: 'db(MySQL)' };
+const ROLE_LABEL: Record<RoleId, string> = {
+  lb: 'lb(LVS)',
+  web: 'web',
+  cache: 'cache(memcached)',
+  db: 'db(MySQL)',
+  replica: 'replica(読み込み)',
+};
+const ROLE_UNIT: Record<RoleId, string> = { lb: 'PV/秒', web: 'PV/秒', cache: '回/秒', db: '回/秒', replica: '回/秒' };
+
+/** ノード(物理サーバか VM)の負荷の行 */
+function nodeRows(sim: Simulation, roles: readonly RoleId[], l: NodeLoad | undefined, cpuLabel: string): [string, string][] {
+  const out: [string, string][] = [];
+  if (!l) return out;
+  out.push([cpuLabel, load(l.cpu)]);
+  const disk = l.storage != null ? `共有(${sim.facility.devices.get(l.storage)?.name})` : l.storage === null ? '共有(届かない)' : 'ローカル';
+  const miss = l.dbMiss !== undefined ? `・読み込みの ${pct(l.dbMiss)} がディスクへ` : '';
+  out.push(['ディスク', `${disk} ${load(l.io)}(${compact(l.ioOps, 1)} IO/秒${miss})`]);
+  for (const r of roles) {
+    if (!sim.availableRoles.has(r)) continue;
+    const w = l.work[r] ?? 0;
+    out.push([`${r} の仕事`, w > 0 ? `${compact(w, 1)} ${ROLE_UNIT[r]}` : '<span class="muted">なし(流れてきていない)</span>']);
+  }
+  return out;
+}
+
+function roleButtons(roles: readonly RoleId[], act: string, id: number, errorOf: (r: RoleId) => string | null): string {
+  return ROLE_IDS.map((r) => {
+    const on = roles.includes(r);
+    const err = errorOf(r);
+    return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="${act}" data-id="${id}" data-role="${r}" ${err && !on ? `disabled title="${err}"` : ''}>${ROLE_LABEL[r]}</button>`;
+  }).join('');
+}
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 const load = (v: number) => `<span class="${v >= 0.9 ? 'bad' : v >= 0.7 ? 'warn' : 'ok'}">${pct(v)}</span>`;
@@ -38,6 +70,7 @@ function specOf(m: ModelDef): string {
   const ports = m.ports.map((g) => `${g.label}×${g.count}`).join(' + ');
   if (m.category === 'server') return `${m.cores} コア(×${m.coreSpeed})・${m.memGB}GB・${m.diskIops} IOPS・${ports}`;
   if (m.category === 'switch') return `${ports}・処理 ${m.fabricGbps} Gbps`;
+  if (m.category === 'storage') return `${m.diskIops!.toLocaleString('en-US')} IOPS・${ports}`;
   return ports;
 }
 
@@ -137,6 +170,29 @@ export class InfoPanel {
       case 'device':
         this.actions.select({ kind: 'device', id: Number(data.id) });
         return;
+      case 'vm':
+        this.actions.select({ kind: 'vm', id: Number(data.id) });
+        return;
+      case 'hv':
+        r = sim.setHv(Number(data.id), data.on === '1');
+        break;
+      case 'createvm':
+        r = sim.createVm(Number(data.id), data.size as VmSize);
+        if (r.ok && r.id !== undefined) this.actions.select({ kind: 'vm', id: r.id });
+        break;
+      case 'vmrole':
+        r = sim.toggleVmRole(Number(data.id), data.role as RoleId);
+        break;
+      case 'vmdisk':
+        r = sim.setVmDisk(Number(data.id), data.disk as DiskKind);
+        break;
+      case 'movevm':
+        r = sim.moveVm(Number(data.id), Number(data.host));
+        break;
+      case 'deletevm':
+        r = sim.deleteVm(Number(data.id));
+        if (r.ok) this.actions.select(null);
+        break;
     }
     if (r?.message) this.actions.toast(r.message);
     this.shownKey = '';
@@ -151,6 +207,10 @@ export class InfoPanel {
       case 'device': {
         const d = sim.facility.devices.get(sel.id);
         return d ? this.deviceContent(sim, d, base) : null;
+      }
+      case 'vm': {
+        const vm = sim.facility.vms.get(sel.id);
+        return vm ? this.vmContent(sim, vm, base) : null;
       }
       case 'unit':
         return this.unitContent(sim, sel.slot, sel.u, base);
@@ -173,16 +233,28 @@ export class InfoPanel {
     const f = sim.facility;
     const m = MODEL_BY_ID[d.model];
     const l = sim.flow.devices.get(d.id);
-    const roles = sim.availableRoles;
 
     let fixed = '';
-    if (m.category === 'server') {
-      const buttons = ROLE_IDS.map((r) => {
-        const on = d.roles.includes(r);
-        const err = sim.roleError(d.id, r);
-        return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="role" data-id="${d.id}" data-role="${r}" ${err && !on ? `disabled title="${err}"` : ''}>${ROLE_LABEL[r]}</button>`;
-      }).join('');
-      fixed += section('役割', `<div class="role-buttons">${buttons}</div>`);
+    if (m.category === 'server' && d.hv) {
+      // ハイパーバイザ: VM の一覧と、VM を作るボタン
+      const vms = f.vmsOn(d.id).sort((a, b) => a.id - b.id);
+      const list = vms
+        .map((v) => `<button type="button" data-act="vm" data-id="${v.id}">${v.name}(${VIRT.sizes[v.size].label})${v.roles.length ? ` ${v.roles.join('・')}` : ''}</button>`)
+        .join('');
+      const create = (['s', 'm', 'l'] as const)
+        .map((size) => {
+          const z = VIRT.sizes[size];
+          const err = f.vmPlaceError(d.id, size);
+          return `<button type="button" data-act="createvm" data-id="${d.id}" data-size="${size}" ${err ? `disabled title="${err}"` : ''}>+ ${z.label}(${z.vcpu} vCPU・${z.memGB}GB)</button>`;
+        })
+        .join('');
+      const back = `<button type="button" data-act="hv" data-id="${d.id}" data-on="0" ${vms.length ? 'disabled title="VM が載っている間はやめられません"' : ''}>物理サーバに戻す</button>`;
+      fixed += section('VM', `<div class="role-buttons">${list || '<span class="muted small">まだありません</span>'}</div>`);
+      fixed += section('VM を作る', `<div class="role-buttons">${create}</div><div class="actions">${back}</div>`);
+    } else if (m.category === 'server') {
+      fixed += section('役割', `<div class="role-buttons">${roleButtons(d.roles, 'role', d.id, (r) => sim.roleError(d.id, r))}</div>`);
+      const hvErr = sim.hvError(d.id, true);
+      fixed += `<div class="actions"><button type="button" data-act="hv" data-id="${d.id}" data-on="1" ${hvErr ? `disabled title="${hvErr}"` : ''}>ハイパーバイザにする</button></div>`;
     }
     if (m.category !== 'handoff') {
       fixed += `<div class="actions"><button type="button" class="danger" data-act="sell" data-id="${d.id}">売却する(+${money(Math.floor(d.paid * SELL_REFUND_RATE))})</button></div>`;
@@ -197,15 +269,15 @@ export class InfoPanel {
 
     const loadRows: [string, string][] = [];
     if (l) {
-      if (m.category === 'server') {
-        loadRows.push(['CPU', load(l.cpu)]);
-        loadRows.push(['ディスク IO', load(l.io) + (l.dbMiss !== undefined ? `(読み込みの ${pct(l.dbMiss)} がディスクへ)` : '')]);
-        for (const r of d.roles) {
-          if (!roles.has(r)) continue;
-          const w = l.work[r] ?? 0;
-          const unit = r === 'db' || r === 'cache' ? '回/秒' : 'PV/秒';
-          loadRows.push([`${r} の仕事`, w > 0 ? `${compact(w, 1)} ${unit}` : '<span class="muted">なし(流れてきていない)</span>']);
-        }
+      if (m.category === 'server' && d.hv) {
+        const use = f.hostUsage(d.id);
+        loadRows.push(['CPU(VM の合計)', load(l.cpu)]);
+        loadRows.push(['ローカルディスク', load(l.io)]);
+        loadRows.push(['割り当て', `vCPU ${use.vcpu} / ${m.cores! * VIRT.vcpuOvercommit}・メモリ ${use.memGB} / ${m.memGB! - VIRT.hostMemGB} GB`]);
+      } else if (m.category === 'server') {
+        loadRows.push(...nodeRows(sim, d.roles, sim.flow.nodeLoads.get(d.id), 'CPU'));
+      } else if (m.category === 'storage') {
+        loadRows.push(['IOPS', load(l.io)]);
       } else if (m.category === 'switch') {
         loadRows.push(['処理能力', load(l.fabric)]);
       }
@@ -234,6 +306,57 @@ export class InfoPanel {
         section('機器', rows(place)) +
         section('負荷', rows(loadRows)) +
         section('ポート', rows([...portSummary, ...links.slice(0, 16)]) + (links.length > 16 ? `<div class="muted small">ほか ${links.length - 16} 本</div>` : '')),
+    };
+  }
+
+  private vmContent(sim: Simulation, vm: Vm, base: string): Content {
+    const f = sim.facility;
+    const host = f.devices.get(vm.host);
+    const size = VIRT.sizes[vm.size];
+    let fixed = section('役割', `<div class="role-buttons">${roleButtons(vm.roles, 'vmrole', vm.id, (r) => sim.vmRoleError(vm.id, r))}</div>`);
+    const storageErr = sim.unlocks.has('storage') ? null : '投資の「共有ストレージ」が必要です';
+    const diskButtons = (['local', 'shared'] as const)
+      .map((k) => {
+        const on = vm.disk === k;
+        const err = k === 'shared' ? storageErr : null;
+        return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="vmdisk" data-id="${vm.id}" data-disk="${k}" ${err && !on ? `disabled title="${err}"` : ''}>${k === 'local' ? 'ローカル' : '共有ストレージ'}</button>`;
+      })
+      .join('');
+    fixed += section('ディスク', `<div class="role-buttons">${diskButtons}</div>`);
+    const hosts = [...f.devices.values()].filter((d) => d.hv && d.id !== vm.host);
+    const moves = hosts
+      .map((h) => {
+        const info = sim.vmMoveInfo(vm.id, h.id);
+        const note = info.error ?? (info.downtimeMs ? `${info.downtimeMs / 1000} 秒止まる` : 'ライブ');
+        return `<button type="button" data-act="movevm" data-id="${vm.id}" data-host="${h.id}" ${info.error ? `disabled title="${info.error}"` : ''}>→ ${h.name}(${note})</button>`;
+      })
+      .join('');
+    fixed += section(
+      '別のホストへ移す',
+      `<div class="role-buttons">${moves || '<span class="muted small">ほかにハイパーバイザがありません</span>'}</div>`,
+    );
+    fixed += `<div class="actions"><button type="button" data-act="device" data-id="${vm.host}">${host?.name ?? '?'} の詳細</button><button type="button" class="danger" data-act="deletevm" data-id="${vm.id}">VM を消す</button></div>`;
+
+    const state =
+      vm.downUntil > sim.time ? `<span class="warn">移行中(あと ${Math.ceil((vm.downUntil - sim.time) / 1000)} 秒)</span>` : '動いています';
+    const hostLoad = sim.flow.devices.get(vm.host);
+    const live =
+      section(
+        'VM',
+        rows([
+          ['ホスト', `${host?.name ?? '?'}(ラック ${(host?.slot ?? 0) + 1})`],
+          ['大きさ', `${size.vcpu} vCPU・${size.memGB} GB`],
+          ['状態', state],
+          ['ホストの CPU', hostLoad ? load(hostLoad.cpu) : '-'],
+        ]),
+      ) + section('負荷', rows(nodeRows(sim, vm.roles, sim.flow.nodeLoads.get(-vm.id), 'vCPU')));
+    return {
+      key: `vm${vm.id}@${base}`,
+      title: vm.name,
+      subtitle: '仮想マシン',
+      desc: '前面で VM の札を別のハイパーバイザへドラッグしても移せます。同じホストの VM 同士の通信はネットワークを通りません。',
+      fixed,
+      live,
     };
   }
 
@@ -315,7 +438,7 @@ export class InfoPanel {
   private serviceContent(sim: Simulation, base: string): Content {
     const flow = sim.flow;
     const f = sim.facility;
-    const name = (id: number) => f.devices.get(id)?.name ?? '?';
+    const name = (id: number) => nodeName(f, id);
     const r = sim.metrics.rolling;
 
     const chain: string[] = [`回線 ${gbps(sim.uplinkGbps)}`];
@@ -323,13 +446,14 @@ export class InfoPanel {
     chain.push(`web ×${flow.instances.web.length}`);
     if (flow.instances.cache.length) chain.push(`cache ×${flow.instances.cache.length}`);
     chain.push(`db ×${flow.instances.db.length}`);
+    if (flow.instances.replica.length) chain.push(`replica ×${flow.instances.replica.length}`);
 
     const roleRows: [string, string][] = [];
     for (const role of ROLE_IDS) {
       for (const id of flow.instances[role]) {
-        const l = flow.devices.get(id);
+        const l = flow.nodeLoads.get(id);
         if (!l) continue;
-        const io = role === 'db' ? ` / IO ${load(l.io)}` : '';
+        const io = role === 'db' || role === 'replica' ? ` / IO ${load(l.io)}` : '';
         roleRows.push([`${role}: ${name(id)}`, `CPU ${load(l.cpu)}${io}`]);
       }
     }

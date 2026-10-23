@@ -184,3 +184,24 @@ function segDist(a: Point, b: Point, p: Point): number {
   const t = len2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
   return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
 }
+
+/** ハイパーバイザの前面に並べる VM の札の位置。入りきらない分は最後の札に「+n」と出す */
+export function vmChipRects(d: Pick<Device, 'model' | 'slot' | 'u'>, count: number): { rects: Rect[]; overflow: number } {
+  const r = deviceRect(d);
+  const left = r.x + 100;
+  const right = r.x + r.w - 58;
+  const w = 50;
+  const gap = 3;
+  const cols = Math.max(1, Math.floor((right - left + gap) / (w + gap)));
+  const rows = Math.max(1, Math.floor((r.h - 4) / 17));
+  const h = (r.h - 4 - (rows - 1) * gap) / rows;
+  const cap = cols * rows;
+  const shown = Math.min(count, cap);
+  const rects: Rect[] = [];
+  for (let i = 0; i < shown; i++) {
+    const c = Math.floor(i / rows);
+    const row = i % rows;
+    rects.push({ x: left + c * (w + gap), y: r.y + 2 + row * (h + gap), w, h });
+  }
+  return { rects, overflow: count - shown };
+}

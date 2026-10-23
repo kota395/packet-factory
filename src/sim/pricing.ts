@@ -33,6 +33,8 @@ export const MODEL_PRICES: Readonly<Record<Exclude<ModelId, 'handoff'>, GrowingP
   'srv-1u-e': { first: 300, growth: 1 },
   'srv-1u-d': { first: 900, growth: 1 },
   'srv-2u-db': { first: 2500, growth: 1 },
+  'srv-2u-hv': { first: 8000, growth: 1 },
+  'nas-2u': { first: 15_000, growth: 1 },
   'sw-24': { first: 150, growth: 1 },
   'sw-48': { first: 1500, growth: 1 },
   'agg-10g': { first: 6000, growth: 1 },
@@ -63,9 +65,12 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   // ソフトウェア
   lb: 800,
   cache: 2000,
+  replication: 8000,
+  virtualization: 20_000,
   // 機器
   tenGig: 5000,
   agg: 12_000,
+  storage: 30_000,
 };
 
 export const UPGRADE_PRICES: Readonly<Record<UpgradeId, GrowingPrice>> = {

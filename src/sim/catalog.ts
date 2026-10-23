@@ -24,7 +24,7 @@ export interface ModelDef {
   /** 消費電力(W) */
   readonly powerW: number;
   readonly ports: readonly PortGroupDef[];
-  /** サーバ: コア数・コア性能(1.0 が基準)・メモリ(GB)・ディスク IOPS */
+  /** サーバ: コア数・コア性能(1.0 が基準)・メモリ(GB)・ディスク IOPS。ストレージは diskIops だけ使う */
   readonly cores?: number;
   readonly coreSpeed?: number;
   readonly memGB?: number;
@@ -107,6 +107,37 @@ export const MODELS: readonly ModelDef[] = [
     memGB: 48,
     diskIops: 2000,
     color: 0xf4a261,
+  },
+  {
+    id: 'srv-2u-hv',
+    category: 'server',
+    name: '2U サーバ(仮想化ホスト)',
+    short: '2U-HV',
+    description:
+      '24 コア・メモリ 256GB・10G NIC 2 ポート。ハイパーバイザにして VM を何台も載せる前提の機種。1 台あたりの電力とラックの U を節約できる。',
+    u: 2,
+    powerW: 650,
+    ports: [rj45(2), sfp(2, 10)],
+    cores: 24,
+    coreSpeed: 1.4,
+    memGB: 256,
+    diskIops: 1500,
+    requires: 'virtualization',
+    color: 0x52b788,
+  },
+  {
+    id: 'nas-2u',
+    category: 'storage',
+    name: 'ストレージアプライアンス',
+    short: 'NAS',
+    description:
+      'SSD キャッシュ付きの共有ストレージ。VM のディスクを置くと、ホストを替えても止めずに移せる(ライブマイグレーション)。IO はネットワークを通るので、ストレージ用のネットワークを分けたくなる。',
+    u: 2,
+    powerW: 500,
+    ports: [sfp(4, 10)],
+    diskIops: 40_000,
+    requires: 'storage',
+    color: 0xc77dff,
   },
   {
     id: 'sw-24',

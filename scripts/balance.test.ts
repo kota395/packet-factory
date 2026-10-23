@@ -113,13 +113,18 @@ it(`balance bot (${MINUTES} min)`, () => {
       const name = label.split(' ')[0];
       const dev = [...f.devices.values()].find((d) => d.name === name);
       if (dev && MODEL_BY_ID[dev.model].category === 'server') {
+        // レプリカが詰まっている: レプリカを足す
+        if (dev.roles.includes('replica')) {
+          return buyServer('srv-2u-db', ['replica']) !== null || powerOrRack('srv-2u-db');
+        }
         // db が詰まっている: 上位機種へ移す
         if (dev.roles.includes('db')) {
           const target: ModelId = dev.model === 'srv-1u-e' ? 'srv-1u-d' : 'srv-2u-db';
           if (dev.model === 'srv-2u-db') {
             if (!s.unlocks.has('cache')) return tryUnlock('cache');
             if (!flow.instances.cache.length) return buyServer('srv-1u-e', ['cache']) !== null;
-            return false;
+            if (!s.unlocks.has('replication')) return tryUnlock('replication');
+            return buyServer('srv-2u-db', ['replica']) !== null || powerOrRack('srv-2u-db');
           }
           const id = buyServer(target, ['db']);
           if (id === null) return powerOrRack(target);
