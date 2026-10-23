@@ -24,7 +24,6 @@ import {
   slotAt,
   unitAt,
   unitTop,
-  vmChipRects,
   type Point,
   type Rect,
 } from './geometry';
@@ -88,10 +87,8 @@ type Gesture =
       moveId: number | null;
       grabU: number;
       wireFrom: PortRef | null;
-      vmId: number | null;
     }
   | { kind: 'move'; id: number; grabU: number; x: number; y: number }
-  | { kind: 'moveVm'; id: number; x: number; y: number }
   | { kind: 'wire'; from: PortRef; x: number; y: number }
   | { kind: 'pan'; lastX: number; lastY: number }
   | { kind: 'pinch'; dist: number; mid: Point };
@@ -105,8 +102,6 @@ export class RowRenderer {
   onTap: ((t: Target) => void) | null = null;
   onDeviceMove: ((id: number, slot: number, u: number) => void) | null = null;
   onConnect: ((a: PortRef, b: PortRef) => void) | null = null;
-  /** VM の札を別のハイパーバイザへドラッグして離したとき */
-  onVmMove: ((vm: number, host: number) => void) | null = null;
 
   private readonly world = new Container();
   private readonly staticG = new Graphics();
@@ -290,20 +285,18 @@ export class RowRenderer {
     let moveId: number | null = null;
     let grabU = 0;
     let wireFrom: PortRef | null = null;
-    let vmId: number | null = null;
     if (f) {
       if (this.view.face === 'back') {
         wireFrom = portAt(f, p, this.portRadius);
       } else {
-        vmId = this.vmAt(p);
         const d = this.deviceAtPoint(p);
-        if (vmId === null && d && MODEL_BY_ID[d.model].category !== 'handoff') {
+        if (d && MODEL_BY_ID[d.model].category !== 'handoff') {
           moveId = d.id;
           grabU = (unitAt(p.y) ?? d.u) - d.u;
         }
       }
     }
-    this.gesture = { kind: 'pending', sx: e.global.x, sy: e.global.y, world: p, moveId, grabU, wireFrom, vmId };
+    this.gesture = { kind: 'pending', sx: e.global.x, sy: e.global.y, world: p, moveId, grabU, wireFrom };
   }
 
   private handleMove(e: FederatedPointerEvent): void {
@@ -322,7 +315,6 @@ export class RowRenderer {
     if (g.kind === 'pending') {
       if (Math.hypot(e.global.x - g.sx, e.global.y - g.sy) < DRAG_THRESHOLD) return;
       if (g.wireFrom) this.gesture = { kind: 'wire', from: g.wireFrom, x: g.world.x, y: g.world.y };
-      else if (g.vmId !== null) this.gesture = { kind: 'moveVm', id: g.vmId, x: g.world.x, y: g.world.y };
       else if (g.moveId !== null) this.gesture = { kind: 'move', id: g.moveId, grabU: g.grabU, x: g.world.x, y: g.world.y };
       else this.gesture = { kind: 'pan', lastX: g.sx, lastY: g.sy };
     }
@@ -332,7 +324,7 @@ export class RowRenderer {
       this.clampPan();
       cur.lastX = e.global.x;
       cur.lastY = e.global.y;
-    } else if (cur.kind === 'move' || cur.kind === 'wire' || cur.kind === 'moveVm') {
+    } else if (cur.kind === 'move' || cur.kind === 'wire') {
       const p = this.world.toLocal(e.global);
       cur.x = p.x;
       cur.y = p.y;
@@ -351,9 +343,6 @@ export class RowRenderer {
     if (g.kind === 'move') {
       const drop = this.dropTarget(g);
       if (drop) this.onDeviceMove?.(g.id, drop.slot, drop.u);
-    } else if (g.kind === 'moveVm') {
-      const host = this.deviceAtPoint(g);
-      if (host) this.onVmMove?.(g.id, host.id);
     } else if (g.kind === 'wire') {
       const to = portAt(this.sim.facility, g, this.portRadius);
       if (to && (to.device !== g.from.device || to.port !== g.from.port)) this.onConnect?.(g.from, to);
@@ -380,23 +369,9 @@ export class RowRenderer {
     return this.sim.facility.deviceAt(slot, u);
   }
 
-  /** 点の下にある VM の札 */
-  private vmAt(p: Point): number | null {
-    const d = this.deviceAtPoint(p);
-    if (!d?.hv || !this.sim) return null;
-    const vms = this.sim.facility.vmsOn(d.id).sort((a, b) => a.id - b.id);
-    const { rects } = vmChipRects(d, vms.length);
-    const i = rects.findIndex((r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h);
-    return i >= 0 ? vms[i].id : null;
-  }
-
   private targetAt(p: Point): Target {
     const sim = this.sim!;
     const f = sim.facility;
-    if (this.view.face === 'front') {
-      const vm = this.vmAt(p);
-      if (vm !== null) return { kind: 'vm', id: vm };
-    }
     if (this.view.face === 'back') {
       const port = portAt(f, p, this.portRadius);
       if (port) return { kind: 'port', ref: port };
@@ -476,17 +451,18 @@ export class RowRenderer {
         this.label(d.name, r.x + 8, r.y + r.h / 2, 11, COLORS.text, 0, true, true);
         this.label(d.hv ? `${m.short} HV` : m.short, r.x + 56, r.y + r.h / 2, 10, d.hv ? 0x95d5b2 : COLORS.muted, 0, true);
         if (d.hv) {
-          // VM の札: 名前と役割
-          const vms = f.vmsOn(d.id).sort((a, b) => a.id - b.id);
-          const { rects, overflow } = vmChipRects(d, vms.length);
-          rects.forEach((c, i) => {
-            const vm = vms[i];
-            const last = overflow > 0 && i === rects.length - 1;
-            g.roundRect(c.x, c.y, c.w, c.h, 2).fill({ color: 0x1b4332, alpha: 0.9 }).stroke({ width: 1, color: 0x52b788 });
-            const text = last ? `+${overflow + 1}` : vm.roles.length ? `${vm.name} ${vm.roles.join('・')}` : vm.name;
-            const t = this.label(text, c.x + 3, c.y + c.h / 2, 8, last ? COLORS.muted : 0xd8f3dc, 0, true);
-            if (t.width > c.w - 5) t.scale.set((c.w - 5) / t.width);
-          });
+          // VM はサービスごとの台数だけ出す(例: VM 5 台 web×3・db・cache)
+          const vms = f.vmsOn(d.id);
+          const count = new Map<string, number>();
+          for (const v of vms) {
+            const key = v.roles.length ? v.roles.join('+') : '役割なし';
+            count.set(key, (count.get(key) ?? 0) + 1);
+          }
+          const parts = [...count].map(([k, n]) => (n > 1 ? `${k}×${n}` : k));
+          const text = vms.length ? `VM ${vms.length} 台: ${parts.join('・')}` : 'VM なし';
+          const t = this.label(text, r.x + 108, r.y + r.h / 2, 10, 0xb7e4c7, 0, false, true);
+          const maxW = r.w - 108 - 64;
+          if (t.width > maxW) t.scale.set(maxW / t.width);
         } else if (d.roles.length) {
           this.label(d.roles.join('・'), r.x + 108, r.y + r.h / 2, 11, 0x9fd8ff, 0, false, true);
         }
@@ -574,19 +550,6 @@ export class RowRenderer {
           g.rect(x, y, w, h).fill(COLORS.bg);
           if (v > 0) g.rect(x, y, w * Math.min(1, v), h).fill(loadColor(v));
         });
-        // VM の札の枠: vCPU の負荷。移している途中の VM は暗くする
-        if (d.hv) {
-          const vms = f.vmsOn(d.id).sort((a, b) => a.id - b.id);
-          vmChipRects(d, vms.length).rects.forEach((c, i) => {
-            const vm = vms[i];
-            if (vm.downUntil > sim.time) {
-              g.rect(c.x, c.y, c.w, c.h).fill({ color: COLORS.bg, alpha: 0.65 });
-              return;
-            }
-            const cpu = flow.nodeLoads.get(-vm.id)?.cpu ?? 0;
-            if (cpu >= 0.7) g.rect(c.x, c.y, c.w, c.h).stroke({ width: 1.5, color: loadColor(cpu) });
-          });
-        }
       }
       return;
     }
@@ -624,14 +587,6 @@ export class RowRenderer {
     if (sel?.kind === 'device') {
       const d = f.devices.get(sel.id);
       if (d) g.rect(...rectArgs(deviceRect(d))).stroke(stroke);
-    } else if (sel?.kind === 'vm') {
-      const vm = f.vms.get(sel.id);
-      const host = vm && f.devices.get(vm.host);
-      if (vm && host) {
-        const vms = f.vmsOn(host.id).sort((a, b) => a.id - b.id);
-        const c = vmChipRects(host, vms.length).rects[vms.findIndex((v) => v.id === vm.id)];
-        if (c) g.rect(...rectArgs(c)).stroke(stroke);
-      }
     } else if (sel?.kind === 'unit' && f.isRented(sel.slot)) {
       const r = rackRect(sel.slot);
       g.rect(r.x + RAIL, unitTop(sel.u), RACK_W, U_H).stroke({ ...stroke, color: COLORS.accent });
@@ -657,23 +612,6 @@ export class RowRenderer {
           .fill({ color: err ? COLORS.bad : COLORS.ok, alpha: 0.15 })
           .stroke({ width: 2, color: err ? COLORS.bad : COLORS.ok });
         this.tooltip(err ?? `${drop.u}U へ移動`, r.x, r.y - 4, err ? COLORS.bad : COLORS.text);
-      }
-    } else if (gesture?.kind === 'moveVm') {
-      // VM を別のホストへ: 落とす先のホストを、移せるか(と止まるか)で色分けする
-      const vm = f.vms.get(gesture.id);
-      const host = this.deviceAtPoint(gesture);
-      if (vm) {
-        g.roundRect(gesture.x - 26, gesture.y - 9, 52, 18, 2).fill({ color: 0x1b4332, alpha: 0.9 }).stroke({ width: 1, color: 0x52b788 });
-        if (host && host.id !== vm.host) {
-          const info = sim.vmMoveInfo(vm.id, host.id);
-          const color = info.error ? COLORS.bad : info.downtimeMs ? COLORS.warn : COLORS.ok;
-          g.rect(...rectArgs(deviceRect(host))).stroke({ width: 2, color });
-          const text =
-            info.error ?? (info.downtimeMs ? `${host.name} へ移す(${info.downtimeMs / 1000} 秒止まる)` : `${host.name} へライブマイグレーション`);
-          this.tooltip(text, gesture.x + 30, gesture.y - 8, info.error ? COLORS.bad : COLORS.text);
-        } else {
-          this.tooltip(vm.name, gesture.x + 30, gesture.y - 8, COLORS.text);
-        }
       }
     } else if (gesture?.kind === 'wire') {
       // 配線中: ポートから指まで線が追従し、相手のポートの上では長さと値段を出す

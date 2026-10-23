@@ -26,13 +26,12 @@
             <button type="button" data-speed="4" aria-label="4倍速">▶▶▶</button>
           </div>
           <div class="menu">
-            <button type="button" id="btn-chart">グラフ</button>
+            <button type="button" id="btn-chart">メトリクス</button>
             <button type="button" id="btn-save">セーブ</button>
           </div>
         </div>
       </header>
 
-      <section id="chart-panel" hidden><div id="chart"></div></section>
 
       <main id="board">
         <div id="zoom" role="group" aria-label="表示">
@@ -51,6 +50,7 @@
           <div id="invest-tabs" role="tablist" aria-label="系統"></div>
           <div id="invest-list"></div>
         </section>
+        <section id="dash" hidden aria-label="メトリクス"></section>
         <div id="toast" role="status" aria-live="polite"></div>
       </main>
 

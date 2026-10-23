@@ -6,10 +6,12 @@ import {
   MIN_USERS,
   PV_PER_USER,
   REVENUE_PER_PV,
+  METRICS,
   START_USERS,
   TICK_MS,
   VIRT,
 } from './config';
+import { secondsUntil } from './forecast';
 import {
   UNLOCKS,
   UNLOCK_BY_ID,
@@ -20,7 +22,7 @@ import {
 } from './economy';
 import { Facility, type Cable, type Device } from './facility';
 import { computeFlow, type FlowResult } from './flow';
-import { Metrics } from './metrics';
+import { Metrics, type Snapshot } from './metrics';
 import {
   RACK_PRICE,
   SELL_REFUND_RATE,
@@ -435,9 +437,47 @@ export class Simulation {
     this.flow = this.computeFlow();
   }
 
-  private computeFlow(): FlowResult {
+  // ---------------------------------------------------------------- キャパシティと需要予測
+
+  /**
+   * 今の構成で捌けるページビュー/秒の見積もり(成功率 METRICS.capacitySuccess を保てる最大)。
+   * 流量を変えて計算し直す二分探索なので、数秒ごとにだけ更新する
+   */
+  capacityPv = 0;
+  private capacityAt = -Infinity;
+
+  estimateCapacity(): number {
+    const ok = (pv: number) => this.computeFlow(pv).success >= METRICS.capacitySuccess;
+    let cap = 0;
+    if (ok(0.5)) {
+      let lo = 0.5;
+      let hi = Math.max(1, this.trafficAt(this.time)) * 2;
+      while (ok(hi) && hi < 1e8) {
+        lo = hi;
+        hi *= 2;
+      }
+      for (let i = 0; i < 14; i++) {
+        const mid = (lo + hi) / 2;
+        if (ok(mid)) lo = mid;
+        else hi = mid;
+      }
+      cap = lo;
+    }
+    // 見積もりの計算で共有の経路データを使い回すので、今の流量で計算し直しておく
+    this.refreshFlow();
+    this.capacityPv = cap;
+    this.capacityAt = this.time;
+    return cap;
+  }
+
+  /** 需要がキャパシティに届くまでの秒数(広告で市場を広げない場合)。届かないなら null、もう超えていれば 0 */
+  get secondsToSaturation(): number | null {
+    return secondsUntil(this.users, this.marketSize, GROWTH_RATE, this.capacityPv / PV_PER_USER);
+  }
+
+  private computeFlow(pv = this.trafficAt(this.time)): FlowResult {
     return computeFlow(this.facility, {
-      pv: this.trafficAt(this.time),
+      pv,
       uplinkGbps: this.uplinkGbps,
       images: this.isFeatureActive('images'),
       comments: this.isFeatureActive('comments'),
@@ -458,7 +498,41 @@ export class Simulation {
     this.lifetimeEarned += revenue;
     this.metrics.record(TICK_MS, pv, pv - served, flow.latencyMs, flow.p99Ms, revenue);
     if (!this.fixedTraffic) this.updateUsers(dt);
-    this.metrics.advance(this.time, this.users);
+    if (this.time - this.capacityAt >= METRICS.capacityEveryMs) this.estimateCapacity();
+    this.metrics.advance(this.time, () => this.snapshot());
+  }
+
+  /** 1 秒ごとの推移に残す値 */
+  private snapshot(): Snapshot {
+    const f = this.facility;
+    const flow = this.flow;
+    const resources: Snapshot['resources'] = [];
+    const add = (key: string, label: string, rho: number) => {
+      if (rho > 0.001) resources.push({ key, label, rho });
+    };
+    for (const d of f.devices.values()) {
+      const l = flow.devices.get(d.id);
+      if (!l) continue;
+      const cat = MODEL_BY_ID[d.model].category;
+      if (cat === 'server') {
+        add(`cpu:${d.id}`, `${d.name} CPU`, l.cpu);
+        add(`io:${d.id}`, `${d.name} ディスク`, l.io);
+      } else if (cat === 'storage') add(`io:${d.id}`, `${d.name} IOPS`, l.io);
+      else if (cat === 'switch') add(`fab:${d.id}`, `${d.name} 処理`, l.fabric);
+    }
+    for (const n of flow.nodes.values()) if (n.vm) add(`vm:${n.id}`, `${n.name} vCPU`, flow.nodeLoads.get(n.id)!.cpu);
+    for (const l of flow.links) {
+      const rho = l.capacityGbps > 0 ? Math.max(l.ab, l.ba) / l.capacityGbps : 0;
+      add(`link:${l.a}-${l.b}`, `${f.devices.get(l.a)?.name}⇄${f.devices.get(l.b)?.name}`, rho);
+    }
+    return {
+      users: this.users,
+      market: this.marketSize,
+      money: this.money,
+      upkeep: this.upkeepPerSec,
+      capacity: this.capacityPv,
+      resources,
+    };
   }
 
   /** ロジスティック成長 − 品質による離脱 */

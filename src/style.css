@@ -128,17 +128,162 @@ button.active {
   letter-spacing: -2px;
 }
 
-/* ---- グラフ -------------------------------------------------------- */
+/* ---- メトリクス(ダッシュボード) ----------------------------------- */
 
-#chart-panel {
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  padding: 4px 6px 0;
+#dash {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
 }
 
-#chart .u-legend {
+#dash[hidden] {
+  display: none;
+}
+
+.dash-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.dash-head h2 {
+  margin: 0;
+  font-size: 15px;
+  flex: 1;
+}
+
+.dash-range {
+  display: flex;
+  gap: 4px;
+}
+
+.dash-range button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.dash-range button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+}
+
+.dash-close {
+  min-width: 36px;
+}
+
+.dash-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px 20px;
+}
+
+.dash-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.dash-tile {
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.dash-tile .k {
   font-size: 11px;
   color: var(--muted);
+}
+
+.dash-tile .v {
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.dash-tile .n {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.dash-tile .v.warn {
+  color: var(--warn);
+}
+
+.dash-tile .v.bad {
+  color: var(--bad);
+}
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 10px;
+}
+
+.dash-panel {
+  min-width: 0;
+  padding: 8px 10px 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.dash-panel.wide {
+  grid-column: 1 / -1;
+}
+
+.dash-panel h3 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.dash-plot .u-legend {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.dash-plot .u-legend .u-marker {
+  border-radius: 2px;
+}
+
+.dash-empty {
+  padding: 40px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dash-note {
+  margin: 12px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+@media (max-width: 480px) {
+  .dash-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dash-tiles {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .dash-tile .v {
+    font-size: 15px;
+  }
 }
 
 /* ---- 盤面 ---------------------------------------------------------- */

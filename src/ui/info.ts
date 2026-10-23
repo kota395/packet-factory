@@ -354,7 +354,7 @@ export class InfoPanel {
       key: `vm${vm.id}@${base}`,
       title: vm.name,
       subtitle: '仮想マシン',
-      desc: '前面で VM の札を別のハイパーバイザへドラッグしても移せます。同じホストの VM 同士の通信はネットワークを通りません。',
+      desc: '同じホストの VM 同士の通信はネットワークを通りません。前面のホストには、サービスごとの VM の台数が出ます。',
       fixed,
       live,
     };

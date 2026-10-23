@@ -150,6 +150,20 @@ export const DIFFICULTY = {
   dayCycleMs: 120_000,
 };
 
+/** メトリクス(ダッシュボード)と需要予測 */
+export const METRICS = {
+  /** HUD などの「直近」の集計に使う幅(ms) */
+  windowMs: 5000,
+  /** 推移を残す長さ(秒) */
+  historySec: 3600,
+  /** 今の構成で捌ける量(キャパシティ)を見積もり直す間隔(シミュレーション時間 ms) */
+  capacityEveryMs: 2000,
+  /** キャパシティ = 成功率がこの値を保てる最大のページビュー/秒 */
+  capacitySuccess: 0.99,
+  /** 需要予測を何秒先まで出すか */
+  forecastSec: 900,
+} as const;
+
 /** 放置(ページを閉じている間)の収入 */
 export const OFFLINE = {
   minMs: 30_000,

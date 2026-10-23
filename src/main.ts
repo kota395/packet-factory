@@ -13,7 +13,7 @@ import {
   type SaveData,
 } from './sim/save';
 import type { Simulation } from './sim/simulation';
-import { MetricsChart } from './ui/chart';
+import { Dashboard } from './ui/dashboard';
 import { compact, duration, money, rate } from './ui/format';
 import { InfoPanel, type Selection } from './ui/info';
 import { InvestPanel } from './ui/invest';
@@ -37,8 +37,6 @@ const ui = {
   toast: el('toast'),
   hint: el('hint'),
   toolbar: el('toolbar'),
-  chartPanel: el('chart-panel'),
-  chart: el('chart'),
   modal: el('modal'),
   modalCard: el('modal-card'),
 };
@@ -52,7 +50,7 @@ const state = {
 };
 
 const renderer = new RowRenderer();
-const chart = new MetricsChart(ui.chart);
+const dashboard = new Dashboard(el('dash'), () => state.sim);
 const invest = new InvestPanel(
   el('invest'),
   el('invest-list'),
@@ -91,12 +89,6 @@ renderer.onConnect = (a, b) => {
   if (r.ok && r.id !== undefined) select({ kind: 'cable', id: r.id });
   saveGame();
 };
-renderer.onVmMove = (vm, host) => {
-  const r = state.sim.moveVm(vm, host);
-  if (r.message) toast(r.message);
-  select({ kind: 'vm', id: vm });
-  saveGame();
-};
 el('btn-zoom-in').addEventListener('click', () => renderer.zoomBy(1.25));
 el('btn-zoom-out').addEventListener('click', () => renderer.zoomBy(0.8));
 el('btn-fit').addEventListener('click', () => renderer.fit());
@@ -127,7 +119,7 @@ renderer.app.ticker.add((ticker) => {
   }
 });
 
-window.addEventListener('resize', () => chart.resize());
+window.addEventListener('resize', () => dashboard.resize());
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') saveGame();
 });
@@ -201,7 +193,7 @@ function updateToolbar(): void {
 function updateHint(): void {
   ui.hint.textContent =
     state.face === 'front'
-      ? '前面: 空いている U をタップして機器を設置、機器はドラッグで移動(VM の札は別のホストへドラッグで移動)。点線の区画をタップしてラックを借りる。'
+      ? '前面: 空いている U をタップして機器を設置、機器はドラッグで移動。点線の区画をタップしてラックを借りる。'
       : '背面: ポートから別のポートへドラッグして配線。ケーブルやポートをタップすると詳細と「抜く」。';
 }
 
@@ -211,12 +203,12 @@ function bindControls(): void {
   for (const b of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
     b.addEventListener('click', () => setSpeed(Number(b.dataset.speed)));
   }
-  el('btn-chart').addEventListener('click', (e) => {
-    const show = ui.chartPanel.hidden !== false;
-    ui.chartPanel.hidden = !show;
-    (e.currentTarget as HTMLElement).classList.toggle('active', show);
-    if (show) chart.update(state.sim.metrics.history, true);
-    chart.resize();
+  el('btn-chart').addEventListener('click', () => {
+    dashboard.toggle();
+    el('btn-chart').classList.toggle('active', dashboard.isOpen);
+  });
+  el('dash').addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('.dash-close')) el('btn-chart').classList.remove('active');
   });
   el('btn-save').addEventListener('click', showSaveMenu);
   el('invest-close').addEventListener('click', () => {
@@ -253,7 +245,7 @@ function updateHud(): void {
     toast(b && b.rho > 1 ? `エラーで離脱が出ています: ${b.label}が溢れています` : 'エラーが多く、ユーザーが離脱しています');
   }
 
-  if (!ui.chartPanel.hidden) chart.update(sim.metrics.history);
+  dashboard.update();
   invest.update();
   // 選んでいた機器が売却などで消えたら閉じる
   const sel = state.selected;
@@ -300,8 +292,7 @@ function restoreGame(): boolean {
 function switchTo(sim: Simulation): void {
   state.sim = sim;
   state.selected = null;
-  chart.reset();
-  if (!ui.chartPanel.hidden) chart.update(sim.metrics.history, true);
+  dashboard.update(true);
   updateHud();
 }
 

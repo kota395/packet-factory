@@ -3,6 +3,7 @@ import { MODEL_BY_ID } from '../src/sim/catalog';
 import { BLOG, RACK } from '../src/sim/config';
 import { createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
+import { forecastSeries, logistic, secondsUntil } from '../src/sim/forecast';
 import { MODEL_PRICES, PRICE_SCALE, START_MONEY, UNLOCK_PRICES, cablePrice } from '../src/sim/pricing';
 import type { ModelId, RoleId, UnlockId } from '../src/sim/types';
 
@@ -329,6 +330,44 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     const b = loadSave(parseSave(JSON.parse(JSON.stringify(save)))!);
     expect(b.facility.devices.get(h)!.hv).toBe(true);
     expect(b.facility.vms.get(vm)!.roles).toEqual(['web']);
+  });
+});
+
+describe('メトリクスと需要予測', () => {
+  it('キャパシティは今の構成で捌けるページビュー/秒(最初はエントリー機のディスク IO で約 50)', () => {
+    const s = newGame();
+    const cap = s.estimateCapacity();
+    // 150 IOPS ÷(3 回の読み込みがすべてディスクへ)= 50 PV/秒
+    expect(cap).toBeGreaterThan(45);
+    expect(cap).toBeLessThan(55);
+    // 見積もりのあとも、今の流量の計算は元のまま
+    expect(s.flow.pv).toBeCloseTo(s.trafficAt(s.time), 6);
+  });
+
+  it('ロジスティック成長の予測と、ある量に届くまでの時間', () => {
+    expect(logistic(100, 1000, 0.03, 0)).toBeCloseTo(100);
+    expect(logistic(100, 1000, 0.03, 10_000)).toBeCloseTo(1000, 0);
+    const t = secondsUntil(100, 1000, 0.03, 500)!;
+    expect(logistic(100, 1000, 0.03, t)).toBeCloseTo(500, 3);
+    expect(secondsUntil(100, 1000, 0.03, 1000)).toBeNull();
+    expect(secondsUntil(600, 1000, 0.03, 500)).toBe(0);
+    const [ts, us] = forecastSeries(100, 1000, 0.03, 60, 10);
+    expect(ts).toHaveLength(7);
+    expect(us[6]).toBeGreaterThan(us[0]);
+  });
+
+  it('推移には 1 秒ごとの値と、資源ごとの使用率が残る', () => {
+    const s = newGame();
+    s.step(10_000);
+    const h = s.metrics.history;
+    expect(h.t.length).toBe(10);
+    expect(h.capacity.at(-1)).toBeGreaterThan(0);
+    const io = [...s.metrics.resources.values()].find((r) => r.label === 'srv01 ディスク');
+    expect(io?.rho.length).toBe(10);
+    // 市場規模(1,500 人 = 15 PV/秒)ではキャパシティ(約 50)に届かない。広告で市場を広げると届く
+    expect(s.secondsToSaturation).toBeNull();
+    s.upgrades.marketing = 4;
+    expect(s.secondsToSaturation).toBeGreaterThan(0);
   });
 });
 
