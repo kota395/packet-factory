@@ -11,7 +11,7 @@ const COLORS = {
   cellLine: 0x1a2430,
   edge: 0x4a5a6d,
   edgeActive: 0xe8edf2,
-  packet: { static: 0x4aa3ff, write: 0xff9f43 } satisfies Record<ReqKind, number>,
+  packet: { static: 0x4aa3ff, read: 0x7bd88f, write: 0xff9f43 } satisfies Record<ReqKind, number>,
   error: 0xff4d4f,
   selected: 0xffffff,
   connectFrom: 0xffd166,
@@ -71,16 +71,14 @@ function metersOf(node: NodeRuntime, sim: Simulation): Meter[] {
   const cpuMeter: Meter = { caption: '処理', ratio: Number.isFinite(cpu) && cpu > 0 ? inRps / cpu : 0 };
   const bwMeter: Meter = { caption: '帯域', ratio: Number.isFinite(bw) ? node.inKBps / 1000 / bw : 0 };
   const queueMeter: Meter = { caption: '待ち', ratio: node.queue.length / node.def.queueMax };
-  switch (node.kind) {
-    case 'internet':
-      return [];
-    case 'cdn':
-      return [bwMeter, { caption: 'HIT', ratio: sim.cacheHitRateOf(node), color: COLORS.packet.static }];
-    case 'lb':
-      return [bwMeter, cpuMeter];
-    default:
-      return [cpuMeter, queueMeter];
-  }
+  if (node.kind === 'internet') return [];
+  // 能力に合わせて大事なものから 2 本: 帯域 → キャッシュ → 処理 → 待ち
+  const meters: Meter[] = [];
+  if (Number.isFinite(bw)) meters.push(bwMeter);
+  const cache = node.def.cache;
+  if (cache) meters.push({ caption: 'HIT', ratio: sim.cacheHitRateOf(node), color: COLORS.packet[cache.kinds[0]] });
+  meters.push(cpuMeter, queueMeter);
+  return meters.slice(0, 2);
 }
 
 /** 大きいマスなら見出し付きのメーターと単位を出す */

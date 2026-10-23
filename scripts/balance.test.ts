@@ -2,18 +2,29 @@
  * バランス確認用のボット。貪欲に投資しながら遊び、進行の速さをログに出す。
  *   npm run balance               # 60 分ぶん
  *   BOT_MIN=20 npm run balance    # 時間を指定
- * 調整値(src/sim/config.ts, economy.ts)を変えたら、ログの節目の時刻を見比べる。
+ * 調整値(src/sim/config.ts, pricing.ts, economy.ts)を変えたら、ログの節目の時刻を見比べる。
  */
 import { it } from 'vitest';
-import { UNLOCK_BY_ID } from '../src/sim/economy';
+import { UNLOCK_BY_ID, unlockCost } from '../src/sim/economy';
 import { newGame } from '../src/sim/save';
 import type { NodeRuntime, Simulation } from '../src/sim/simulation';
+import type { UpgradeId } from '../src/sim/types';
 
 // Node の型定義を入れずに環境変数だけ読む
 declare const process: { env: Record<string, string | undefined> };
 
 const MINUTES = Number(process.env.BOT_MIN ?? 60);
 const SEED = Number(process.env.BOT_SEED ?? 11);
+
+/** ログ上の名前 → 強化 ID(上限チェック用) */
+const UPGRADE_IDS: Record<string, UpgradeId | undefined> = {
+  広告: 'marketing',
+  収益化: 'monetize',
+  'WEB 強化': 'webPerf',
+  'DB 強化': 'dbPerf',
+  キャッシュ容量: 'cacheMemory',
+  'CDN キャッシュ': 'cdnCache',
+};
 
 const ofKind = (s: Simulation, kind: string) => [...s.nodes.values()].filter((n) => n.kind === kind);
 
@@ -39,6 +50,31 @@ it(`balance bot (${MINUTES} min)`, () => {
   const log: string[] = [];
   const event = (m: string) => log.push(`${(s.time / 60000).toFixed(1).padStart(5)}m  ${m}`);
   let lb: number | null = null;
+
+  /** WEB をデータ層(キャッシュ・DB・レプリカ)へつなぐ。接続数の上限までは全部につなぐ */
+  const wireWeb = (web: number) => {
+    for (const kind of ['cache', 'db', 'replica']) for (const n of ofKind(s, kind)) s.connect(web, n.id);
+  };
+  /** データ層のノードを 1 つ置き、必要な線を引く */
+  const placeData = (kind: 'cache' | 'db' | 'replica', col: number): boolean => {
+    const p = freeCell(s, col);
+    if (!p || s.money < s.nodeCost(kind)) return false;
+    const r = s.addNode(kind, p[0], p[1]);
+    if (!r.ok) return false;
+    const id = r.id!;
+    for (const w of ofKind(s, 'web')) s.connect(w.id, id);
+    if (kind === 'cache') for (const d of [...ofKind(s, 'db'), ...ofKind(s, 'replica')]) s.connect(id, d.id);
+    if (kind === 'replica') {
+      for (const d of ofKind(s, 'db')) s.connect(d.id, id);
+      for (const c of ofKind(s, 'cache')) s.connect(c.id, id);
+    }
+    if (kind === 'db') {
+      for (const r of ofKind(s, 'replica')) s.connect(id, r.id);
+      for (const c of ofKind(s, 'cache')) s.connect(c.id, id);
+    }
+    event(`${kind} 設置`);
+    return true;
+  };
 
   /** 1 回投資できたら true */
   const act = (): boolean => {
@@ -73,10 +109,10 @@ it(`balance bot (${MINUTES} min)`, () => {
         return true;
       }
       const p = freeCell(s, 4);
-      if (p && s.money >= s.nodeCost('web')) {
+      if (p && webs.length < 64 && s.money >= s.nodeCost('web')) {
         const id = s.addNode('web', p[0], p[1]).id!;
         s.connect(lb, id);
-        for (const d of dbs) s.connect(id, d.id);
+        wireWeb(id);
         return true;
       }
     }
@@ -100,35 +136,70 @@ it(`balance bot (${MINUTES} min)`, () => {
       return false;
     }
 
-    // 3. 書き込みを解放済みで DB が足りなければ増設
-    if (s.unlocks.has('writes') && (dbs.length === 0 || load(s, dbs) > 0.7) && s.money >= s.nodeCost('db')) {
-      const p = freeCell(s, 9);
-      if (p) {
-        const id = s.addNode('db', p[0], p[1]).id!;
-        for (const w of webs) s.connect(w.id, id);
-        if (dbs.length === 0) event('DB 設置(書き込み開始)');
-        return true;
+    // 3. データ層。DB が詰まったら キャッシュ → レプリカ → スケールアップ / シャーディング の順で手を打つ
+    if (s.unlocks.has('writes')) {
+      if (!dbs.length) return placeData('db', 11);
+      const caches = ofKind(s, 'cache');
+      const replicas = ofKind(s, 'replica');
+      if (caches.length && load(s, caches) > 0.7) return placeData('cache', 8);
+      const dbBusy = load(s, dbs) > 0.7;
+      const readBusy = replicas.length ? load(s, replicas) > 0.7 : dbBusy;
+      if (dbBusy || readBusy) {
+        if (!caches.length) {
+          if (!s.unlocks.has('cache')) return s.unlock('cache').ok && (event('解放: キャッシュ'), true);
+          return placeData('cache', 8);
+        }
+        if (readBusy) {
+          if (!s.unlocks.has('replica')) return s.unlock('replica').ok && (event('解放: レプリカ'), true);
+          if (placeData('replica', 13)) return true;
+        }
+        // 読み込みを逃がしても DB が詰まる = 書き込みが多い → シャード
+        if (dbBusy && replicas.length >= 1 && !readBusy) {
+          if (s.isAtMaxCount('db')) {
+            if (!s.unlocks.has('sharding')) {
+              const cost = unlockCost('sharding');
+              if (s.unlock('sharding').ok) event(`解放: シャーディング ($${cost})`);
+              return false;
+            }
+            const cost = s.upgradeCost('dbShards');
+            if (s.buyUpgrade('dbShards').ok) event(`シャード追加 ($${cost})`);
+            return false;
+          }
+          return placeData('db', 11);
+        }
       }
     }
+    // LB の接続先の上限(64)を超えた WEB は使われないので、それ以上は増やさない
 
     // 4. それ以外は一番安い投資を買う
     const options: [string, number, () => boolean][] = [];
     if (s.users > 0.7 * s.marketSize) options.push(['広告', s.upgradeCost('marketing'), () => s.buyUpgrade('marketing').ok]);
     options.push(['収益化', s.upgradeCost('monetize'), () => s.buyUpgrade('monetize').ok]);
     if (webs.length >= 3) options.push(['WEB 強化', s.upgradeCost('webPerf'), () => s.buyUpgrade('webPerf').ok]);
-    if (dbs.length >= 2) options.push(['DB 強化', s.upgradeCost('dbPerf'), () => s.buyUpgrade('dbPerf').ok]);
+    if (dbs.length && load(s, [...dbs, ...ofKind(s, 'replica')]) > 0.5) {
+      options.push(['DB 強化', s.upgradeCost('dbPerf'), () => s.buyUpgrade('dbPerf').ok]);
+    }
+    if (ofKind(s, 'cache').length) options.push(['キャッシュ容量', s.upgradeCost('cacheMemory'), () => s.buyUpgrade('cacheMemory').ok]);
     if (cdns.length) options.push(['CDN キャッシュ', s.upgradeCost('cdnCache'), () => s.buyUpgrade('cdnCache').ok]);
     if (s.unlocks.has('lb') && !s.unlocks.has('writes')) {
-      options.push(['会員機能', UNLOCK_BY_ID.writes.cost, () => s.unlock('writes').ok]);
+      options.push(['会員機能', unlockCost('writes'), () => s.unlock('writes').ok]);
     }
     // 配信コンテンツは LB の帯域に余裕があるときだけ増やす
-    if (lbs.length && load(s, lbs) < 0.4) {
+    if (lbs.length && load(s, lbs) < 0.6) {
       for (const id of ['images', 'cdn', 'video'] as const) {
         if (!s.unlocks.has(id) && s.canUnlock(id) !== '「' + UNLOCK_BY_ID[UNLOCK_BY_ID[id].requires!]?.name + '」が必要です') {
-          options.push([UNLOCK_BY_ID[id].name, UNLOCK_BY_ID[id].cost, () => s.unlock(id).ok]);
+          options.push([UNLOCK_BY_ID[id].name, unlockCost(id), () => s.unlock(id).ok]);
         }
       }
     }
+    // 上限に達した強化などは候補から外す
+    const buyable = (name: string) => {
+      const id = UPGRADE_IDS[name];
+      if (!id) return true;
+      const err = s.canBuyUpgrade(id);
+      return err === null || err === '資金が足りません';
+    };
+    for (let i = options.length - 1; i >= 0; i--) if (!buyable(options[i][0])) options.splice(i, 1);
     options.sort((a, b) => a[1] - b[1]);
     const [name, cost, buy] = options[0] ?? [];
     if (name && s.money >= cost! && buy!()) {
@@ -144,7 +215,8 @@ it(`balance bot (${MINUTES} min)`, () => {
       log.push(
         `== ${String(sec / 60).padStart(3)}m  $${Math.round(s.money)}  収支 ${s.incomePerSec.toFixed(1)}/s  ` +
           `ユーザー ${Math.round(s.users)}/${Math.round(s.marketSize)}  ${Math.round(r.rps)} rps  ` +
-          `err ${(r.errorRate * 100).toFixed(1)}%  p99 ${r.p99}ms  WEB ${ofKind(s, 'web').length} DB ${ofKind(s, 'db').length}  ` +
+          `err ${(r.errorRate * 100).toFixed(1)}%  p99 ${r.p99}ms  WEB ${ofKind(s, 'web').length} ` +
+          `CACHE ${ofKind(s, 'cache').length} DB ${ofKind(s, 'db').length} REP ${ofKind(s, 'replica').length}  ` +
           `LB回線 ${s.upgrades.lbBandwidth}  コンテンツ ${[...s.unlocks].filter((u) => u === 'images' || u === 'video').join(',') || '-'}`,
       );
     }

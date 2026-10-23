@@ -1,18 +1,47 @@
 import { NODE_DEFS } from '../sim/config';
-import { UNLOCKS, UNLOCK_BY_ID, UPGRADES, UPGRADE_BY_ID, type FeatureEffect, type UpgradeDef } from '../sim/economy';
+import {
+  STAGES,
+  UNLOCKS,
+  UNLOCK_BY_ID,
+  UPGRADES,
+  UPGRADE_BY_ID,
+  unlockCost,
+  type FeatureEffect,
+  type StageDef,
+  type UpgradeDef,
+} from '../sim/economy';
 import type { Simulation } from '../sim/simulation';
 import type { ReqKind, UnlockId, UpgradeId } from '../sim/types';
 import { bandwidth, compact, money } from './format';
 
 type Item = { type: 'unlock'; id: UnlockId } | { type: 'upgrade'; id: UpgradeId };
 
-const KIND_LABEL: Record<ReqKind, string> = { static: '静的', write: '書き込み' };
+const KIND_LABEL: Record<ReqKind, string> = { static: '静的', read: '読み込み', write: '書き込み' };
 
-function formatEffect(def: UpgradeDef, v: number): string {
-  if (def.unit === 'users') return `${compact(v)} 人`;
-  if (def.unit === 'bandwidth') return bandwidth((NODE_DEFS[def.node ?? 'lb'].bandwidthMBps ?? 0) * v);
-  if (def.unit === 'percent') return `${(v * 100).toFixed(1)}%`;
-  return `×${v.toFixed(2)}`;
+/** 強化のレベルごとの効果を、対象の能力に合わせた単位で表示する */
+export function formatUpgradeEffect(def: UpgradeDef, level: number): string {
+  const v = def.effect(level);
+  if (def.id === 'marketing') return `${compact(v)} 人`;
+  const t = def.target;
+  if (!t) return `×${v.toFixed(2)}`;
+  const node = NODE_DEFS[t.nodes[0]];
+  switch (t.stat) {
+    case 'speed':
+      return `×${v.toFixed(2)}`;
+    case 'bandwidth':
+      return bandwidth((node.bandwidthMBps ?? 0) * v);
+    case 'hitRate':
+      return `${((1 - (1 - (node.cache?.hitRate ?? 0)) * v) * 100).toFixed(1)}%`;
+    case 'maxCount':
+      return `${(node.maxCount ?? 0) + v} 台`;
+  }
+}
+
+/** いまの段階 = 解放を 1 つでも買った段階のうち一番先(何も買っていなければ段階 1) */
+export function currentStage(sim: Simulation): StageDef {
+  let current = STAGES.find((s) => s.id === 1)!;
+  for (const s of STAGES) if (s.unlocks.some((u) => sim.unlocks.has(u))) current = s;
+  return current;
 }
 
 /** 「静的: 単価 ×2・データ量 ×5」のような説明 */
@@ -120,45 +149,57 @@ export class InvestPanel {
             <button type="button" class="toggle ${on ? 'on' : ''}" data-type="feature" data-id="${def.id}" aria-pressed="${on}">${on ? 'オン' : 'オフ'}</button>
           </div>`);
       }
-      html.push('<div class="inv-section">投資</div>');
     }
 
-    for (const item of this.items(sim)) {
-      if (item.type === 'unlock') {
-        const def = UNLOCK_BY_ID[item.id];
-        const needs = def.requires && !sim.unlocks.has(def.requires) ? `要: ${UNLOCK_BY_ID[def.requires].name}` : '';
-        const effect = def.effect ? describeFeature(def.effect) : '';
-        html.push(
-          row({
-            tag: def.effect ? 'コンテンツ' : '解放',
-            title: def.name,
-            desc: def.description,
-            effect: [effect, needs].filter(Boolean).join(' ・ '),
-            cost: def.cost,
-            type: 'unlock',
-            id: def.id,
-          }),
-        );
-        continue;
-      }
-      const def = UPGRADE_BY_ID[item.id];
-      const level = sim.upgrades[item.id];
-      const locked = def.requires && !sim.unlocks.has(def.requires);
-      html.push(
-        row({
-          tag: `Lv ${level}`,
-          title: def.name,
-          desc: def.description,
-          effect: locked
-            ? `要: ${UNLOCK_BY_ID[def.requires!].name}`
-            : `${formatEffect(def, def.effect(level))} → ${formatEffect(def, def.effect(level + 1))}`,
-          cost: sim.upgradeCost(item.id),
-          type: 'upgrade',
-          id: def.id,
-        }),
-      );
+    const now = currentStage(sim);
+    for (const stage of STAGES) {
+      const items: Item[] = [
+        ...stage.unlocks.filter((id) => !sim.unlocks.has(id)).map((id) => ({ type: 'unlock' as const, id })),
+        ...stage.upgrades.map((id) => ({ type: 'upgrade' as const, id })),
+      ];
+      if (!items.length) continue;
+      const title = stage.id === 0 ? stage.name : `段階 ${stage.id}: ${stage.name}`;
+      const badge = stage.id === now.id ? '<span class="inv-now">いま</span>' : '';
+      html.push(`
+        <div class="inv-section">${title}${badge}</div>
+        <div class="inv-stage-note">${stage.summary}</div>`);
+      for (const item of items) html.push(this.itemHtml(sim, item));
     }
     this.list.innerHTML = html.join('');
+  }
+
+  private itemHtml(sim: Simulation, item: Item): string {
+    if (item.type === 'unlock') {
+      const def = UNLOCK_BY_ID[item.id];
+      const needs = def.requires && !sim.unlocks.has(def.requires) ? `要: ${UNLOCK_BY_ID[def.requires].name}` : '';
+      const effect = def.effect ? describeFeature(def.effect) : '';
+      return row({
+        tag: def.effect ? 'コンテンツ' : '解放',
+        title: def.name,
+        desc: def.description,
+        effect: [effect, needs].filter(Boolean).join(' ・ '),
+        cost: unlockCost(def.id),
+        type: 'unlock',
+        id: def.id,
+      });
+    }
+    const def = UPGRADE_BY_ID[item.id];
+    const level = sim.upgrades[item.id];
+    const locked = def.requires && !sim.unlocks.has(def.requires);
+    const maxed = def.maxLevel !== undefined && level >= def.maxLevel;
+    return row({
+      tag: maxed ? `Lv ${level}(最大)` : def.maxLevel !== undefined ? `Lv ${level} / ${def.maxLevel}` : `Lv ${level}`,
+      title: def.name,
+      desc: def.description,
+      effect: locked
+        ? `要: ${UNLOCK_BY_ID[def.requires!].name}`
+        : maxed
+          ? `${formatUpgradeEffect(def, level)}(これ以上の機種はない)`
+          : `${formatUpgradeEffect(def, level)} → ${formatUpgradeEffect(def, level + 1)}`,
+      cost: sim.upgradeCost(item.id),
+      type: 'upgrade',
+      id: def.id,
+    });
   }
 }
 

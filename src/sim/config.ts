@@ -1,10 +1,12 @@
 /**
  * ゲームの調整値。数値はここで変えれば全体に反映される。
- *  - ノードの性能・価格 …… NODE_DEFS
+ *  - ノードの性能 …… NODE_DEFS
+ *  - データ層へのアクセスの割合 …… DATA_ACCESS
  *  - 1 件あたりのデータ量 …… DATA_SIZE_KB(画像・動画の倍率は economy.ts の UNLOCKS)
  *  - ユーザーの増減 …… ユーザーとトラフィック / CHURN
- *  - 投資の価格と効果 …… economy.ts
- * 変えたら `npm run balance` で進行の速さを確認する。
+ *  - 価格・維持費・初期資金 …… pricing.ts
+ *  - 投資の効果と段階 …… economy.ts
+ * 拡張の段階の考え方は docs/scaling.md。変えたら `npm run balance` で進行の速さを確認する。
  */
 import type { NodeKind, ReqKind, UnlockId } from './types';
 
@@ -39,8 +41,13 @@ export const DAY_AMPLITUDE = 0.2;
 export const BASE_MARKET = 1500;
 /** 口コミによる自然増加率(/秒)。市場規模に近づくほど鈍る(ロジスティック成長) */
 export const GROWTH_RATE = 0.03;
-/** 会員機能を解放したあと、WEB に届いたリクエストのうち DB へ流す割合(DB が接続されている WEB のみ) */
-export const WEB_TO_DB_SHARE = 0.2;
+/**
+ * データを使うリクエスト(動的なリクエスト)。会員機能を解放したあと、利用者のリクエストのうち
+ * share の割合がデータを使い、そのうち readShare が読み込み、残りが書き込みになる。
+ * CDN はこれらをキャッシュできないので、CDN を置いても必ずオリジン(WEB)まで届く。
+ * WEB にデータ層がつながっていなければ、WEB だけで静的として返す(エラーにはしない)。
+ */
+export const DATA_ACCESS = { share: 0.2, readShare: 0.8 } as const;
 
 /** 品質が悪いときの離脱 */
 export const CHURN = {
@@ -58,20 +65,16 @@ export const CHURN = {
  * 1 件あたりのデータ量(KB)の基準値。テキスト中心の Web サービスを想定。
  * 画像投稿・動画配信を解放すると economy.ts の倍率が掛かって重くなる。
  */
-export const DATA_SIZE_KB: Record<ReqKind, number> = { static: 20, write: 5 };
+export const DATA_SIZE_KB: Record<ReqKind, number> = { static: 20, read: 5, write: 5 };
 /**
  * 帯域を持つノード(LB)の送信待ちの上限(ms)。
  * 回線が混んでこれ以上待つことになるリクエストは捨てる(パケットロス)。
  */
 export const LINK_BUFFER_MS = 100;
 
-// ---- お金 -------------------------------------------------------------
-export const START_MONEY = 60;
-export const SELL_REFUND_RATE = 0.5;
-/** 成功 1 件あたりの基本収益 */
-export const BASE_REVENUE: Record<ReqKind, number> = { static: 0.05, write: 0.15 };
-/** 同じ種類のノードを 1 台増やすごとの価格上昇率 */
-export const NODE_COST_GROWTH = 1.15;
+// ---- 収益(価格は pricing.ts) ------------------------------------------
+/** 成功 1 件あたりの基本収益。データ層まで使うリクエストは会員向けの機能なので高い */
+export const BASE_REVENUE: Record<ReqKind, number> = { static: 0.05, read: 0.15, write: 0.15 };
 
 /** 放置(ページを閉じている間)の収入 */
 export const OFFLINE = {
@@ -84,19 +87,20 @@ export const OFFLINE = {
 } as const;
 
 // ---- ノード定義 -------------------------------------------------------
+/**
+ * ノードの振る舞いは種類ごとの分岐ではなく、以下の項目の組み合わせで決まる。
+ * 新しいノードは定義を足し、pricing.ts に価格を足せば動く。
+ */
 export interface NodeKindDef {
   readonly kind: NodeKind;
   /** 盤面に表示する短いラベル */
   readonly label: string;
   readonly name: string;
   readonly description: string;
-  /** 1 台目の価格。2 台目以降は NODE_COST_GROWTH 倍ずつ上がる */
-  readonly cost: number;
-  readonly upkeepPerSec: number;
   /** 同時に処理できる数 */
   readonly workers: number;
   readonly queueMax: number;
-  /** 種類ごとの処理時間(ms)。強化前の値 */
+  /** 種類ごとの処理時間(ms)。スケールアップ前の値。受け付けない種類は 0 */
   readonly serviceMs: Readonly<Record<ReqKind, number>>;
   /**
    * 帯域(MB/秒)。指定したノードは、処理のあとデータを回線に流してから次へ送る。
@@ -104,27 +108,44 @@ export interface NodeKindDef {
    */
   readonly bandwidthMBps?: number;
   /**
-   * キャッシュ(CDN)。kinds のリクエストは hitRate の確率でここで返し、外れたら接続先(オリジン)へ送る。
-   * 返したデータも外れたデータも、このノードの帯域を通る
+   * キャッシュ。kinds のリクエストは hitRate の確率でここで返し、外れたら接続先へ送る。
+   * ヒット率は強化(stat: hitRate)で上がる
    */
   readonly cache?: { readonly kinds: readonly ReqKind[]; readonly hitRate: number };
-  /** 受け付けるリクエストの種類 */
+  /** 振り分けで受け付けるリクエストの種類 */
   readonly accepts: readonly ReqKind[];
   /** ここで処理が完了する(=レスポンスを返せる)種類。それ以外は次へ転送 */
   readonly terminates: readonly ReqKind[];
+  /**
+   * 振り分け先としての優先度(種類ごと、なければ 0)。
+   * 送り元の接続先に優先度の高いノードがあれば、そちらだけに送る(例: 読み込みはキャッシュ > レプリカ > DB)
+   */
+  readonly routePriority?: Partial<Record<ReqKind, number>>;
+  /**
+   * 送り先がない種類を、エラーにせずここで静的として返す。
+   * WEB にデータ層がつながっていないとき、会員機能が使えないだけでページは返せる、という表現
+   */
+  readonly localFallback?: boolean;
+  /** ここで完了した書き込みを、接続先のこの種類のノードへ複製する(内部の仕事として) */
+  readonly replicatesTo?: NodeKind;
+  /** この種類のノードから接続(複製)されていないと、振り分け先に選ばれない */
+  readonly replicaOf?: NodeKind;
   /** 接続できる先のノード種別 */
   readonly connectsTo: readonly NodeKind[];
   readonly maxOut: number;
-  /** 置ける台数の上限(なければ無制限) */
+  /** 置ける台数の上限(なければ無制限)。強化(stat: maxCount)で増える */
   readonly maxCount?: number;
+  /** 上限に達したときに出す説明(なぜ増やせないか、代わりに何をするか) */
+  readonly maxCountNote?: string;
   readonly placeable: boolean;
   /** 配置に必要な解放 */
   readonly requires?: UnlockId;
-  /** 処理のあと、この割合で接続先の別ノードへ転送する(書き込みとして扱う) */
-  readonly forwardsToDb?: boolean;
   /** 盤面上の色 */
   readonly color: number;
 }
+
+/** 受け付けない種類の処理時間は 0 にしておく */
+const ms = (v: Partial<Record<ReqKind, number>>): Record<ReqKind, number> => ({ static: 0, read: 0, write: 0, ...v });
 
 export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
   internet: {
@@ -132,11 +153,9 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     label: 'NET',
     name: 'インターネット',
     description: 'ユーザーからのリクエストの流入元。接続先は 1 つだけ。',
-    cost: 0,
-    upkeepPerSec: 0,
     workers: 0,
     queueMax: 0,
-    serviceMs: { static: 0, write: 0 },
+    serviceMs: ms({}),
     accepts: [],
     terminates: [],
     connectsTo: ['cdn', 'lb', 'web'],
@@ -149,23 +168,22 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     label: 'CDN',
     name: 'CDN',
     description:
-      'ユーザーの近くで静的コンテンツをキャッシュして返す。当たった分は LB・WEB を通らないので、重い画像や動画の帯域を肩代わりできる。外れた分と書き込みはオリジン(LB / WEB)へ送る。',
-    cost: 2000,
-    upkeepPerSec: 1,
+      'ユーザーの近くで静的コンテンツをキャッシュして返す。当たった分は LB・WEB を通らないので、重い画像や動画の帯域を肩代わりできる。外れた分と、データを使う読み込み・書き込みはオリジン(LB / WEB)へ送る。',
     // 処理は非常に速く、詰まるのは帯域
     workers: 256,
     queueMax: 2000,
-    serviceMs: { static: 1, write: 1 },
+    serviceMs: ms({ static: 1, read: 1, write: 1 }),
     // 400 MB/秒 = 3.2 Gbps。LB の 8 倍
     bandwidthMBps: 400,
     // 静的リクエストの 60% をキャッシュから返す(「CDN キャッシュ拡張」で上がる)
     cache: { kinds: ['static'], hitRate: 0.6 },
-    accepts: ['static', 'write'],
+    accepts: ['static', 'read', 'write'],
     terminates: [],
     connectsTo: ['lb', 'web'],
     maxOut: 1,
     // LB と同じく、サービス 1 つにつき 1 つ
     maxCount: 1,
+    maxCountNote: 'CDN はサービス 1 つにつき 1 つ。ヒット率と帯域は投資の「CDN キャッシュ拡張」「CDN 回線増強」で上げる。',
     placeable: true,
     requires: 'cdn',
     color: 0x5bc0eb,
@@ -175,20 +193,19 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     label: 'LB',
     name: 'ロードバランサー',
     description: '接続先の WEB へ順番に振り分ける。処理は速いが、通せるデータ量(帯域)に限りがある。',
-    cost: 150,
-    upkeepPerSec: 0.1,
     // 処理能力は十分高く(64 並列 × 2ms = 32,000 rps)、詰まるのは主に帯域
     workers: 64,
     queueMax: 500,
-    serviceMs: { static: 2, write: 2 },
-    // 50 MB/秒 = 400 Mbps。テキストのみ(平均 15KB 前後)なら約 3,000 rps 通せる
+    serviceMs: ms({ static: 2, read: 2, write: 2 }),
+    // 50 MB/秒 = 400 Mbps。テキストのみ(平均 20KB)なら約 2,500 rps 通せる
     bandwidthMBps: 50,
-    accepts: ['static', 'write'],
+    accepts: ['static', 'read', 'write'],
     terminates: [],
     connectsTo: ['web'],
     maxOut: 64,
     // インターネット(=サービス)が 1 つの間は LB も 1 台で足りる。サービスが増えたら見直す
     maxCount: 1,
+    maxCountNote: 'LB はサービス 1 つにつき 1 台。帯域は投資の「LB 回線増強」で増やす。',
     placeable: true,
     requires: 'lb',
     color: 0x9d8cff,
@@ -197,37 +214,80 @@ export const NODE_DEFS: Readonly<Record<NodeKind, NodeKindDef>> = {
     kind: 'web',
     label: 'WEB',
     name: 'Web サーバー',
-    description: 'リクエストを処理する。会員機能のあとは 1/5 を DB へ転送。',
-    cost: 50,
-    upkeepPerSec: 0.05,
+    description:
+      'ページを組み立てて返す。状態を持たないので何台でも並べられる。読み込み・書き込みはデータ層(キャッシュ / DB / レプリカ)へ問い合わせる。',
     workers: 4,
     queueMax: 40,
-    serviceMs: { static: 60, write: 30 },
-    accepts: ['static'],
+    serviceMs: ms({ static: 60, read: 60, write: 60 }),
+    accepts: ['static', 'read', 'write'],
     terminates: ['static'],
-    forwardsToDb: true,
-    connectsTo: ['db'],
-    maxOut: 4,
+    localFallback: true,
+    connectsTo: ['cache', 'db', 'replica'],
+    maxOut: 8,
     placeable: true,
     color: 0x2ec4b6,
+  },
+  cache: {
+    kind: 'cache',
+    label: 'CACHE',
+    name: 'キャッシュサーバー',
+    description:
+      'よく読まれるデータをメモリに置き、読み込みを当たればここで返す。外れた分は接続先の DB / レプリカへ。書き込みは扱わない。',
+    workers: 16,
+    queueMax: 400,
+    serviceMs: ms({ read: 2 }),
+    // 読み込みの 70% を返す(「キャッシュ容量拡張」で上がる)
+    cache: { kinds: ['read'], hitRate: 0.7 },
+    accepts: ['read'],
+    terminates: [],
+    routePriority: { read: 2 },
+    connectsTo: ['db', 'replica'],
+    maxOut: 8,
+    placeable: true,
+    requires: 'cache',
+    color: 0xe76f51,
   },
   db: {
     kind: 'db',
     label: 'DB',
-    name: 'データベース',
-    description: '書き込みを処理する。静的リクエストは受け付けない。',
-    cost: 400,
-    upkeepPerSec: 0.3,
-    workers: 4,
-    queueMax: 40,
-    serviceMs: { static: 0, write: 80 },
-    accepts: ['write'],
-    terminates: ['write'],
-    connectsTo: [],
-    maxOut: 0,
+    name: 'データベース(プライマリ)',
+    description:
+      'データの正本を持ち、読み込みと書き込みを処理する。書き込みはここでしか受けられない。正本は 1 か所なので台数は増やせず、スケールアップか、シャーディングで分割する。',
+    // WEB より大きな機種(16 並列)。書き込みだけなら 160 件/秒
+    workers: 16,
+    queueMax: 160,
+    serviceMs: ms({ read: 60, write: 100 }),
+    accepts: ['read', 'write'],
+    terminates: ['read', 'write'],
+    replicatesTo: 'replica',
+    connectsTo: ['replica'],
+    maxOut: 8,
+    maxCount: 1,
+    maxCountNote:
+      'DB(プライマリ)はデータの正本なので台数を増やせない。読み込みはキャッシュ・レプリカへ逃がし、書き込みはシャーディングで分割する。',
     placeable: true,
     requires: 'writes',
     color: 0xf4a261,
+  },
+  replica: {
+    kind: 'replica',
+    label: 'REPLICA',
+    name: 'リードレプリカ',
+    description:
+      'DB の複製。読み込みを肩代わりでき、台数を増やして分散できる。DB からつないでおく必要があり、DB の書き込みをすべて反映し続けるので、書き込みが多いと忙しくなる。',
+    workers: 16,
+    queueMax: 160,
+    // write はレプリケーションの反映にかかる時間
+    serviceMs: ms({ read: 60, write: 25 }),
+    accepts: ['read'],
+    terminates: ['read', 'write'],
+    routePriority: { read: 1 },
+    replicaOf: 'db',
+    connectsTo: [],
+    maxOut: 0,
+    placeable: true,
+    requires: 'replica',
+    color: 0xe9c46a,
   },
 };
 

@@ -67,7 +67,7 @@ export interface History {
 export class Metrics {
   totalSuccess = 0;
   totalErrors = 0;
-  readonly successByKind: Record<ReqKind, number> = { static: 0, write: 0 };
+  readonly successByKind: Record<ReqKind, number> = { static: 0, read: 0, write: 0 };
   readonly errorsByReason: Record<ErrorReason, number> = { drop: 0, timeout: 0, 'no-route': 0 };
   readonly overall = new LatencyHistogram();
   readonly history: History = { t: [], rps: [], p99: [], errorRate: [], users: [] };

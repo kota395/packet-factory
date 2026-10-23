@@ -12,22 +12,30 @@ import {
   MAX_HOPS,
   MIN_TRANSIT_MS,
   MIN_USERS,
-  NODE_COST_GROWTH,
   NODE_DEFS,
   REQ_PER_USER,
-  SELL_REFUND_RATE,
-  START_MONEY,
   START_USERS,
   TICK_MS,
   TIMEOUT_MS,
   TRANSIT_MS_PER_CELL,
-  WEB_TO_DB_SHARE,
+  DATA_ACCESS,
   type NodeKindDef,
 } from './config';
-import { UNLOCKS, UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades, upgradeCost, type FeatureEffect } from './economy';
+import {
+  UNLOCKS,
+  UNLOCK_BY_ID,
+  UPGRADES,
+  UPGRADE_BY_ID,
+  emptyUpgrades,
+  unlockCost,
+  upgradeCost,
+  type FeatureEffect,
+  type NodeStat,
+} from './economy';
+import { NODE_PRICES, SELL_REFUND_RATE, START_MONEY, growingPrice } from './pricing';
 import { Metrics } from './metrics';
 import { mulberry32, poisson } from './rng';
-import type { ErrorReason, NodeKind, ReqKind, Request, UnlockId, UpgradeId } from './types';
+import { REQ_KINDS, type ErrorReason, type NodeKind, type ReqKind, type Request, type UnlockId, type UpgradeId } from './types';
 
 export interface Job {
   readonly req: Request;
@@ -103,8 +111,8 @@ export interface SimOptions {
    * ユーザーの増減を行わない(主にテスト用)
    */
   traffic?: (tMs: number) => number;
-  /** 書き込みの割合を固定する(テスト用) */
-  dbShare?: number;
+  /** データを使うリクエストの割合を固定する(テスト用。既定は会員機能の解放で DATA_ACCESS.share) */
+  dataShare?: number;
   unlocks?: Iterable<UnlockId>;
   /** 解放済みだがオフにしている配信コンテンツ */
   disabledFeatures?: Iterable<UnlockId>;
@@ -139,7 +147,9 @@ export class Simulation {
 
   private readonly rng: () => number;
   private readonly fixedTraffic: ((tMs: number) => number) | null;
-  private readonly fixedDbShare: number | null;
+  private readonly fixedDataShare: number | null;
+  /** 複製元から接続されているノード(レプリカ)の ID。layoutVersion が変わったら作り直す */
+  private fed = { version: -1, ids: new Set<number>() };
   /** 接続ごとの今の 1 秒間の通過数と、平滑化した通過数/秒。キーは edgeKey(from, to) */
   private readonly edgeCounts = new Map<string, number>();
   private readonly edgeRps = new Map<string, number>();
@@ -152,7 +162,7 @@ export class Simulation {
     this.money = opts.startMoney ?? START_MONEY;
     this.users = opts.startUsers ?? START_USERS;
     this.fixedTraffic = opts.traffic ?? null;
-    this.fixedDbShare = opts.dbShare ?? null;
+    this.fixedDataShare = opts.dataShare ?? null;
     this.unlocks = new Set(opts.unlocks ?? []);
     this.upgrades = { ...emptyUpgrades(), ...opts.upgrades };
     this.disabledFeatures = new Set(opts.disabledFeatures ?? []);
@@ -170,15 +180,20 @@ export class Simulation {
     return UPGRADE_BY_ID.monetize.effect(this.upgrades.monetize);
   }
 
-  /** WEB に届いたうち DB へ流す割合。会員機能を解放していれば有効(実際に流れるのは DB が接続された WEB のみ) */
-  get dbShare(): number {
-    if (this.fixedDbShare !== null) return this.fixedDbShare;
-    return this.unlocks.has('writes') ? WEB_TO_DB_SHARE : 0;
+  /** 利用者のリクエストのうちデータを使う(読み込み・書き込み)割合。会員機能を解放していれば有効 */
+  get dataShare(): number {
+    if (this.fixedDataShare !== null) return this.fixedDataShare;
+    return this.unlocks.has('writes') ? DATA_ACCESS.share : 0;
+  }
+
+  /** そのノード 1 台の維持費($/秒) */
+  upkeepOf(kind: NodeKind): number {
+    return kind === 'internet' ? 0 : NODE_PRICES[kind].upkeep;
   }
 
   get upkeepPerSec(): number {
     let sum = 0;
-    for (const n of this.nodes.values()) sum += n.def.upkeepPerSec;
+    for (const n of this.nodes.values()) sum += this.upkeepOf(n.kind);
     return sum;
   }
 
@@ -214,21 +229,32 @@ export class Simulation {
     return m;
   }
 
+  /**
+   * その種類のノードの能力に効いている強化の合計。
+   * maxCount は足し算(0 から)、それ以外は掛け算(1 から)
+   */
+  statFactor(kind: NodeKind, stat: NodeStat): number {
+    let f = stat === 'maxCount' ? 0 : 1;
+    for (const u of UPGRADES) {
+      if (u.target?.stat !== stat || !u.target.nodes.includes(kind)) continue;
+      const v = u.effect(this.upgrades[u.id]);
+      f = stat === 'maxCount' ? f + v : f * v;
+    }
+    return f;
+  }
+
   /** 帯域(MB/秒)。帯域の制限がないノードは Infinity */
   bandwidthMBpsOf(node: NodeRuntime): number {
     const base = node.def.bandwidthMBps;
     if (base === undefined) return Infinity;
-    if (node.kind === 'lb') return base * UPGRADE_BY_ID.lbBandwidth.effect(this.upgrades.lbBandwidth);
-    if (node.kind === 'cdn') return base * UPGRADE_BY_ID.cdnBandwidth.effect(this.upgrades.cdnBandwidth);
-    return base;
+    return base * this.statFactor(node.kind, 'bandwidth');
   }
 
   /** キャッシュのヒット率(0〜1)。キャッシュのないノードは 0 */
   cacheHitRateOf(node: NodeRuntime): number {
     const cache = node.def.cache;
     if (!cache) return 0;
-    if (node.kind === 'cdn') return UPGRADE_BY_ID.cdnCache.effect(this.upgrades.cdnCache);
-    return cache.hitRate;
+    return 1 - (1 - cache.hitRate) * this.statFactor(node.kind, 'hitRate');
   }
 
   /** 接続を通っているリクエスト数/秒 */
@@ -238,10 +264,7 @@ export class Simulation {
 
   /** 強化を反映した処理時間(ms) */
   serviceMs(node: NodeRuntime, kind: ReqKind): number {
-    const base = node.def.serviceMs[kind];
-    if (node.kind === 'web') return base / UPGRADE_BY_ID.webPerf.effect(this.upgrades.webPerf);
-    if (node.kind === 'db') return base / UPGRADE_BY_ID.dbPerf.effect(this.upgrades.dbPerf);
-    return base;
+    return node.def.serviceMs[kind] / this.statFactor(node.kind, 'speed');
   }
 
   countOf(kind: NodeKind): number {
@@ -252,13 +275,19 @@ export class Simulation {
 
   /** 次の 1 台の価格 */
   nodeCost(kind: NodeKind): number {
-    return Math.round(NODE_DEFS[kind].cost * NODE_COST_GROWTH ** this.countOf(kind));
+    if (kind === 'internet') return 0;
+    return growingPrice(NODE_PRICES[kind], this.countOf(kind));
+  }
+
+  /** 置ける台数の上限(強化込み)。上限がなければ Infinity */
+  maxCountOf(kind: NodeKind): number {
+    const max = NODE_DEFS[kind].maxCount;
+    return max === undefined ? Infinity : max + this.statFactor(kind, 'maxCount');
   }
 
   /** これ以上置けないか */
   isAtMaxCount(kind: NodeKind): boolean {
-    const max = NODE_DEFS[kind].maxCount;
-    return max !== undefined && this.countOf(kind) >= max;
+    return this.countOf(kind) >= this.maxCountOf(kind);
   }
 
   isKindUnlocked(kind: NodeKind): boolean {
@@ -275,6 +304,7 @@ export class Simulation {
   canBuyUpgrade(id: UpgradeId): string | null {
     const def = UPGRADE_BY_ID[id];
     if (def.requires && !this.unlocks.has(def.requires)) return `「${UNLOCK_BY_ID[def.requires].name}」が必要です`;
+    if (def.maxLevel !== undefined && this.upgrades[id] >= def.maxLevel) return '最大レベルです';
     if (this.money < this.upgradeCost(id)) return '資金が足りません';
     return null;
   }
@@ -292,14 +322,14 @@ export class Simulation {
     const def = UNLOCK_BY_ID[id];
     if (this.unlocks.has(id)) return '導入済みです';
     if (def.requires && !this.unlocks.has(def.requires)) return `「${UNLOCK_BY_ID[def.requires].name}」が必要です`;
-    if (this.money < def.cost) return '資金が足りません';
+    if (this.money < unlockCost(id)) return '資金が足りません';
     return null;
   }
 
   unlock(id: UnlockId): ActionResult {
     const err = this.canUnlock(id);
     if (err) return { ok: false, message: err };
-    this.money -= UNLOCK_BY_ID[id].cost;
+    this.money -= unlockCost(id);
     this.unlocks.add(id);
     this.purchaseVersion++;
     return { ok: true, message: `${UNLOCK_BY_ID[id].name}を導入しました` };
@@ -325,7 +355,9 @@ export class Simulation {
 
   /** そのノードに届いているリクエスト数/秒(internet は送り出している数) */
   inRpsOf(node: NodeRuntime): number {
-    return node.inRps.static + node.inRps.write;
+    let sum = 0;
+    for (const k of REQ_KINDS) sum += node.inRps[k];
+    return sum;
   }
 
   /**
@@ -359,21 +391,66 @@ export class Simulation {
   /** 処理能力から見た上限(リクエスト/秒)= 同時処理数 ÷ 平均処理時間 */
   cpuCapacityRpsOf(node: NodeRuntime): number {
     if (node.kind === 'internet') return Infinity;
-    const accepted = node.def.accepts;
-    let total = 0;
-    for (const k of accepted) total += node.inRps[k];
+    // 振り分けで届く種類に加え、レプリケーションのような内部の仕事も負荷に数える
+    const total = this.inRpsOf(node);
     let avgMs = 0;
-    for (const k of accepted) {
-      // まだ何も届いていなければ、今の流入の割合で見積もる
+    for (const k of REQ_KINDS) {
+      // まだ何も届いていなければ、受け付ける種類の想定の割合で見積もる
       const share = total > 0 ? node.inRps[k] / total : this.expectedShare(node, k);
       avgMs += share * this.serviceMs(node, k);
     }
     return avgMs > 0 ? (node.def.workers * 1000) / avgMs : Infinity;
   }
 
+  /** まだ何も届いていないノードに、受け付ける種類がどんな割合で届きそうか */
   private expectedShare(node: NodeRuntime, kind: ReqKind): number {
-    if (node.def.accepts.length === 1) return node.def.accepts[0] === kind ? 1 : 0;
-    return kind === 'static' ? 1 : 0;
+    const accepts = node.def.accepts;
+    if (!accepts.includes(kind)) return 0;
+    const ds = this.dataShare;
+    const rs = DATA_ACCESS.readShare;
+    const weight = (k: ReqKind) => (k === 'static' ? 1 - ds : k === 'read' ? ds * rs : ds * (1 - rs));
+    let sum = 0;
+    for (const k of accepts) sum += weight(k);
+    if (sum <= 0) return accepts[0] === kind ? 1 : 0;
+    return weight(kind) / sum;
+  }
+
+  /** 複製元(DB)から接続されているか。複製元が要らないノードは常に true */
+  isFed(node: NodeRuntime): boolean {
+    if (!node.def.replicaOf) return true;
+    if (this.fed.version !== this.layoutVersion) {
+      const ids = new Set<number>();
+      for (const src of this.nodes.values()) {
+        const to = src.def.replicatesTo;
+        if (!to) continue;
+        for (const id of src.out) {
+          const target = this.nodes.get(id);
+          if (target?.kind === to && target.def.replicaOf === src.kind) ids.add(id);
+        }
+      }
+      this.fed = { version: this.layoutVersion, ids };
+    }
+    return this.fed.ids.has(node.id);
+  }
+
+  /**
+   * node から kind のリクエストを送れる接続先。受け付けない先と、複製元のないレプリカは除き、
+   * 優先度(routePriority)が一番高いものだけを返す
+   */
+  routeTargets(node: NodeRuntime, kind: ReqKind): NodeRuntime[] {
+    const result: NodeRuntime[] = [];
+    let best = -Infinity;
+    for (const id of node.out) {
+      const target = this.nodes.get(id);
+      if (!target || !target.def.accepts.includes(kind) || !this.isFed(target)) continue;
+      const p = target.def.routePriority?.[kind] ?? 0;
+      if (p > best) {
+        best = p;
+        result.length = 0;
+      }
+      if (p === best) result.push(target);
+    }
+    return result;
   }
 
   nodeAt(x: number, y: number): NodeRuntime | undefined {
@@ -416,7 +493,7 @@ export class Simulation {
     if (this.nodeAt(x, y)) return { ok: false, message: 'そのマスは使用中です' };
     // セーブからの復元(free)では、昔の上限で置かれたノードもそのまま戻す
     if (!opts.free && this.isAtMaxCount(kind)) {
-      return { ok: false, message: `${def.name}は ${def.maxCount} 台までです` };
+      return { ok: false, message: `${def.name}は ${this.maxCountOf(kind)} 台までです` };
     }
     const cost = this.nodeCost(kind);
     if (!opts.free) {
@@ -509,15 +586,17 @@ export class Simulation {
     const lambda = (this.trafficAt(now) * TICK_MS) / 1000;
     const count = poisson(lambda, this.rng);
     const internet = this.nodes.get(this.internetId)!;
-    const size = this.dataSizeKB('static');
+    const dataShare = this.dataShare;
     for (let i = 0; i < count; i++) {
+      let kind: ReqKind = 'static';
+      if (dataShare > 0 && this.rng() < dataShare) kind = this.rng() < DATA_ACCESS.readShare ? 'read' : 'write';
       const req: Request = {
         id: this.nextReqId++,
-        kind: 'static',
+        kind,
         createdAt: now,
         hops: 0,
         readyAt: now,
-        sizeKB: size,
+        sizeKB: this.dataSizeKB(kind),
       };
       internet.arrivals[req.kind]++;
       internet.arrivalsKB += req.sizeKB;
@@ -552,7 +631,7 @@ export class Simulation {
   /** 1 秒ごとに各ノードの受信量を平滑化して更新する */
   private rollNodeStats(): void {
     for (const n of this.nodes.values()) {
-      for (const k of ['static', 'write'] as const) {
+      for (const k of REQ_KINDS) {
         n.inRps[k] += IN_RPS_SMOOTHING * (n.arrivals[k] - n.inRps[k]);
         n.arrivals[k] = 0;
       }
@@ -631,17 +710,14 @@ export class Simulation {
 
   private complete(node: NodeRuntime, req: Request, t: number): void {
     node.processed++;
-    // WEB: 一部は DB へ回す(DB が接続されていなければ回さない)
-    if (node.def.forwardsToDb && req.kind === 'static' && this.rng() < this.dbShare) {
-      const hasDb = node.out.some((id) => this.nodes.get(id)?.kind === 'db');
-      if (hasDb) {
-        req.kind = 'write';
-        req.sizeKB = this.dataSizeKB('write');
-        this.route(node, req, t);
-        return;
-      }
+    // WEB: データ層がつながっていなければ、会員機能が使えないだけでページは返せる(静的として完了)
+    if (node.def.localFallback && !node.def.terminates.includes(req.kind) && !this.routeTargets(node, req.kind).length) {
+      req.kind = 'static';
+      this.succeed(req, node, t);
+      return;
     }
     if (node.def.terminates.includes(req.kind)) {
+      if (req.kind === 'write' && !req.internal && node.def.replicatesTo) this.replicate(node, t);
       this.succeed(req, node, t);
       return;
     }
@@ -674,16 +750,33 @@ export class Simulation {
       this.fail(req, 'no-route', node, t);
       return;
     }
-    const candidates: NodeRuntime[] = [];
-    for (const id of node.out) {
-      const target = this.nodes.get(id);
-      if (target && target.def.accepts.includes(req.kind)) candidates.push(target);
-    }
+    const candidates = this.routeTargets(node, req.kind);
     if (!candidates.length) {
       this.fail(req, 'no-route', node, t);
       return;
     }
-    const target = candidates[node.rr++ % candidates.length];
+    this.send(node, candidates[node.rr++ % candidates.length], req, t);
+  }
+
+  /** 完了した書き込みを、接続先の複製へ内部の仕事として送る */
+  private replicate(node: NodeRuntime, t: number): void {
+    for (const id of node.out) {
+      const target = this.nodes.get(id);
+      if (!target || target.kind !== node.def.replicatesTo) continue;
+      const req: Request = {
+        id: this.nextReqId++,
+        kind: 'write',
+        createdAt: t,
+        hops: 0,
+        readyAt: t,
+        sizeKB: this.dataSizeKB('write'),
+        internal: true,
+      };
+      this.send(node, target, req, t);
+    }
+  }
+
+  private send(node: NodeRuntime, target: NodeRuntime, req: Request, t: number): void {
     req.hops++;
     const key = edgeKey(node.id, target.id);
     this.edgeCounts.set(key, (this.edgeCounts.get(key) ?? 0) + 1);
@@ -709,6 +802,7 @@ export class Simulation {
   }
 
   private succeed(req: Request, node: NodeRuntime, t: number): void {
+    if (req.internal) return;
     const latency = t - req.createdAt;
     if (latency > TIMEOUT_MS) {
       this.fail(req, 'timeout', node, t);
@@ -722,7 +816,9 @@ export class Simulation {
     this.lifetimeEarned += revenue;
   }
 
-  private fail(_req: Request, reason: ErrorReason, node: NodeRuntime | undefined, t: number): void {
+  private fail(req: Request, reason: ErrorReason, node: NodeRuntime | undefined, t: number): void {
+    // 内部の仕事(レプリケーション)の取りこぼしは利用者のエラーに数えない
+    if (req.internal) return;
     this.metrics.recordError(reason);
     if (node) {
       node.errors++;
@@ -746,8 +842,8 @@ export class Simulation {
       processed: 0,
       errors: 0,
       lastErrorAt: -Infinity,
-      arrivals: { static: 0, write: 0 },
-      inRps: { static: 0, write: 0 },
+      arrivals: { static: 0, read: 0, write: 0 },
+      inRps: { static: 0, read: 0, write: 0 },
       arrivalsKB: 0,
       inKBps: 0,
       linkFreeAt: 0,

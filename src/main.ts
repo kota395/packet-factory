@@ -1,6 +1,7 @@
 import './style.css';
 import { BoardRenderer } from './render/board';
-import { BASE_REVENUE, NODE_DEFS, OFFLINE, PLACEABLE_KINDS, SELL_REFUND_RATE } from './sim/config';
+import { BASE_REVENUE, NODE_DEFS, OFFLINE, PLACEABLE_KINDS } from './sim/config';
+import { SELL_REFUND_RATE } from './sim/pricing';
 import { UNLOCK_BY_ID } from './sim/economy';
 import {
   createSave,
@@ -219,7 +220,7 @@ function updateToolbar(): void {
     if (!label) continue;
     const unlocked = sim.isKindUnlocked(k);
     const maxed = unlocked && sim.isAtMaxCount(k);
-    label.textContent = !unlocked ? '🔒' : maxed ? '設置済' : money(sim.nodeCost(k));
+    label.textContent = !unlocked ? '🔒' : maxed ? '上限' : money(sim.nodeCost(k));
     label.classList.toggle('short', unlocked && !maxed && sim.money < sim.nodeCost(k));
   }
   const badge = ui.toolbar.querySelector<HTMLElement>('.badge');
@@ -245,11 +246,11 @@ function updateHint(): void {
     default: {
       const d = NODE_DEFS[state.tool];
       if (sim.isKindUnlocked(state.tool) && sim.isAtMaxCount(state.tool)) {
-        text = `${d.name}はサービス 1 つにつき ${d.maxCount} 台までです。帯域は投資の「LB 回線増強」で増やせます。`;
+        text = `${d.name}は ${sim.maxCountOf(state.tool)} 台までです。${d.maxCountNote ?? ''}`;
       } else if (!sim.isKindUnlocked(state.tool)) {
         text = `🔒 ${d.name}は投資メニューの「${UNLOCK_BY_ID[d.requires!].name}」で解放できます。`;
       } else {
-        text = `空きマスをタップして${d.name}を配置(${money(sim.nodeCost(state.tool))}、維持費 $${d.upkeepPerSec}/秒)。${d.description}`;
+        text = `空きマスをタップして${d.name}を配置(${money(sim.nodeCost(state.tool))}、維持費 $${sim.upkeepOf(state.tool)}/秒)。${d.description}`;
       }
     }
   }
@@ -449,7 +450,8 @@ function showWelcome(): void {
     </ul>
     <div class="legend">
       <span><span class="dot" style="background:var(--accent)"></span>静的 $${BASE_REVENUE.static}</span>
-      <span><span class="dot" style="background:var(--write)"></span>書き込み $${BASE_REVENUE.write}(会員機能で解放)</span>
+      <span><span class="dot" style="background:var(--read)"></span>読み込み $${BASE_REVENUE.read}</span>
+      <span><span class="dot" style="background:var(--write)"></span>書き込み $${BASE_REVENUE.write}(読み書きは会員機能で解放)</span>
     </div>
     <div class="actions"><button type="button" class="primary" data-close>はじめる</button></div>`);
 }
