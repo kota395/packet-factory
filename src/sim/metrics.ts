@@ -1,56 +1,16 @@
-import { TIMEOUT_MS } from './config';
-import type { ErrorReason, ReqKind } from './types';
+/** 直近の統計と推移。流量モデルの結果を一定間隔ごとに受け取って集計する */
 
-const BIN_MS = 10;
-const BIN_COUNT = Math.ceil(TIMEOUT_MS / BIN_MS) + 1;
-const WINDOW_SECONDS = 5;
+const WINDOW_MS = 5000;
 const HISTORY_MAX = 900;
 
-/** レイテンシのヒストグラム。10ms 刻みで数えて、パーセンタイルを安く求める */
-export class LatencyHistogram {
-  readonly counts = new Uint32Array(BIN_COUNT);
-  total = 0;
-
-  add(ms: number): void {
-    const i = Math.min(BIN_COUNT - 1, Math.max(0, Math.floor(ms / BIN_MS)));
-    this.counts[i]++;
-    this.total++;
-  }
-
-  addAll(other: LatencyHistogram): void {
-    for (let i = 0; i < BIN_COUNT; i++) this.counts[i] += other.counts[i];
-    this.total += other.total;
-  }
-
-  /** q は 0〜1。ビンの上端を返すので、実際の値以上の保守的な見積もりになる */
-  percentile(q: number): number {
-    if (this.total === 0) return 0;
-    const target = Math.max(1, Math.ceil(q * this.total));
-    let acc = 0;
-    for (let i = 0; i < BIN_COUNT; i++) {
-      acc += this.counts[i];
-      if (acc >= target) return (i + 1) * BIN_MS;
-    }
-    return BIN_COUNT * BIN_MS;
-  }
-}
-
-interface Bucket {
-  success: number;
-  errors: number;
-  revenue: number;
-  hist: LatencyHistogram;
-}
-
-const newBucket = (): Bucket => ({ success: 0, errors: 0, revenue: 0, hist: new LatencyHistogram() });
-
 export interface RollingStats {
-  /** 直近の流量(成功+失敗 / 秒) */
-  rps: number;
-  p50: number;
-  p99: number;
+  /** ページビュー/秒(成功 + 失敗) */
+  pv: number;
   /** 0〜1 */
   errorRate: number;
+  /** 平均応答と p99 の見積もり(ms) */
+  latencyMs: number;
+  p99Ms: number;
   /** 直近の売上(/秒)。維持費は含まない */
   revenuePerSec: number;
 }
@@ -58,53 +18,58 @@ export interface RollingStats {
 /** 1 秒ごとの推移。グラフ表示用 */
 export interface History {
   t: number[];
-  rps: number[];
+  pv: number[];
   p99: number[];
   errorRate: number[];
   users: number[];
 }
 
+interface Sample {
+  dtMs: number;
+  pv: number;
+  errors: number;
+  latencyMs: number;
+  p99Ms: number;
+  revenue: number;
+}
+
 export class Metrics {
-  totalSuccess = 0;
+  totalPv = 0;
   totalErrors = 0;
-  readonly successByKind: Record<ReqKind, number> = { static: 0, read: 0, write: 0 };
-  readonly errorsByReason: Record<ErrorReason, number> = { drop: 0, timeout: 0, 'no-route': 0 };
-  readonly overall = new LatencyHistogram();
-  readonly history: History = { t: [], rps: [], p99: [], errorRate: [], users: [] };
+  readonly history: History = { t: [], pv: [], p99: [], errorRate: [], users: [] };
 
-  private window: Bucket[] = [];
-  private current: Bucket = newBucket();
+  private samples: Sample[] = [];
   private second = 0;
-  private stats: RollingStats = { rps: 0, p50: 0, p99: 0, errorRate: 0, revenuePerSec: 0 };
+  private stats: RollingStats = { pv: 0, errorRate: 0, latencyMs: 0, p99Ms: 0, revenuePerSec: 0 };
 
-  recordSuccess(kind: ReqKind, latencyMs: number): void {
-    this.totalSuccess++;
-    this.successByKind[kind]++;
-    this.overall.add(latencyMs);
-    this.current.success++;
-    this.current.hist.add(latencyMs);
+  /** dtMs の間に pv 件(/秒ではなく件数)が来て、errors 件が失敗し、revenue を稼いだ */
+  record(dtMs: number, pv: number, errors: number, latencyMs: number, p99Ms: number, revenue: number): void {
+    this.totalPv += pv;
+    this.totalErrors += errors;
+    this.samples.push({ dtMs, pv, errors, latencyMs, p99Ms, revenue });
+    let span = 0;
+    for (let i = this.samples.length - 1; i >= 0; i--) {
+      span += this.samples[i].dtMs;
+      if (span > WINDOW_MS) {
+        this.samples.splice(0, i);
+        break;
+      }
+    }
+    this.recompute();
   }
 
-  recordRevenue(amount: number): void {
-    this.current.revenue += amount;
-  }
-
-  recordError(reason: ErrorReason): void {
-    this.totalErrors++;
-    this.errorsByReason[reason]++;
-    this.current.errors++;
-  }
-
-  /** シミュレーション時刻を進める。秒の境目で直近の統計と履歴を更新する */
-  advance(timeMs: number, users = 0): void {
+  /** 秒の境目で推移を記録する */
+  advance(timeMs: number, users: number): void {
     const sec = Math.floor(timeMs / 1000);
     while (this.second < sec) {
-      this.window.push(this.current);
-      if (this.window.length > WINDOW_SECONDS) this.window.shift();
-      this.current = newBucket();
       this.second++;
-      this.recompute();
-      this.pushHistory(this.second, users);
+      const h = this.history;
+      h.t.push(this.second);
+      h.pv.push(this.stats.pv);
+      h.p99.push(this.stats.p99Ms);
+      h.errorRate.push(this.stats.errorRate);
+      h.users.push(users);
+      if (h.t.length > HISTORY_MAX) for (const series of Object.values(h)) series.shift();
     }
   }
 
@@ -112,42 +77,28 @@ export class Metrics {
     return this.stats;
   }
 
-  /** ステージ開始からの可用性(0〜1)。リクエストが無ければ 1 */
-  get availability(): number {
-    const n = this.totalSuccess + this.totalErrors;
-    return n === 0 ? 1 : this.totalSuccess / n;
-  }
-
   private recompute(): void {
-    const hist = new LatencyHistogram();
-    let success = 0;
+    let ms = 0;
+    let pv = 0;
     let errors = 0;
     let revenue = 0;
-    for (const b of this.window) {
-      hist.addAll(b.hist);
-      success += b.success;
-      errors += b.errors;
-      revenue += b.revenue;
+    let lat = 0;
+    let p99 = 0;
+    for (const s of this.samples) {
+      ms += s.dtMs;
+      pv += s.pv;
+      errors += s.errors;
+      revenue += s.revenue;
+      lat += s.latencyMs * s.pv;
+      p99 = Math.max(p99, s.p99Ms);
     }
-    const n = success + errors;
+    const sec = ms / 1000;
     this.stats = {
-      rps: this.window.length ? n / this.window.length : 0,
-      p50: hist.percentile(0.5),
-      p99: hist.percentile(0.99),
-      errorRate: n ? errors / n : 0,
-      revenuePerSec: this.window.length ? revenue / this.window.length : 0,
+      pv: sec ? pv / sec : 0,
+      errorRate: pv ? errors / pv : 0,
+      latencyMs: pv ? lat / pv : 0,
+      p99Ms: pv ? p99 : 0,
+      revenuePerSec: sec ? revenue / sec : 0,
     };
-  }
-
-  private pushHistory(sec: number, users: number): void {
-    const h = this.history;
-    h.t.push(sec);
-    h.rps.push(this.stats.rps);
-    h.p99.push(this.stats.p99);
-    h.errorRate.push(this.stats.errorRate);
-    h.users.push(users);
-    if (h.t.length > HISTORY_MAX) {
-      for (const series of Object.values(h)) series.shift();
-    }
   }
 }

@@ -1,8 +1,7 @@
 import './style.css';
-import { BoardRenderer } from './render/board';
-import { BASE_REVENUE, NODE_DEFS, OFFLINE, PLACEABLE_KINDS } from './sim/config';
-import { SELL_REFUND_RATE } from './sim/pricing';
-import { UNLOCK_BY_ID } from './sim/economy';
+import { RowRenderer, type Face } from './render/row';
+import { MODEL_BY_ID } from './sim/catalog';
+import { OFFLINE } from './sim/config';
 import {
   createSave,
   decodeSave,
@@ -14,15 +13,13 @@ import {
   type SaveData,
 } from './sim/save';
 import type { Simulation } from './sim/simulation';
-import type { NodeKind } from './sim/types';
 import { MetricsChart } from './ui/chart';
-import { nodeInfoHtml, nodeName } from './ui/node-info';
 import { compact, duration, money, rate } from './ui/format';
+import { InfoPanel, type Selection } from './ui/info';
 import { InvestPanel } from './ui/invest';
 
-type Tool = 'select' | NodeKind | 'connect' | 'delete';
-
-const SAVE_KEY = 'packet-factory:save:v2';
+/** v3 = ラックと配線の版。ノード図の版(v2)のセーブは引き継がない */
+const SAVE_KEY = 'packet-factory:save:v3';
 const AUTOSAVE_MS = 5000;
 const CHURN_WARN_INTERVAL_MS = 20_000;
 
@@ -32,7 +29,7 @@ const ui = {
   money: el('s-money'),
   income: el('s-income'),
   users: el('s-users'),
-  rps: el('s-rps'),
+  pv: el('s-rps'),
   err: el('s-err'),
   p99: el('s-p99'),
   board: el('board'),
@@ -47,15 +44,14 @@ const ui = {
 };
 
 const state = {
-  sim: newGame(newSeed()),
-  tool: 'select' as Tool,
-  selectedId: null as number | null,
-  connectFrom: null as number | null,
+  sim: newGame(),
+  face: 'front' as Face,
+  selected: null as Selection | null,
   speed: 1,
   lastChurnWarn: 0,
 };
 
-const renderer = new BoardRenderer();
+const renderer = new RowRenderer();
 const chart = new MetricsChart(ui.chart);
 const invest = new InvestPanel(
   el('invest'),
@@ -70,36 +66,37 @@ const invest = new InvestPanel(
     }
   },
 );
+const info = new InfoPanel(ui.info, () => state.sim, {
+  toast,
+  select: (t) => select(t),
+  changed: () => {
+    saveGame();
+    updateHud();
+  },
+});
 
 // ------------------------------------------------------------------ 起動
 
 buildToolbar();
 await renderer.init(ui.board);
-renderer.onCellTap = handleCellTap;
-renderer.onNodeMove = (id, x, y) => {
-  const r = state.sim.moveNode(id, x, y);
+renderer.onTap = (t) => select(t.kind === 'none' ? null : t);
+renderer.onDeviceMove = (id, slot, u) => {
+  const r = state.sim.moveDevice(id, slot, u);
   if (!r.ok && r.message) toast(r.message);
-  state.selectedId = id;
-  updateInfo();
+  select({ kind: 'device', id });
 };
-renderer.onConnect = (from, to) => {
-  const sim = state.sim;
-  const r = sim.toggleEdge(from, to);
-  const a = sim.nodes.get(from);
-  const b = sim.nodes.get(to);
-  if (r.ok && a && b && !r.message) toast(`${nodeName(sim, a)} → ${nodeName(sim, b)} を接続しました`);
-  else if (r.message) toast(r.message);
-  state.selectedId = from;
-  state.connectFrom = null;
-  updateInfo();
-  updateHint();
+renderer.onConnect = (a, b) => {
+  const r = state.sim.connect(a, b);
+  if (r.message) toast(r.message);
+  if (r.ok && r.id !== undefined) select({ kind: 'cable', id: r.id });
+  saveGame();
 };
 el('btn-zoom-in').addEventListener('click', () => renderer.zoomBy(1.25));
 el('btn-zoom-out').addEventListener('click', () => renderer.zoomBy(0.8));
 el('btn-fit').addEventListener('click', () => renderer.fit());
 bindControls();
 const restored = restoreGame();
-setTool('select');
+setFace('front');
 setSpeed(1);
 updateHud();
 if (!restored) showWelcome();
@@ -109,11 +106,11 @@ let saveTimer = 0;
 renderer.app.ticker.add((ticker) => {
   const sim = state.sim;
   if (state.speed > 0) sim.step(Math.min(ticker.deltaMS, 100) * state.speed);
-
-  renderer.draw(sim, { selectedId: state.selectedId, connectFrom: state.connectFrom, connectMode: state.tool === 'connect' });
+  const sel = state.selected;
+  renderer.draw(sim, { face: state.face, selected: sel && sel.kind !== 'service' ? sel : null });
 
   hudTimer += ticker.deltaMS;
-  if (hudTimer >= 200) {
+  if (hudTimer >= 250) {
     hudTimer = 0;
     updateHud();
   }
@@ -130,147 +127,76 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', saveGame);
 
-// ------------------------------------------------------------------ 盤面操作
+// ------------------------------------------------------------------ 選択
 
-function handleCellTap(x: number, y: number): void {
-  const sim = state.sim;
-  const node = sim.nodeAt(x, y);
-
-  switch (state.tool) {
-    case 'select':
-      state.selectedId = node?.id ?? null;
-      break;
-
-    case 'connect':
-      if (!node) {
-        state.connectFrom = null;
-      } else if (state.connectFrom === null) {
-        if (node.def.maxOut === 0) toast(`${node.def.name}から先へは接続できません`);
-        else state.connectFrom = node.id;
-      } else if (state.connectFrom === node.id) {
-        state.connectFrom = null;
-      } else {
-        const r = sim.toggleEdge(state.connectFrom, node.id);
-        if (r.message) toast(r.message);
-        // 接続元は選択したままにして、続けて複数の接続先へつなげるようにする
-      }
-      break;
-
-    case 'delete':
-      if (node) {
-        const r = sim.removeNode(node.id);
-        if (r.message) toast(r.message);
-        if (state.selectedId === node.id) state.selectedId = null;
-      }
-      break;
-
-    default: {
-      // 配置ツール
-      if (node) {
-        state.selectedId = node.id;
-        break;
-      }
-      const r = sim.addNode(state.tool, x, y);
-      if (!r.ok) toast(r.message ?? '配置できません');
-      else state.selectedId = r.id ?? null;
-    }
-  }
-  updateInfo();
-  updateHint();
+function select(t: Selection | null): void {
+  state.selected = t;
+  if (t && invest.isOpen) invest.toggle(false);
+  info.update(t);
   updateToolbar();
 }
 
 // ------------------------------------------------------------------ ツールバー
 
+type ToolId = Face | 'service' | 'invest';
+
 function buildToolbar(): void {
-  const items: { tool: Tool | 'invest'; html: string }[] = [
-    { tool: 'select', html: '選択' },
-    ...PLACEABLE_KINDS.map((k) => {
-      const d = NODE_DEFS[k];
-      const hex = `#${d.color.toString(16).padStart(6, '0')}`;
-      return {
-        tool: k as Tool,
-        html: `<span><span class="swatch" style="background:${hex}"></span>${d.label}</span><small data-cost="${k}"></small>`,
-      };
-    }),
-    { tool: 'connect', html: '接続' },
-    { tool: 'delete', html: '撤去' },
-    { tool: 'invest', html: '投資<span class="badge" hidden></span>' },
+  const items: { id: ToolId; html: string }[] = [
+    { id: 'front', html: '<span>前面</span><small>設置・移動</small>' },
+    { id: 'back', html: '<span>背面</span><small>配線</small>' },
+    { id: 'service', html: '<span>サービス</span><small>流れ・負荷</small>' },
+    { id: 'invest', html: '投資<span class="badge" hidden></span>' },
   ];
   ui.toolbar.innerHTML = '';
   for (const item of items) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.dataset.tool = item.tool;
+    b.dataset.tool = item.id;
     b.innerHTML = item.html;
-    if (item.tool === 'invest') {
-      b.classList.add('invest');
-      b.addEventListener('click', () => {
-        invest.toggle();
-        updateToolbar();
-      });
-    } else {
-      b.addEventListener('click', () => setTool(item.tool as Tool));
-    }
+    if (item.id === 'invest') b.classList.add('invest');
+    b.addEventListener('click', () => onTool(item.id));
     ui.toolbar.appendChild(b);
   }
 }
 
-function setTool(tool: Tool): void {
-  state.tool = tool;
-  state.connectFrom = null;
-  if (invest.isOpen) invest.toggle(false);
+function onTool(id: ToolId): void {
+  if (id === 'invest') {
+    invest.toggle();
+    if (invest.isOpen) select(null);
+  } else if (id === 'service') {
+    invest.toggle(false);
+    select(state.selected?.kind === 'service' ? null : { kind: 'service' });
+  } else {
+    invest.toggle(false);
+    setFace(id);
+  }
   updateToolbar();
+}
+
+function setFace(face: Face): void {
+  state.face = face;
+  // 面が変わると、ポートやケーブルの選択は意味がなくなる
+  if (state.selected && (state.selected.kind === 'port' || state.selected.kind === 'cable') && face === 'front') select(null);
   updateHint();
+  updateToolbar();
 }
 
 function updateToolbar(): void {
-  const sim = state.sim;
   for (const b of ui.toolbar.querySelectorAll<HTMLButtonElement>('button')) {
-    const t = b.dataset.tool!;
-    b.classList.toggle('active', t === 'invest' ? invest.isOpen : t === state.tool && !invest.isOpen);
-  }
-  for (const k of PLACEABLE_KINDS) {
-    const label = ui.toolbar.querySelector<HTMLElement>(`[data-cost="${k}"]`);
-    if (!label) continue;
-    const unlocked = sim.isKindUnlocked(k);
-    const maxed = unlocked && sim.isAtMaxCount(k);
-    label.textContent = !unlocked ? '🔒' : maxed ? '上限' : money(sim.nodeCost(k));
-    label.classList.toggle('short', unlocked && !maxed && sim.money < sim.nodeCost(k));
+    const t = b.dataset.tool as ToolId;
+    const active =
+      t === 'invest' ? invest.isOpen : t === 'service' ? state.selected?.kind === 'service' : t === state.face;
+    b.classList.toggle('active', active);
   }
   const badge = ui.toolbar.querySelector<HTMLElement>('.badge');
-  if (badge) badge.hidden = !invest.anyAffordable(sim);
+  if (badge) badge.hidden = !invest.anyAffordable(state.sim);
 }
 
 function updateHint(): void {
-  const sim = state.sim;
-  let text: string;
-  switch (state.tool) {
-    case 'select':
-      text =
-        'タップで詳細、ドラッグで移動。端の●から相手へドラッグで接続。空きマスのドラッグ・ホイール・ピンチで盤面を動かす。数字は 届いている量/上限(rps)。';
-      break;
-    case 'connect':
-      text =
-        state.connectFrom === null
-          ? '接続元から接続先へドラッグ(または接続元 → 接続先の順にタップ)。同じ線をもう一度つなぐと解除。'
-          : '接続先をタップ(続けて複数つなげます)。同じ線をもう一度つなぐと解除、空きマスで終了。';
-      break;
-    case 'delete':
-      text = `撤去するノードをタップ(購入額の ${SELL_REFUND_RATE * 100}% を返金)。`;
-      break;
-    default: {
-      const d = NODE_DEFS[state.tool];
-      if (sim.isKindUnlocked(state.tool) && sim.isAtMaxCount(state.tool)) {
-        text = `${d.name}は ${sim.maxCountOf(state.tool)} 台までです。${d.maxCountNote ?? ''}`;
-      } else if (!sim.isKindUnlocked(state.tool)) {
-        text = `🔒 ${d.name}は投資メニューの「${UNLOCK_BY_ID[d.requires!].name}」で解放できます。`;
-      } else {
-        text = `空きマスをタップして${d.name}を配置(${money(sim.nodeCost(state.tool))}、維持費 $${sim.upkeepOf(state.tool)}/秒)。${d.description}`;
-      }
-    }
-  }
-  ui.hint.textContent = text;
+  ui.hint.textContent =
+    state.face === 'front'
+      ? '前面: 空いている U をタップして機器を設置、機器はドラッグで移動。点線の区画をタップしてラックを借りる。'
+      : '背面: ポートから別のポートへドラッグして配線。ケーブルやポートをタップすると詳細と「抜く」。';
 }
 
 // ------------------------------------------------------------------ HUD・操作ボタン
@@ -279,7 +205,6 @@ function bindControls(): void {
   for (const b of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
     b.addEventListener('click', () => setSpeed(Number(b.dataset.speed)));
   }
-
   el('btn-chart').addEventListener('click', (e) => {
     const show = ui.chartPanel.hidden !== false;
     ui.chartPanel.hidden = !show;
@@ -287,7 +212,6 @@ function bindControls(): void {
     if (show) chart.update(state.sim.metrics.history, true);
     chart.resize();
   });
-
   el('btn-save').addEventListener('click', showSaveMenu);
   el('invest-close').addEventListener('click', () => {
     invest.toggle(false);
@@ -306,66 +230,31 @@ function updateHud(): void {
   const sim = state.sim;
   const r = sim.metrics.rolling;
   const income = sim.incomePerSec;
-
   ui.money.textContent = money(sim.money);
   ui.money.className = `v ${sim.money < 0 ? 'bad' : ''}`;
   ui.income.textContent = rate(income);
   ui.income.className = `v ${income < 0 ? 'bad' : 'ok'}`;
   ui.users.textContent = `${compact(sim.users)} / ${compact(sim.marketSize)}`;
-  ui.rps.textContent = compact(r.rps);
+  ui.pv.textContent = compact(r.pv, 1);
   ui.err.textContent = `${(r.errorRate * 100).toFixed(1)}%`;
   ui.err.className = `v ${r.errorRate > 0.05 ? 'bad' : r.errorRate > 0.01 ? 'warn' : ''}`;
-  ui.p99.textContent = r.rps > 0 ? `${r.p99}ms` : '-';
-  ui.p99.className = `v ${r.p99 > 1000 ? 'bad' : r.p99 > 500 ? 'warn' : ''}`;
+  ui.p99.textContent = r.pv > 0 ? `${Math.round(r.p99Ms)}ms` : '-';
+  ui.p99.className = `v ${r.p99Ms > 1500 ? 'bad' : r.p99Ms > 800 ? 'warn' : ''}`;
 
   if (r.errorRate > 0.05 && performance.now() - state.lastChurnWarn > CHURN_WARN_INTERVAL_MS) {
     state.lastChurnWarn = performance.now();
-    toast('エラーが多く、ユーザーが離脱しています');
+    const b = sim.flow.bottleneck;
+    toast(b && b.rho > 1 ? `エラーで離脱が出ています: ${b.label}が溢れています` : 'エラーが多く、ユーザーが離脱しています');
   }
 
   if (!ui.chartPanel.hidden) chart.update(sim.metrics.history);
   invest.update();
+  // 選んでいた機器が売却などで消えたら閉じる
+  const sel = state.selected;
+  if (sel?.kind === 'device' && !sim.facility.devices.has(sel.id)) state.selected = null;
+  if (sel?.kind === 'cable' && !sim.facility.cables.has(sel.id)) state.selected = null;
+  info.update(state.selected);
   updateToolbar();
-  updateInfo();
-}
-
-function updateInfo(): void {
-  const node = state.selectedId === null ? undefined : state.sim.nodes.get(state.selectedId);
-  if (!node) {
-    ui.info.hidden = true;
-    delete ui.info.dataset.key;
-    return;
-  }
-  const sim = state.sim;
-  const body = nodeInfoHtml(sim, node);
-
-  // ボタンを作り直すとタップを取りこぼすので、選択が変わったときだけ全体を組み立てる
-  const key = `${node.id}@${sim.layoutVersion}`;
-  if (ui.info.dataset.key === key) {
-    ui.info.querySelector('.info-body')!.innerHTML = body;
-    return;
-  }
-  ui.info.dataset.key = key;
-  ui.info.innerHTML = `
-    <header>
-      <h3>${nodeName(sim, node)}<small>${node.def.name}</small></h3>
-      <button type="button" id="info-close" aria-label="閉じる">✕</button>
-    </header>
-    <div class="desc">${node.def.description}</div>
-    <div class="info-body">${body}</div>
-    ${node.kind === 'internet' ? '' : '<div class="actions"><button type="button" id="info-remove" class="danger">撤去する</button></div>'}`;
-  ui.info.hidden = false;
-
-  ui.info.querySelector('#info-remove')?.addEventListener('click', () => {
-    const r = state.sim.removeNode(node.id);
-    if (r.message) toast(r.message);
-    state.selectedId = null;
-    updateInfo();
-  });
-  ui.info.querySelector('#info-close')?.addEventListener('click', () => {
-    state.selectedId = null;
-    updateInfo();
-  });
 }
 
 // ------------------------------------------------------------------ セーブ
@@ -378,7 +267,6 @@ function saveGame(): void {
   }
 }
 
-/** 保存データがあれば復元し、放置収入を加える。復元できたら true */
 function restoreGame(): boolean {
   let save: SaveData | null = null;
   try {
@@ -388,7 +276,7 @@ function restoreGame(): boolean {
     save = null;
   }
   if (!save) return false;
-  switchTo(loadSave(save, newSeed()));
+  switchTo(loadSave(save));
   const { elapsedMs, gained } = offlineEarnings(save, Date.now());
   if (gained > 0) {
     state.sim.money += gained;
@@ -404,12 +292,10 @@ function restoreGame(): boolean {
 
 function switchTo(sim: Simulation): void {
   state.sim = sim;
-  state.selectedId = null;
-  state.connectFrom = null;
+  state.selected = null;
   chart.reset();
   if (!ui.chartPanel.hidden) chart.update(sim.metrics.history, true);
   updateHud();
-  updateHint();
 }
 
 function showSaveMenu(): void {
@@ -441,34 +327,32 @@ function showSaveMenu(): void {
       return;
     }
     if (!confirm('今の進行状況を上書きして読み込みますか?')) return;
-    switchTo(loadSave(save, newSeed()));
+    switchTo(loadSave(save));
     saveGame();
     closeModal();
     toast('セーブを読み込みました');
   });
   el('sv-reset').addEventListener('click', () => {
     if (!confirm('すべての進行状況を消して最初からやり直しますか?')) return;
-    switchTo(newGame(newSeed()));
+    switchTo(newGame());
     saveGame();
     closeModal();
   });
 }
 
 function showWelcome(): void {
+  const srv = MODEL_BY_ID['srv-1u-e'];
   showModal(`
     <h2>packet-factory</h2>
-    <p class="note">小さな Web サービスを運営して、データセンターを育てましょう。</p>
+    <p class="note">コロケーションの 1 ラックから、ブログサービスのインフラを育てましょう。</p>
     <ul class="howto">
-      <li>ユーザーが増えるほどリクエストが増え、捌いた分だけ収入になります</li>
-      <li>稼いだお金を<b>投資</b>して、広告で市場を広げたり、単価や性能を上げたりできます</li>
-      <li>捌ききれずエラーが増えると、ユーザーが離れていきます。詰まったら WEB を増設しましょう</li>
-      <li>閉じている間も収入の一部が貯まります</li>
+      <li>ラックには回線終端・スイッチ・サーバ 1 台(${srv.short}、web と db を同居)が入っています</li>
+      <li>ユーザーが増えるとページビューが増え、捌けた分だけ収入になります。溢れるとエラーになり、ユーザーが離れます</li>
+      <li><b>前面</b>: 空いている U をタップして機器を買って設置。サーバには役割(web / db など)を割り当てる</li>
+      <li><b>背面</b>: ポートから別のポートへドラッグして配線。ケーブルの色は使用率</li>
+      <li>ラックには電力の上限があります。サーバのスペックは上げられないので、上位機種を買って役割を移します</li>
+      <li><b>サービス</b>ボタンで、流れと一番詰まっている所を確認できます</li>
     </ul>
-    <div class="legend">
-      <span><span class="dot" style="background:var(--accent)"></span>静的 $${BASE_REVENUE.static}</span>
-      <span><span class="dot" style="background:var(--read)"></span>読み込み $${BASE_REVENUE.read}</span>
-      <span><span class="dot" style="background:var(--write)"></span>書き込み $${BASE_REVENUE.write}(読み書きは会員機能で解放)</span>
-    </div>
     <div class="actions"><button type="button" class="primary" data-close>はじめる</button></div>`);
 }
 
@@ -490,9 +374,5 @@ function toast(message: string): void {
   ui.toast.textContent = message;
   ui.toast.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => ui.toast.classList.remove('show'), 2200);
-}
-
-function newSeed(): number {
-  return (Math.random() * 2 ** 32) >>> 0;
+  toastTimer = window.setTimeout(() => ui.toast.classList.remove('show'), 2600);
 }

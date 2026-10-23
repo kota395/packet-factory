@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0b0f14" />
-    <meta name="description" content="データセンターを育てるインクリメンタルゲーム" />
+    <meta name="description" content="1 ラックからインフラを育てる、ラックと配線のインクリメンタルゲーム" />
     <title>packet-factory</title>
   </head>
   <body>
@@ -14,9 +14,9 @@
           <div class="stat"><span class="k">資金</span><span class="v" id="s-money">$0</span></div>
           <div class="stat"><span class="k">収支</span><span class="v" id="s-income">-</span></div>
           <div class="stat"><span class="k">ユーザー</span><span class="v" id="s-users">0</span></div>
-          <div class="stat"><span class="k">流量</span><span class="v" id="s-rps">0</span></div>
+          <div class="stat"><span class="k">PV/秒</span><span class="v" id="s-rps">0</span></div>
           <div class="stat"><span class="k">エラー</span><span class="v" id="s-err">-</span></div>
-          <div class="stat"><span class="k">p99</span><span class="v" id="s-p99">-</span></div>
+          <div class="stat"><span class="k">応答 p99</span><span class="v" id="s-p99">-</span></div>
         </div>
         <div class="controls">
           <div class="speed" role="group" aria-label="速度">
@@ -38,7 +38,7 @@
         <div id="zoom" role="group" aria-label="表示">
           <button type="button" id="btn-zoom-in" aria-label="拡大">＋</button>
           <button type="button" id="btn-zoom-out" aria-label="縮小">−</button>
-          <button type="button" id="btn-fit" aria-label="ノード全体を表示" title="ノード全体を表示">⤢</button>
+          <button type="button" id="btn-fit" aria-label="ラック全体を表示" title="ラック全体を表示">⤢</button>
         </div>
         <aside id="info" hidden></aside>
         <section id="invest" hidden aria-label="投資">

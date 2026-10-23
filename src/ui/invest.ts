@@ -1,4 +1,3 @@
-import { NODE_DEFS } from '../sim/config';
 import {
   LINES,
   STAGES,
@@ -6,8 +5,6 @@ import {
   UNLOCK_BY_ID,
   UPGRADES,
   UPGRADE_BY_ID,
-  stageOfUnlock,
-  stageOfUpgrade,
   unlockCost,
   type FeatureEffect,
   type LineDef,
@@ -15,67 +12,39 @@ import {
   type UpgradeDef,
 } from '../sim/economy';
 import type { Simulation } from '../sim/simulation';
-import type { ReqKind, UnlockId, UpgradeId } from '../sim/types';
-import { bandwidth, compact, money } from './format';
+import type { UnlockId, UpgradeId } from '../sim/types';
+import { money } from './format';
 
 type Item = { type: 'unlock'; id: UnlockId } | { type: 'upgrade'; id: UpgradeId };
 
-const KIND_LABEL: Record<ReqKind, string> = { static: '静的', read: '読み込み', write: '書き込み' };
-
-/** 強化のレベルごとの効果を、対象の能力に合わせた単位で表示する */
 export function formatUpgradeEffect(def: UpgradeDef, level: number): string {
-  const v = def.effect(level);
-  if (def.id === 'marketing') return `${compact(v)} 人`;
-  const t = def.target;
-  if (!t) return `×${v.toFixed(2)}`;
-  const node = NODE_DEFS[t.nodes[0]];
-  switch (t.stat) {
-    case 'speed':
-      return `×${v.toFixed(2)}`;
-    case 'bandwidth':
-      return bandwidth((node.bandwidthMBps ?? 0) * v);
-    case 'hitRate':
-      return `${((1 - (1 - (node.cache?.hitRate ?? 0)) * v) * 100).toFixed(1)}%`;
-    case 'maxCount':
-      return `${(node.maxCount ?? 0) + v} 台`;
-  }
+  return def.format(def.effect(level));
 }
 
-/** いまの段階 = 解放を 1 つでも買った段階のうち一番先(何も買っていなければ段階 1) */
+/** いまの段階 = 目印の解放を 1 つでも買った段階のうち一番先(何も買っていなければ段階 1) */
 export function currentStage(sim: Simulation): StageDef {
-  let current = STAGES.find((s) => s.id === 1)!;
+  let current = STAGES[0];
   for (const s of STAGES) if (s.unlocks.some((u) => sim.unlocks.has(u))) current = s;
   return current;
 }
 
-/** 「静的: 単価 ×2・データ量 ×5」のような説明 */
+/** 解放が目印になっている段階 */
+function stageOfUnlock(id: UnlockId): StageDef | null {
+  return STAGES.find((s) => s.unlocks.includes(id)) ?? null;
+}
+
 function describeFeature(effect: FeatureEffect): string {
-  const kinds = new Set<ReqKind>([
-    ...(Object.keys(effect.revenue ?? {}) as ReqKind[]),
-    ...(Object.keys(effect.dataSize ?? {}) as ReqKind[]),
-  ]);
-  return [...kinds]
-    .map((k) => {
-      const parts: string[] = [];
-      if (effect.revenue?.[k]) parts.push(`単価 ×${effect.revenue[k]}`);
-      if (effect.dataSize?.[k]) parts.push(`データ量 ×${effect.dataSize[k]}`);
-      return `${KIND_LABEL[k]}: ${parts.join('・')}`;
-    })
-    .join(' / ');
+  return `単価 ×${effect.revenue}`;
 }
 
 const TAB_KEY = 'packet-factory:invest-tab';
 
 /** タブ(系統)の中身。段階の順に、まだ買っていない解放と強化を並べる */
 function lineItems(sim: Simulation, line: LineDef): Item[] {
-  const items: (Item & { stage: number })[] = [
-    ...line.unlocks
-      .filter((id) => !sim.unlocks.has(id))
-      .map((id) => ({ type: 'unlock' as const, id, stage: stageOfUnlock(id).id })),
-    ...line.upgrades.map((id) => ({ type: 'upgrade' as const, id, stage: stageOfUpgrade(id).id })),
+  return [
+    ...line.upgrades.map((id) => ({ type: 'upgrade' as const, id })),
+    ...line.unlocks.filter((id) => !sim.unlocks.has(id)).map((id) => ({ type: 'unlock' as const, id })),
   ];
-  // 同じ段階なら解放を先に
-  return items.sort((a, b) => a.stage - b.stage || (a.type === b.type ? 0 : a.type === 'unlock' ? -1 : 1));
 }
 
 /**
@@ -191,7 +160,7 @@ export class InvestPanel {
     const now = currentStage(sim);
     const next = STAGES.find((s) => s.id === now.id + 1);
     this.stageBox.innerHTML = `
-      <div class="inv-stage-now">段階 ${now.id} / ${STAGES.length - 1}: ${now.name}</div>
+      <div class="inv-stage-now">段階 ${now.id} / ${STAGES.length}: ${now.name}</div>
       <div class="inv-stage-note">${now.summary}${next ? ` 次は「${next.name}」。` : ''}</div>`;
     for (const b of this.tabs.querySelectorAll<HTMLButtonElement>('button[data-tab]')) {
       const on = b.dataset.tab === this.tab;
@@ -245,14 +214,14 @@ export class InvestPanel {
     const locked = def.requires && !sim.unlocks.has(def.requires);
     const maxed = def.maxLevel !== undefined && level >= def.maxLevel;
     return row({
-      stage: stageOfUpgrade(def.id),
+      stage: null,
       tag: maxed ? `Lv ${level}(最大)` : def.maxLevel !== undefined ? `Lv ${level} / ${def.maxLevel}` : `Lv ${level}`,
       title: def.name,
       desc: def.description,
       effect: locked
         ? `要: ${UNLOCK_BY_ID[def.requires!].name}`
         : maxed
-          ? `${formatUpgradeEffect(def, level)}(これ以上の機種はない)`
+          ? `${formatUpgradeEffect(def, level)}(最大)`
           : `${formatUpgradeEffect(def, level)} → ${formatUpgradeEffect(def, level + 1)}`,
       cost: sim.upgradeCost(item.id),
       type: 'upgrade',
@@ -262,7 +231,7 @@ export class InvestPanel {
 }
 
 function row(p: {
-  stage: StageDef;
+  stage: StageDef | null;
   tag: string;
   title: string;
   desc: string;
@@ -271,7 +240,7 @@ function row(p: {
   type: string;
   id: string;
 }): string {
-  const stage = p.stage.id === 0 ? '' : `<span class="inv-stage" title="${p.stage.name}">段階 ${p.stage.id}</span>`;
+  const stage = !p.stage ? '' : `<span class="inv-stage" title="${p.stage.name}">段階 ${p.stage.id}</span>`;
   return `
     <div class="inv-item">
       <div class="inv-main">

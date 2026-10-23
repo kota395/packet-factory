@@ -1,45 +1,32 @@
-/**
- * リクエストの種類。色分けして描画する。
- * static: ページ・画像などの静的コンテンツ(CDN でキャッシュできる)
- * read / write: データを使うリクエスト。WEB を経てデータ層(キャッシュ・DB・レプリカ)まで届く
- */
-export type ReqKind = 'static' | 'read' | 'write';
+/** サーバに割り当てる役割(ソフトウェア) */
+export type RoleId = 'web' | 'db' | 'cache' | 'lb';
 
-export const REQ_KINDS: readonly ReqKind[] = ['static', 'read', 'write'];
+export const ROLE_IDS: readonly RoleId[] = ['lb', 'web', 'cache', 'db'];
 
-/** ノードの種類。internet はステージに 1 つだけ固定で置かれる流入元。 */
-export type NodeKind = 'internet' | 'cdn' | 'lb' | 'web' | 'cache' | 'db' | 'replica';
+/** 機器の分類 */
+export type Category = 'server' | 'switch' | 'handoff';
 
-/** 失敗理由。drop=キュー溢れ, timeout=時間切れ, no-route=行き先なし */
-export type ErrorReason = 'drop' | 'timeout' | 'no-route';
+/** 機種 */
+export type ModelId =
+  | 'handoff'
+  | 'srv-1u-e'
+  | 'srv-1u-d'
+  | 'srv-2u-db'
+  | 'sw-24'
+  | 'sw-48'
+  | 'agg-10g';
+
+/** ポートの差し込み口 */
+export type Media = 'rj45' | 'sfp';
 
 /** 一度買えば解放される機能 */
-export type UnlockId = 'lb' | 'writes' | 'cache' | 'replica' | 'images' | 'cdn' | 'video' | 'sharding';
+export type UnlockId = 'images' | 'comments' | 'cache' | 'lb' | 'tenGig' | 'agg';
 
-/** 何度でも買える強化 */
-export type UpgradeId =
-  | 'marketing'
-  | 'monetize'
-  | 'cdnCache'
-  | 'cdnBandwidth'
-  | 'lbBandwidth'
-  | 'webPerf'
-  | 'dbPerf'
-  | 'cacheMemory'
-  | 'dbShards';
+/** 何度でも(上限まで)買える強化・契約 */
+export type UpgradeId = 'marketing' | 'monetize' | 'uplink' | 'rackPower';
 
-export interface Request {
-  readonly id: number;
-  /** WEB にデータ層がつながっていないとき、read / write は static として返す */
-  kind: ReqKind;
-  /** レプリケーションなど、利用者に見えない内部の仕事(売上・エラー率に数えない) */
-  readonly internal?: boolean;
-  /** 生成時刻(シミュレーション時間 ms) */
-  readonly createdAt: number;
-  /** 経由したノード数。ループ検出に使う */
-  hops: number;
-  /** 今いるノードのキューに入った時刻。処理開始はこれより前にならない */
-  readyAt: number;
-  /** データ量(KB)。生成時の配信内容で決まる */
-  sizeKB: number;
+/** ポートの指定。port は機器のポートを先頭から数えた番号 */
+export interface PortRef {
+  readonly device: number;
+  readonly port: number;
 }
