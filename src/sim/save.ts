@@ -1,4 +1,4 @@
-import { GRID_H, GRID_W, NODE_DEFS, OFFLINE, STARTER_WEB_POS } from './config';
+import { GRID_H, GRID_W, LEGACY_LAYOUT_OFFSET, NODE_DEFS, OFFLINE, STARTER_WEB_POS } from './config';
 import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades } from './economy';
 import { Simulation } from './simulation';
 import type { NodeKind, UnlockId, UpgradeId } from './types';
@@ -24,6 +24,8 @@ export interface SaveData {
   nodes: [NodeKind, number, number, number][];
   /** [接続元の添字, 接続先の添字](-1 はインターネット) */
   edges: [number, number][];
+  /** 盤面の版。2 = 広い盤面(48×27)。ないものは 16×9 時代のセーブで、読み込み時に位置をずらす */
+  layout: 2;
 }
 
 /** 新しいゲーム。最初からインターネットにつながった WEB が 1 台ある */
@@ -58,6 +60,7 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     upgrades: { ...sim.upgrades },
     nodes,
     edges,
+    layout: 2,
   };
 }
 
@@ -142,10 +145,14 @@ export function parseSave(data: unknown): SaveData | null {
   }
 
   if (d.nodes.length > GRID_W * GRID_H) return null;
+  // 16×9 時代のセーブは、インターネットとの位置関係が変わらないようにずらす
+  const shift = d.layout === 2 ? { x: 0, y: 0 } : LEGACY_LAYOUT_OFFSET;
   const nodes: SaveData['nodes'] = [];
   for (const item of d.nodes) {
     if (!Array.isArray(item) || item.length !== 4) return null;
-    const [kind, x, y, paid] = item;
+    const [kind, rawX, rawY, paid] = item;
+    const x = isInt(rawX) ? rawX + shift.x : rawX;
+    const y = isInt(rawY) ? rawY + shift.y : rawY;
     if (typeof kind !== 'string' || !(kind in NODE_DEFS) || !NODE_DEFS[kind as NodeKind].placeable) return null;
     if (!isInt(x) || !isInt(y) || x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) return null;
     if (!isNum(paid) || paid < 0) return null;
@@ -172,6 +179,7 @@ export function parseSave(data: unknown): SaveData | null {
     upgrades,
     nodes,
     edges,
+    layout: 2,
   };
 }
 

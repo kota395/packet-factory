@@ -82,6 +82,21 @@ renderer.onNodeMove = (id, x, y) => {
   state.selectedId = id;
   updateInfo();
 };
+renderer.onConnect = (from, to) => {
+  const sim = state.sim;
+  const r = sim.toggleEdge(from, to);
+  const a = sim.nodes.get(from);
+  const b = sim.nodes.get(to);
+  if (r.ok && a && b && !r.message) toast(`${nodeName(sim, a)} → ${nodeName(sim, b)} を接続しました`);
+  else if (r.message) toast(r.message);
+  state.selectedId = from;
+  state.connectFrom = null;
+  updateInfo();
+  updateHint();
+};
+el('btn-zoom-in').addEventListener('click', () => renderer.zoomBy(1.25));
+el('btn-zoom-out').addEventListener('click', () => renderer.zoomBy(0.8));
+el('btn-fit').addEventListener('click', () => renderer.fit());
 bindControls();
 const restored = restoreGame();
 setTool('select');
@@ -95,7 +110,7 @@ renderer.app.ticker.add((ticker) => {
   const sim = state.sim;
   if (state.speed > 0) sim.step(Math.min(ticker.deltaMS, 100) * state.speed);
 
-  renderer.draw(sim, { selectedId: state.selectedId, connectFrom: state.connectFrom });
+  renderer.draw(sim, { selectedId: state.selectedId, connectFrom: state.connectFrom, connectMode: state.tool === 'connect' });
 
   hudTimer += ticker.deltaMS;
   if (hudTimer >= 200) {
@@ -232,12 +247,13 @@ function updateHint(): void {
   let text: string;
   switch (state.tool) {
     case 'select':
-      text = 'ノードをタップで状態を確認、ドラッグで移動。数字は「届いている量/捌ける上限」(rps)です。';
+      text =
+        'タップで詳細、ドラッグで移動。端の●から相手へドラッグで接続。空きマスのドラッグ・ホイール・ピンチで盤面を動かす。数字は 届いている量/上限(rps)。';
       break;
     case 'connect':
       text =
         state.connectFrom === null
-          ? '接続元のノードをタップ。'
+          ? '接続元から接続先へドラッグ(または接続元 → 接続先の順にタップ)。同じ線をもう一度つなぐと解除。'
           : '接続先をタップ(続けて複数つなげます)。同じ線をもう一度つなぐと解除、空きマスで終了。';
       break;
     case 'delete':

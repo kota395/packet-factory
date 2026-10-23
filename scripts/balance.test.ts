@@ -5,6 +5,7 @@
  * 調整値(src/sim/config.ts, pricing.ts, economy.ts)を変えたら、ログの節目の時刻を見比べる。
  */
 import { it } from 'vitest';
+import { GRID_H, GRID_W, INTERNET_POS } from '../src/sim/config';
 import { UNLOCK_BY_ID, unlockCost } from '../src/sim/economy';
 import { newGame } from '../src/sim/save';
 import type { NodeRuntime, Simulation } from '../src/sim/simulation';
@@ -41,7 +42,11 @@ function load(s: Simulation, ns: NodeRuntime[]): number {
 
 /** col 列目以降で空いているマス(中央の行から優先) */
 function freeCell(s: Simulation, col: number): [number, number] | null {
-  for (let x = col; x < 16; x++) for (const y of [4, 3, 5, 2, 6, 1, 7, 0, 8]) if (!s.nodeAt(x, y)) return [x, y];
+  // インターネットから col 列右以降で、インターネットの行に近いマスから埋める
+  const rows = [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -7, 7, -8, 8].map((d) => INTERNET_POS.y + d);
+  for (let x = INTERNET_POS.x + col; x < GRID_W; x++) {
+    for (const y of rows) if (y >= 0 && y < GRID_H && !s.nodeAt(x, y)) return [x, y];
+  }
   return null;
 }
 
@@ -99,7 +104,7 @@ it(`balance bot (${MINUTES} min)`, () => {
         return false;
       }
       if (lb === null) {
-        const id = s.addNode('lb', 2, 4).id;
+        const id = s.addNode('lb', INTERNET_POS.x + 2, INTERNET_POS.y).id;
         if (id === undefined) return false;
         lb = id;
         for (const o of [...s.nodes.get(s.internetId)!.out]) s.disconnect(s.internetId, o);
@@ -120,7 +125,7 @@ it(`balance bot (${MINUTES} min)`, () => {
     // CDN: 導入したら NET と LB の間に挟む。詰まったら回線増強
     const cdns = ofKind(s, 'cdn');
     if (s.unlocks.has('cdn') && !cdns.length && lb !== null && s.money >= s.nodeCost('cdn')) {
-      const id = s.addNode('cdn', 1, 4).id!;
+      const id = s.addNode('cdn', INTERNET_POS.x + 1, INTERNET_POS.y).id!;
       s.disconnect(s.internetId, lb);
       s.connect(s.internetId, id);
       s.connect(id, lb);

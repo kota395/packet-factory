@@ -2,8 +2,7 @@ import {
   BASE_REVENUE,
   CHURN,
   DATA_SIZE_KB,
-  DAY_AMPLITUDE,
-  DAY_CYCLE_MS,
+  DIFFICULTY,
   GRID_H,
   GRID_W,
   GROWTH_RATE,
@@ -156,6 +155,8 @@ export class Simulation {
   private nextNodeId = 1;
   private nextReqId = 1;
   private pendingMs = 0;
+  /** 等間隔に流すときの、到着数の端数 */
+  private arrivalCarry = 0;
 
   constructor(opts: SimOptions = {}) {
     this.rng = mulberry32(opts.seed ?? 1);
@@ -205,7 +206,7 @@ export class Simulation {
   /** 時刻 t における平均流入量(rps) */
   trafficAt(tMs: number): number {
     if (this.fixedTraffic) return this.fixedTraffic(tMs);
-    const wave = 1 + DAY_AMPLITUDE * Math.sin((2 * Math.PI * tMs) / DAY_CYCLE_MS);
+    const wave = 1 + DIFFICULTY.dayWave * Math.sin((2 * Math.PI * tMs) / DIFFICULTY.dayCycleMs);
     return this.users * REQ_PER_USER * wave;
   }
 
@@ -584,7 +585,15 @@ export class Simulation {
 
     // 1. 流入
     const lambda = (this.trafficAt(now) * TICK_MS) / 1000;
-    const count = poisson(lambda, this.rng);
+    let count: number;
+    if (DIFFICULTY.randomArrivals) {
+      count = poisson(lambda, this.rng);
+    } else {
+      // 端数を持ち越して、平均どおりの数を等間隔に流す
+      this.arrivalCarry += lambda;
+      count = Math.floor(this.arrivalCarry);
+      this.arrivalCarry -= count;
+    }
     const internet = this.nodes.get(this.internetId)!;
     const dataShare = this.dataShare;
     for (let i = 0; i < count; i++) {

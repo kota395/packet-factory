@@ -91,9 +91,12 @@ export function nodeInfoHtml(sim: Simulation, node: NodeRuntime): string {
     const bw = sim.bandwidthMBpsOf(node);
     capacity.push(['上限', `${compact(cap, 1)} rps(${load(cap > 0 ? inRps / cap : 0)})`]);
     capacity.push(['余裕', `${compact(Math.max(0, cap - inRps), 1)} rps`]);
-    const times = REQ_KINDS.filter((k) => d.serviceMs[k] > 0)
-      .map((k) => `${kindLabel(node, k)} ${sim.serviceMs(node, k).toFixed(1)}ms`)
-      .join(' / ');
+    const handled = REQ_KINDS.filter((k) => d.serviceMs[k] > 0);
+    const same = handled.every((k) => d.serviceMs[k] === d.serviceMs[handled[0]]);
+    // 種類で処理時間が変わらなければ 1 つだけ出す
+    const times = same
+      ? `${sim.serviceMs(node, handled[0]).toFixed(1)}ms`
+      : handled.map((k) => `${kindLabel(node, k)} ${sim.serviceMs(node, k).toFixed(1)}ms`).join(' / ');
     capacity.push(['処理', `${d.workers} 並列 × ${times}`]);
     capacity.push(['処理の上限', `${compact(cpu)} rps(${load(inRps / cpu)})`]);
     if (Number.isFinite(bw)) {

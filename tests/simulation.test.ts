@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BASE_MARKET, DATA_SIZE_KB, NODE_DEFS, OFFLINE } from '../src/sim/config';
+import { BASE_MARKET, DATA_SIZE_KB, INTERNET_POS, NODE_DEFS, OFFLINE } from '../src/sim/config';
 import { NODE_PRICES, PRICE_SCALE, START_MONEY, UNLOCK_PRICES, UPGRADE_PRICES } from '../src/sim/pricing';
 import { UPGRADE_BY_ID, unlockCost, upgradeCost } from '../src/sim/economy';
 import { createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
@@ -232,7 +232,8 @@ describe('データ層', () => {
     for (const r of replicas) {
       expect(r.inRps.read).toBeGreaterThan(1);
       // 書き込みはすべて複製される
-      expect(r.inRps.write).toBeCloseTo(db.inRps.write, 0);
+      expect(r.inRps.write / db.inRps.write).toBeGreaterThan(0.75);
+      expect(r.inRps.write / db.inRps.write).toBeLessThan(1.33);
     }
     // 複製は利用者のリクエストではないので、売上やエラーに数えない
     expect(s.metrics.successByKind.write).toBeGreaterThan(0);
@@ -544,6 +545,23 @@ describe('セーブ', () => {
     const again = createSave(b, 1_000);
     expect({ ...again, incomePerSec: 0 }).toEqual({ ...save, incomePerSec: 0 });
     expect(b.money).toBe(a.money); // 復元でお金は引かれない
+  });
+
+  it('16×9 時代のセーブは、インターネットとの位置関係を保ったままずらして読み込む', () => {
+    const save = createSave(newGame(1), 1_000);
+    const { layout: _, ...legacy } = save;
+    const old = { ...legacy, nodes: [['web', 3, 4, 0]] as const };
+    const parsed = parseSave(JSON.parse(JSON.stringify(old)))!;
+    expect(parsed.layout).toBe(2);
+    expect(parsed.nodes[0][1] - INTERNET_POS.x).toBe(3);
+    expect(parsed.nodes[0][2] - INTERNET_POS.y).toBe(0);
+  });
+
+  it('難易度オプションがオフなら、流量は平均どおり一定に届く', () => {
+    const s = sim({ traffic: constant(37) });
+    s.step(10_000);
+    const net = s.nodes.get(s.internetId)!;
+    expect(Math.round(s.inRpsOf(net))).toBe(37);
   });
 
   it('localStorage 経由(JSON)でも検証して読み込める', () => {

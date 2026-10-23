@@ -35,6 +35,11 @@
       <section id="chart-panel" hidden><div id="chart"></div></section>
 
       <main id="board">
+        <div id="zoom" role="group" aria-label="表示">
+          <button type="button" id="btn-zoom-in" aria-label="拡大">＋</button>
+          <button type="button" id="btn-zoom-out" aria-label="縮小">−</button>
+          <button type="button" id="btn-fit" aria-label="ノード全体を表示" title="ノード全体を表示">⤢</button>
+        </div>
         <aside id="info" hidden></aside>
         <section id="invest" hidden aria-label="投資">
           <header>
@@ -42,6 +47,8 @@
             <span id="invest-money"></span>
             <button type="button" id="invest-close" aria-label="閉じる">✕</button>
           </header>
+          <div id="invest-stage"></div>
+          <div id="invest-tabs" role="tablist" aria-label="系統"></div>
           <div id="invest-list"></div>
         </section>
         <div id="toast" role="status" aria-live="polite"></div>

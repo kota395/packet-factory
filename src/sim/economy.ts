@@ -239,6 +239,54 @@ export const STAGES: readonly StageDef[] = [
   },
 ];
 
+/**
+ * 投資メニューのタブ(系統)。どのノードの層に効くかでまとめる。
+ * 各タブの中は段階の順に並べる
+ */
+export interface LineDef {
+  readonly id: string;
+  readonly name: string;
+  readonly summary: string;
+  readonly unlocks: readonly UnlockId[];
+  readonly upgrades: readonly UpgradeId[];
+}
+
+export const LINES: readonly LineDef[] = [
+  {
+    id: 'business',
+    name: '事業',
+    summary: 'ユーザーを集めて単価を上げる。配信コンテンツは単価が上がるぶんデータが重くなる。',
+    unlocks: ['images', 'video'],
+    upgrades: ['marketing', 'monetize'],
+  },
+  {
+    id: 'web',
+    name: 'WEB',
+    summary: 'ページを組み立てる層。状態を持たないので台数を並べられる。1 台の性能はスケールアップで上げる。',
+    unlocks: [],
+    upgrades: ['webPerf'],
+  },
+  {
+    id: 'network',
+    name: '回線',
+    summary: 'LB と CDN。振り分けと配信で、詰まるのは主に帯域。',
+    unlocks: ['lb', 'cdn'],
+    upgrades: ['lbBandwidth', 'cdnCache', 'cdnBandwidth'],
+  },
+  {
+    id: 'data',
+    name: 'データ',
+    summary: 'DB・キャッシュ・レプリカ。正本は増やせないので、読み込みは逃がし、書き込みは分割する。',
+    unlocks: ['writes', 'cache', 'replica', 'sharding'],
+    upgrades: ['dbPerf', 'cacheMemory', 'dbShards'],
+  },
+];
+
+/** その強化が属する段階 */
+export function stageOfUpgrade(id: UpgradeId): StageDef {
+  return STAGES.find((s) => s.upgrades.includes(id))!;
+}
+
 export const UNLOCK_BY_ID = Object.fromEntries(UNLOCKS.map((u) => [u.id, u])) as Record<UnlockId, UnlockDef>;
 export const UPGRADE_BY_ID = Object.fromEntries(UPGRADES.map((u) => [u.id, u])) as Record<UpgradeId, UpgradeDef>;
 

@@ -11,11 +11,18 @@
 import type { NodeKind, ReqKind, UnlockId } from './types';
 
 // ---- 盤面 -------------------------------------------------------------
-export const GRID_W = 16;
-export const GRID_H = 9;
-export const INTERNET_POS = { x: 0, y: 4 } as const;
+/** 盤面の広さ(マス)。画面に入りきらない分はドラッグ・ホイール・ピンチで動かして見る */
+export const GRID_W = 48;
+export const GRID_H = 27;
+/** インターネットの位置。左端の縦中央 */
+export const INTERNET_POS = { x: 2, y: 13 } as const;
 /** 新規ゲームで最初から置いてある WEB の位置 */
-export const STARTER_WEB_POS = { x: 3, y: 4 } as const;
+export const STARTER_WEB_POS = { x: 5, y: 13 } as const;
+/**
+ * 盤面が 16×9 だったころのセーブを読み込むときにずらす量。
+ * 当時のインターネット (0, 4) が今の INTERNET_POS に重なるようにする
+ */
+export const LEGACY_LAYOUT_OFFSET = { x: INTERNET_POS.x - 0, y: INTERNET_POS.y - 4 } as const;
 
 // ---- 時間 -------------------------------------------------------------
 /** シミュレーションの固定刻み(ms) */
@@ -34,9 +41,6 @@ export const START_USERS = 300;
 export const MIN_USERS = 50;
 /** ユーザー 1 人あたりの平均リクエスト数(/秒) */
 export const REQ_PER_USER = 0.01;
-/** 1 日の周期(シミュレーション時間)。流量はこの周期で波打つ */
-export const DAY_CYCLE_MS = 120_000;
-export const DAY_AMPLITUDE = 0.2;
 /** 市場規模(潜在ユーザー数)の初期値 */
 export const BASE_MARKET = 1500;
 /** 口コミによる自然増加率(/秒)。市場規模に近づくほど鈍る(ロジスティック成長) */
@@ -48,6 +52,19 @@ export const GROWTH_RATE = 0.03;
  * WEB にデータ層がつながっていなければ、WEB だけで静的として返す(エラーにはしない)。
  */
 export const DATA_ACCESS = { share: 0.2, readShare: 0.8 } as const;
+
+/**
+ * 難易度のオプション。最初はオフにしてあり、流量はユーザー数どおりに一定で届く。
+ * 難易度を上げるモードを作るときにオンにする(障害などのイベントもここに足していく)。
+ */
+export const DIFFICULTY = {
+  /** 1 日の波(昼夜で流量が上下する)の振れ幅。0.2 なら ±20%。0 でなし */
+  dayWave: 0,
+  /** 1 日の周期(シミュレーション時間) */
+  dayCycleMs: 120_000,
+  /** true なら到着をランダム(ポアソン分布)にし、瞬間的な偏りが出る。false なら等間隔に届く */
+  randomArrivals: false,
+};
 
 /** 品質が悪いときの離脱 */
 export const CHURN = {
