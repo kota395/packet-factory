@@ -4,7 +4,7 @@
  * (ボタンを作り直すとタップを取りこぼすため)。
  */
 import { BUYABLE_MODELS, MODEL_BY_ID, portsOf, type ModelDef } from '../sim/catalog';
-import { CAMPAIGN, RACK, SERVICES, VIRT } from '../sim/config';
+import { CAMPAIGN, K8S, RACK, SERVICES, VIRT } from '../sim/config';
 import type { Device, Vm } from '../sim/facility';
 import { nodeName, type NodeLoad } from '../sim/flow';
 import { SELL_REFUND_RATE, UPKEEP } from '../sim/pricing';
@@ -97,6 +97,20 @@ function roleButtons(
       return `<div class="role-group"><div class="role-svc">${SERVICES[s].name}</div><div class="role-buttons">${buttons}</div></div>`;
     })
     .join('');
+}
+
+/** ワーカーに置かれた Pod の行 */
+function podRows(sim: Simulation, worker: number, vcpu: number, memGB: number): [string, string][] {
+  const groups = sim.pods.filter((p) => p.worker === worker);
+  const total = groups.reduce((n, p) => n + p.count, 0);
+  const out: [string, string][] = [
+    ['Pod', `${total} 個(CPU ${total * K8S.pod.vcpu} / ${vcpu}・メモリ ${total * K8S.pod.memGB} / ${memGB - K8S.systemMemGB} GB)`],
+  ];
+  for (const p of groups) {
+    const l = sim.flow.nodeLoads.get(p.id);
+    out.push([`  ${rolesText([p.role])} ×${p.count}`, l ? `CPU ${load(l.cpu)}` : '-']);
+  }
+  return out;
 }
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -254,6 +268,15 @@ export class InfoPanel {
       case 'campaign':
         r = sim.startCampaign();
         break;
+      case 'k8s':
+        r = sim.setK8sWorker({ device: Number(data.id) }, data.on === '1');
+        break;
+      case 'vmk8s':
+        r = sim.setK8sWorker({ vm: Number(data.id) }, data.on === '1');
+        break;
+      case 'deploy':
+        r = sim.toggleDeployment(data.role as RoleKey);
+        break;
       case 'deletevm':
         r = sim.deleteVm(Number(data.id));
         if (r.ok) this.actions.select(null);
@@ -316,10 +339,20 @@ export class InfoPanel {
       const back = `<button type="button" data-act="hv" data-id="${d.id}" data-on="0" ${vms.length ? 'disabled title="VM が載っている間はやめられません"' : ''}>物理サーバに戻す</button>`;
       fixed += section('VM', `<div class="role-buttons">${list || '<span class="muted small">まだありません</span>'}</div>`);
       fixed += section('VM を作る', `<div class="role-buttons">${create}</div><div class="actions">${back}</div>`);
+    } else if (m.category === 'server' && d.k8s) {
+      fixed += section(
+        'Kubernetes のワーカー',
+        `<div class="desc small">役割は付けず、Deployment の Pod が自動で置かれます(Deployment はサービスの詳細で)。</div><div class="actions"><button type="button" data-act="k8s" data-id="${d.id}" data-on="0">ワーカーから外す</button></div>`,
+      );
     } else if (m.category === 'server') {
       fixed += section('役割', roleButtons(sim, d.roles, 'role', d.id, (r) => sim.roleError(d.id, r)));
       const hvErr = sim.hvError(d.id, true);
-      fixed += `<div class="actions"><button type="button" data-act="hv" data-id="${d.id}" data-on="1" ${hvErr ? `disabled title="${hvErr}"` : ''}>ハイパーバイザにする</button></div>`;
+      const k8sErr = sim.k8sWorkerError({ device: d.id }, true);
+      fixed += `<div class="actions"><button type="button" data-act="hv" data-id="${d.id}" data-on="1" ${hvErr ? `disabled title="${hvErr}"` : ''}>ハイパーバイザにする</button>${
+        sim.unlocks.has('kubernetes')
+          ? `<button type="button" data-act="k8s" data-id="${d.id}" data-on="1" ${k8sErr ? `disabled title="${k8sErr}"` : ''}>Kubernetes のワーカーにする</button>`
+          : ''
+      }</div>`;
     }
     if (m.category === 'server' && !d.hv && sim.unlocks.has('bgp')) {
       fixed += section(
@@ -362,6 +395,7 @@ export class InfoPanel {
         loadRows.push(['割り当て', `vCPU ${use.vcpu} / ${m.cores! * VIRT.vcpuOvercommit}・メモリ ${use.memGB} / ${m.memGB! - VIRT.hostMemGB} GB`]);
       } else if (m.category === 'server') {
         loadRows.push(...nodeRows(sim, d.roles, sim.flow.nodeLoads.get(d.id), 'CPU'));
+        if (d.k8s) loadRows.push(...podRows(sim, d.id, m.cores!, m.memGB!));
       } else if (m.category === 'storage') {
         loadRows.push(['IOPS', load(l.io)]);
       } else if (m.category === 'switch') {
@@ -399,7 +433,15 @@ export class InfoPanel {
     const f = sim.facility;
     const host = f.devices.get(vm.host);
     const size = VIRT.sizes[vm.size];
-    let fixed = section('役割', roleButtons(sim, vm.roles, 'vmrole', vm.id, (r) => sim.vmRoleError(vm.id, r)));
+    let fixed = vm.k8s
+      ? section(
+          'Kubernetes のワーカー',
+          `<div class="desc small">役割は付けず、Deployment の Pod が自動で置かれます。</div><div class="actions"><button type="button" data-act="vmk8s" data-id="${vm.id}" data-on="0">ワーカーから外す</button></div>`,
+        )
+      : section('役割', roleButtons(sim, vm.roles, 'vmrole', vm.id, (r) => sim.vmRoleError(vm.id, r))) +
+        (sim.unlocks.has('kubernetes')
+          ? `<div class="actions"><button type="button" data-act="vmk8s" data-id="${vm.id}" data-on="1">Kubernetes のワーカーにする</button></div>`
+          : '');
     const storageErr = sim.unlocks.has('storage') ? null : '投資の「共有ストレージ」が必要です';
     const diskButtons = (['local', 'shared'] as const)
       .map((k) => {
@@ -435,7 +477,14 @@ export class InfoPanel {
           ['状態', state],
           ['ホストの CPU', hostLoad ? load(hostLoad.cpu) : '-'],
         ]),
-      ) + section('負荷', rows(nodeRows(sim, vm.roles, sim.flow.nodeLoads.get(-vm.id), 'vCPU')));
+      ) +
+      section(
+        '負荷',
+        rows([
+          ...nodeRows(sim, vm.roles, sim.flow.nodeLoads.get(-vm.id), 'vCPU'),
+          ...(vm.k8s ? podRows(sim, -vm.id, size.vcpu, size.memGB) : []),
+        ]),
+      );
     return {
       key: `vm${vm.id}@${base}`,
       title: vm.name,
@@ -524,7 +573,7 @@ export class InfoPanel {
   private serviceContent(sim: Simulation, base: string): Content {
     const flow = sim.flow;
     const f = sim.facility;
-    const name = (id: number) => nodeName(f, id);
+    const name = (id: number) => flow.nodes.get(id)?.name ?? nodeName(f, id);
     const active = sim.activeServices;
     if (!active.includes(this.serviceTab)) this.serviceTab = 'blog';
     const id = this.serviceTab;
@@ -555,6 +604,35 @@ export class InfoPanel {
           `<div class="actions"><button type="button" class="primary" data-act="campaign" ${err ? `disabled title="${err}"` : ''}>キャンペーンを打つ(${money(sim.campaignPrice())})</button></div>`,
       );
       campaign = section('キャンペーンの状態', rows([['状態', state]]));
+    }
+    // Kubernetes: 役割を Deployment にすると、Pod が自動で置かれて増減する
+    let k8s = '';
+    if (sim.unlocks.has('kubernetes')) {
+      const deployable = def.roles.filter((role) => K8S.roles.includes(role));
+      const buttons = deployable
+        .map((role) => {
+          const key = roleKey(id, role);
+          const on = sim.deployments.has(key);
+          const err = sim.deploymentError(key);
+          return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="deploy" data-role="${key}" ${err && !on ? `disabled title="${err}"` : ''}>${ROLE_LABEL[role]}</button>`;
+        })
+        .join('');
+      fixed += section(
+        'Kubernetes(Deployment にする役割)',
+        `<div class="desc small">Pod は CPU ${Math.round(K8S.targetCpu * 100)}% を目標に ${K8S.minPods}〜${K8S.maxPods} 個で自動で増減します。BGP を使うワーカーの Pod は LB なしで受けられます。</div><div class="role-buttons">${buttons}</div>`,
+      );
+      const podList: [string, string][] = [];
+      for (const role of deployable) {
+        const key = roleKey(id, role);
+        if (!sim.deployments.has(key)) continue;
+        const placed = sim.pods.filter((p) => p.role === key).reduce((n, p) => n + p.count, 0);
+        const pending = sim.podsPending.get(key) ?? 0;
+        podList.push([
+          role,
+          `Pod ${placed}${pending ? ` <span class="bad">(待ち ${pending})</span>` : ''} / 目標 ${sim.deployments.get(key)}`,
+        ]);
+      }
+      if (podList.length) k8s = section('Pod', rows(podList));
     }
 
     const inst = sf?.instances;
@@ -617,6 +695,7 @@ export class InfoPanel {
       fixed,
       live:
         campaign +
+        k8s +
         section(
           '流れ',
           `<div class="chain">${chain.join(' → ')}</div>` + (side.length ? `<div class="chain">${side.join('・')}</div>` : ''),

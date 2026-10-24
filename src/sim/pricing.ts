@@ -72,6 +72,7 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   cache: 2000,
   replication: 8000,
   virtualization: 20_000,
+  kubernetes: 25_000,
   // 機器
   tenGig: 5000,
   agg: 12_000,

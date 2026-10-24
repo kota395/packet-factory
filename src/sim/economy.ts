@@ -98,6 +98,12 @@ export const UNLOCKS: readonly UnlockDef[] = [
       'サーバをハイパーバイザにして VM を載せられる。役割は VM に付ける。仮想化ホスト向けの大きな機種も買えるようになる。',
   },
   {
+    id: 'kubernetes',
+    name: 'Kubernetes',
+    description:
+      'サーバや VM を「ワーカー」にすると、サービスの役割(web・cache・search・worker)を Deployment にして Pod を自動で置ける。Pod の数は CPU 使用率を見て自動で増減する(VM は手で作るまま)。BGP があれば、BGP を使うワーカーの Pod は LB なしでインターネットから直接受けられる(MetalLB)。',
+  },
+  {
     id: 'tenGig',
     name: '10G 機器',
     description: '10G のアップリンクを持つ 48 ポートスイッチを買えるようになる。',
@@ -223,6 +229,13 @@ export const STAGES: readonly StageDef[] = [
       'ショッピング・写真共有・動画配信を始める。同じサーバに相乗りさせても、ラックごと分けてもよい。検索・画像配信・エンコードと、詰まる所が増える。',
     unlocks: ['shop', 'photo', 'video'],
   },
+  {
+    id: 10,
+    name: 'コンテナ',
+    summary:
+      'Kubernetes のワーカーに Pod を自動で置き、負荷に合わせて数を増減する。ワーカーが止まっても Pod は別のワーカーに置き直される。BGP があれば LB なしで受けられる。',
+    unlocks: ['kubernetes'],
+  },
 ];
 
 /** 投資メニューのタブ */
@@ -253,7 +266,7 @@ export const LINES: readonly LineDef[] = [
     id: 'software',
     name: 'ソフトウェア',
     summary: 'サーバに割り当てられる役割を増やす。',
-    unlocks: ['lb', 'cache', 'replication', 'virtualization'],
+    unlocks: ['lb', 'cache', 'replication', 'virtualization', 'kubernetes'],
     upgrades: [],
   },
   {

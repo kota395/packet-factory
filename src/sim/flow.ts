@@ -11,7 +11,7 @@
  * VM のディスクは、ホストのローカルディスクか共有ストレージ(ネットワーク越しの IO)に置く。
  */
 import { MODEL_BY_ID, portsOf } from './catalog';
-import { MAX_QUEUE_RHO, NET, P99_FACTOR, REPLICATION, ROLE_MEM_GB, SERVICES, VIRT, WORK, type Workload } from './config';
+import { K8S, MAX_QUEUE_RHO, NET, P99_FACTOR, REPLICATION, ROLE_MEM_GB, SERVICES, VIRT, WORK, type Workload } from './config';
 import type { Facility } from './facility';
 import { ROLE_IDS, roleKey, splitRole, type DiskKind, type RoleId, type RoleKey, type ServiceId } from './types';
 
@@ -22,8 +22,23 @@ export interface ServiceLoad {
   readonly work: Workload;
 }
 
+/** 同じワーカーに置いた、同じ役割の Pod のまとまり */
+export interface PodGroup {
+  /** ノードの ID(機器・VM と重ならない大きな数) */
+  readonly id: number;
+  /** 置いたワーカー(物理サーバは機器 ID、VM は −VM ID) */
+  readonly worker: number;
+  readonly role: RoleKey;
+  readonly count: number;
+}
+
+/** Pod のまとまりのノード ID はこの数から */
+export const POD_ID_BASE = 1_000_000;
+
 export interface FlowInput {
   readonly services: readonly ServiceLoad[];
+  /** Kubernetes の Pod(なければ空) */
+  readonly pods?: readonly PodGroup[];
   readonly uplinkGbps: number;
   /** 解放済みの役割の種類 */
   readonly roles: ReadonlySet<RoleId>;
@@ -57,6 +72,12 @@ export interface ComputeNode {
   readonly roles: readonly RoleKey[];
   readonly vm: boolean;
   readonly disk: DiskKind;
+  /** Pod のまとまりなら、置いたワーカーのノード(ワーカーの CPU も使う) */
+  readonly parent?: number;
+  /** Pod のまとまりなら、その Pod の数 */
+  readonly pods?: number;
+  /** BGP で外へ広報している(LB なしでインターネットから直接受けられる) */
+  readonly advertised?: boolean;
 }
 
 export interface NodeLoad {
@@ -329,8 +350,17 @@ function routeOf(facility: Facility, g: Graph, input: FlowInput, src: number, ds
 
 // ---------------------------------------------------------------- ノード
 
-/** 役割を動かすノードの一覧。ハイパーバイザにしたサーバは自分では役割を持たず、載っている VM がノードになる */
-export function computeNodes(facility: Facility, now: number, down: ReadonlySet<number> = new Set()): ComputeNode[] {
+/**
+ * 役割を動かすノードの一覧。ハイパーバイザにしたサーバは自分では役割を持たず、載っている VM がノードになる。
+ * Kubernetes のワーカー(サーバか VM)は役割を持たないノードとして残り、その上の Pod のまとまりがノードになる
+ */
+export function computeNodes(
+  facility: Facility,
+  now: number,
+  down: ReadonlySet<number> = new Set(),
+  pods: readonly PodGroup[] = [],
+  bgp = false,
+): ComputeNode[] {
   const nodes: ComputeNode[] = [];
   const servers = [...facility.devices.values()]
     .filter((d) => MODEL_BY_ID[d.model].category === 'server')
@@ -366,6 +396,29 @@ export function computeNodes(facility: Facility, now: number, down: ReadonlySet<
       disk: v.disk,
     });
   }
+  // Pod: ワーカーが動いていれば、ワーカーのノードの上に置く
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  for (const p of pods) {
+    const w = byId.get(p.worker);
+    if (!w || p.count <= 0) continue;
+    const hostDev = facility.devices.get(w.host)!;
+    const [, role] = splitRole(p.role);
+    nodes.push({
+      id: p.id,
+      name: `${w.name} の ${role} Pod×${p.count}`,
+      host: w.host,
+      cores: p.count * K8S.pod.vcpu,
+      coreSpeed: w.coreSpeed,
+      memGB: p.count * K8S.pod.memGB,
+      roles: [p.role],
+      vm: false,
+      disk: w.disk,
+      parent: w.id,
+      pods: p.count,
+      // MetalLB: BGP を使うワーカー(ハイパーバイザの上の VM は自動)の Pod は、外へ広報できる
+      advertised: bgp && (hostDev.bgp || hostDev.hv),
+    });
+  }
   return nodes;
 }
 
@@ -388,17 +441,16 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   const devices = new Map<number, DeviceLoad>();
   for (const d of facility.devices.values()) devices.set(d.id, { cpu: 0, io: 0, fabric: 0, gbps: 0 });
   const problems: string[] = [];
-  const name = (id: number) => nodeName(facility, id);
-
   // ---- ノード
-  const nodeList = computeNodes(facility, input.now, input.down);
+  const nodeList = computeNodes(facility, input.now, input.down, input.pods ?? [], input.bgp);
+  const nodes = new Map(nodeList.map((n) => [n.id, n]));
+  const name = (id: number) => nodes.get(id)?.name ?? nodeName(facility, id);
   for (const d of facility.devices.values()) {
     if (input.down.has(d.id)) problems.push(`${d.name} は止まっています`);
   }
   for (const v of facility.vms.values()) {
     if (v.downUntil > input.now) problems.push(`${v.name} は別のホストへ移している途中で止まっています`);
   }
-  const nodes = new Map(nodeList.map((n) => [n.id, n]));
   const loads = new Map<number, NodeLoad>(nodeList.map((n) => [n.id, { cpu: 0, io: 0, ioOps: 0, work: {}, miss: {} }]));
   const handoff = [...facility.devices.values()].find((d) => MODEL_BY_ID[d.model].category === 'handoff');
   if (!handoff || !g.adj.has(handoff.id)) problems.push('回線終端にケーブルがつながっていません');
@@ -441,12 +493,22 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   /** 回線から(へ)の通信 */
   const fromNet = (id: number, inGbps: number, outGbps: number) => (handoff ? sendDev(handoff.id, hostOf(id), inGbps, outGbps) : null);
 
-  /** CPU の仕事を積む。VM ならホストの CPU にも(仮想化のオーバーヘッド込みで) */
+  /** CPU の仕事を積む。Pod ならワーカーにも、VM(か VM の上の Pod)ならホストの CPU にも(仮想化のオーバーヘッド込みで) */
   const addCpu = (id: number, perSec: number, cpuMs: number) => {
     const n = nodes.get(id)!;
     loads.get(id)!.cpu += (perSec * cpuMs) / (n.coreSpeed * n.cores * 1000);
+    const parent = n.parent !== undefined ? nodes.get(n.parent)! : null;
+    if (parent) loads.get(parent.id)!.cpu += (perSec * cpuMs) / (parent.coreSpeed * parent.cores * 1000);
+    const virtual = n.vm || !!parent?.vm;
     const host = MODEL_BY_ID[facility.devices.get(n.host)!.model];
-    devices.get(n.host)!.cpu += (perSec * cpuMs * (n.vm ? VIRT.cpuOverhead : 1)) / (host.coreSpeed! * host.cores! * 1000);
+    devices.get(n.host)!.cpu += (perSec * cpuMs * (virtual ? VIRT.cpuOverhead : 1)) / (host.coreSpeed! * host.cores! * 1000);
+  };
+  /** ノードの CPU の使用率(Pod ならワーカー、VM ならホストも含めて一番高いもの) */
+  const cpuRho = (id: number) => {
+    const n = nodes.get(id)!;
+    let rho = Math.max(loads.get(id)!.cpu, devices.get(n.host)!.cpu);
+    if (n.parent !== undefined) rho = Math.max(rho, loads.get(n.parent)!.cpu);
+    return rho;
   };
   const addWork = (id: number, key: RoleKey, perSec: number, cpuMs: number) => {
     const l = loads.get(id)!;
@@ -506,9 +568,15 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
       inst.db = inst.db.slice(0, 1);
     }
     const useLb = inst.lb.length > 0;
-    const entries = useLb ? inst.lb : inst.web.slice(0, 1);
-    if (!useLb && inst.web.length > 1) {
-      sp.push(`LB がないので、インターネットから届くのは ${name(inst.web[0])} だけです(web を並べるには LB が要る)`);
+    // LB がなければ、BGP で広報している Pod(MetalLB)がそれぞれ受ける。それもなければ web 1 台だけ
+    const advertised = inst.web.filter((n) => nodes.get(n)!.advertised);
+    const entries = useLb ? inst.lb : advertised.length ? advertised : inst.web.slice(0, 1);
+    if (!useLb && inst.web.length > entries.length) {
+      sp.push(
+        advertised.length
+          ? 'LB がないので、インターネットから届くのは BGP で広報している web の Pod だけです'
+          : `LB がないので、インターネットから届くのは ${name(inst.web[0])} だけです(web を並べるには LB か、BGP で広報する Pod が要る)`,
+      );
     }
     if (!inst.web.length) sp.push('役割「web」のサーバがありません');
     if (!inst.db.length) sp.push('役割「db」のサーバがありません(db がないとページを表示できない)');
@@ -892,14 +960,13 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   function nodePass(id: number): number {
     const n = nodes.get(id)!;
     const l = loads.get(id)!;
-    let ok = pass(Math.max(l.cpu, devices.get(n.host)!.cpu, l.io));
+    let ok = pass(Math.max(cpuRho(id), l.io));
     if (n.disk === 'shared') ok *= l.storage != null ? along(route(n.host, l.storage))[0] : 0;
     return ok;
   }
   function cpuMs(id: number, ms: number): number {
     const n = nodes.get(id)!;
-    const cpu = Math.max(loads.get(id)!.cpu, devices.get(n.host)!.cpu);
-    return (ms / n.coreSpeed) * q(cpu);
+    return (ms / n.coreSpeed) * q(cpuRho(id));
   }
   /** ディスク IO 1 回の待ち時間 */
   function ioMs(id: number): number {

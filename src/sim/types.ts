@@ -62,6 +62,7 @@ export type UnlockId =
   | 'lb'
   | 'replication'
   | 'virtualization'
+  | 'kubernetes'
   | 'tenGig'
   | 'agg'
   | 'storage'

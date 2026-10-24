@@ -4,6 +4,7 @@ import {
   CAMPAIGN,
   CHURN,
   DIFFICULTY,
+  K8S,
   GROWTH_RATE,
   MIN_USERS,
   PV_PER_USER,
@@ -23,7 +24,7 @@ import {
   upgradeCost,
 } from './economy';
 import { Facility, type Cable, type Device } from './facility';
-import { computeFlow, type FlowResult, type ServiceLoad } from './flow';
+import { POD_ID_BASE, computeFlow, type FlowResult, type PodGroup, type ServiceLoad } from './flow';
 import { Metrics, type Snapshot } from './metrics';
 import {
   RACK_PRICE,
@@ -92,6 +93,15 @@ export class Simulation {
   lifetimeEarned = 0;
   /** ショッピングのキャンペーン */
   campaign: CampaignState = { until: 0, cooldownUntil: 0 };
+  /** Kubernetes: Deployment にした役割と、その Pod の数(オートスケールで変わる) */
+  readonly deployments = new Map<RoleKey, number>();
+  /** Pod の置き場所(スケジューラが決める) */
+  pods: PodGroup[] = [];
+  /** 置き場所が足りずに待っている Pod の数 */
+  readonly podsPending = new Map<RoleKey, number>();
+  /** Pod の置き場所が変わるたびに増える(描画の作り直しに使う) */
+  podVersion = 0;
+  private scaleAt = 0;
   /** 投資のたびに増える。UI の再構築判定に使う */
   purchaseVersion = 0;
   readonly facility = new Facility();
@@ -374,6 +384,7 @@ export class Simulation {
     const d = this.facility.devices.get(id);
     if (!d || MODEL_BY_ID[d.model].category !== 'server') return '役割はサーバにだけ割り当てられます';
     if (d.hv) return 'ハイパーバイザには役割を付けられません。VM に付けてください';
+    if (d.k8s) return 'Kubernetes のワーカーには役割を付けられません(Pod が自動で置かれます)';
     return this.roleUnlockError(role);
   }
 
@@ -435,6 +446,7 @@ export class Simulation {
     if (!d) return { ok: false, message: '機器が見つかりません' };
     if (MODEL_BY_ID[d.model].category === 'handoff') return { ok: false, message: '回線終端は止められません' };
     this.facility.setDown(id, down);
+    this.schedule();
     this.refreshFlow();
     return { ok: true, message: `${d.name} を${down ? 'メンテナンスで止めました' : '戻しました'}` };
   }
@@ -459,12 +471,142 @@ export class Simulation {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
 
+  // ---------------------------------------------------------------- Kubernetes
+
+  /** ワーカーにできない理由(物理サーバは id、VM は vm を指定) */
+  k8sWorkerError(target: { device?: number; vm?: number }, on: boolean): string | null {
+    if (on && !this.unlocks.has('kubernetes')) return `投資の「${UNLOCK_BY_ID.kubernetes.name}」が必要です`;
+    if (target.vm !== undefined) return this.facility.vms.has(target.vm) ? null : 'VM が見つかりません';
+    const d = this.facility.devices.get(target.device ?? -1);
+    if (!d || MODEL_BY_ID[d.model].category !== 'server') return 'ワーカーにできるのはサーバか VM だけです';
+    if (d.hv) return 'ハイパーバイザはワーカーにできません。VM をワーカーにしてください';
+    return null;
+  }
+
+  /** サーバか VM を Kubernetes のワーカーにする / やめる。する場合、付けていた役割は外れる */
+  setK8sWorker(target: { device?: number; vm?: number }, on: boolean): ActionResult {
+    const err = this.k8sWorkerError(target, on);
+    if (err) return { ok: false, message: err };
+    let label: string;
+    if (target.vm !== undefined) {
+      this.facility.setVmK8s(target.vm, on);
+      label = this.facility.vms.get(target.vm)!.name;
+    } else {
+      this.facility.setK8s(target.device!, on);
+      label = this.facility.devices.get(target.device!)!.name;
+    }
+    this.schedule();
+    this.refreshFlow();
+    return { ok: true, message: `${label} を${on ? 'Kubernetes のワーカーにしました' : 'ワーカーから外しました'}` };
+  }
+
+  deploymentError(key: RoleKey): string | null {
+    if (!this.unlocks.has('kubernetes')) return `投資の「${UNLOCK_BY_ID.kubernetes.name}」が必要です`;
+    const [, role] = splitRole(key);
+    if (!K8S.roles.includes(role)) return `${role} は状態を持つので、Pod ではなくサーバか VM で動かします`;
+    return this.roleUnlockError(key);
+  }
+
+  /** 役割を Deployment にする / やめる。最初は下限の数の Pod から始め、あとは自動で増減する */
+  toggleDeployment(key: RoleKey): ActionResult {
+    if (this.deployments.has(key)) {
+      this.deployments.delete(key);
+      this.podsPending.delete(key);
+    } else {
+      const err = this.deploymentError(key);
+      if (err) return { ok: false, message: err };
+      this.deployments.set(key, K8S.minPods);
+    }
+    this.schedule();
+    this.purchaseVersion++;
+    this.refreshFlow();
+    const [s, r] = splitRole(key);
+    return {
+      ok: true,
+      message: `${SERVICES[s].name}の ${r} を${this.deployments.has(key) ? 'Deployment にしました(Pod は自動で増減します)' : 'Deployment から外しました'}`,
+    };
+  }
+
+  /** ワーカー(動いているもの)と、Pod に使える CPU・メモリ */
+  private k8sWorkers(): { node: number; vcpu: number; memGB: number }[] {
+    const down = this.downDevices;
+    const out: { node: number; vcpu: number; memGB: number }[] = [];
+    for (const d of [...this.facility.devices.values()].sort((a, b) => a.id - b.id)) {
+      if (!d.k8s || d.hv || down.has(d.id)) continue;
+      const m = MODEL_BY_ID[d.model];
+      out.push({ node: d.id, vcpu: m.cores!, memGB: m.memGB! - K8S.systemMemGB });
+    }
+    for (const v of [...this.facility.vms.values()].sort((a, b) => a.id - b.id)) {
+      if (!v.k8s || v.downUntil > this.time || down.has(v.host)) continue;
+      const z = VIRT.sizes[v.size];
+      out.push({ node: -v.id, vcpu: z.vcpu, memGB: z.memGB - K8S.systemMemGB });
+    }
+    return out;
+  }
+
+  /**
+   * スケジューラ: Deployment ごとの Pod を、空きの多いワーカーから順に置く(ワーカーに分散)。
+   * 止まったワーカーの Pod は、ここで別のワーカーに置き直される
+   */
+  schedule(): void {
+    const workers = this.k8sWorkers().map((w) => ({ ...w, freeCpu: w.vcpu, freeMem: w.memGB }));
+    const placed = new Map<string, number>();
+    this.podsPending.clear();
+    for (const [key, count] of this.deployments) {
+      if (this.deploymentError(key)) continue;
+      for (let i = 0; i < count; i++) {
+        let best: (typeof workers)[number] | null = null;
+        for (const w of workers) {
+          if (w.freeCpu < K8S.pod.vcpu || w.freeMem < K8S.pod.memGB) continue;
+          if (!best || w.freeCpu > best.freeCpu) best = w;
+        }
+        if (!best) {
+          this.podsPending.set(key, count - i);
+          break;
+        }
+        best.freeCpu -= K8S.pod.vcpu;
+        best.freeMem -= K8S.pod.memGB;
+        const k = `${best.node}|${key}`;
+        placed.set(k, (placed.get(k) ?? 0) + 1);
+      }
+    }
+    let id = POD_ID_BASE;
+    const pods: PodGroup[] = [];
+    for (const [k, count] of placed) {
+      const [worker, role] = k.split('|');
+      pods.push({ id: id++, worker: Number(worker), role: role as RoleKey, count });
+    }
+    const sig = (list: PodGroup[]) => list.map((p) => `${p.worker}${p.role}${p.count}`).join();
+    if (sig(pods) !== sig(this.pods)) this.podVersion++;
+    this.pods = pods;
+  }
+
+  /** オートスケール(HPA): Deployment ごとに、Pod の CPU 使用率が目標になるよう数を変える */
+  private autoscale(): void {
+    for (const [key, current] of this.deployments) {
+      let used = 0;
+      let cores = 0;
+      for (const n of this.flow.nodes.values()) {
+        if (n.pods === undefined || !n.roles.includes(key)) continue;
+        used += this.flow.nodeLoads.get(n.id)!.cpu * n.cores;
+        cores += n.cores;
+      }
+      if (!cores) continue;
+      const util = used / cores;
+      let desired = Math.ceil((current * util) / K8S.targetCpu);
+      if (desired < current) desired = Math.max(desired, current - Math.max(1, Math.floor(current * K8S.scaleDownRate)));
+      this.deployments.set(key, Math.min(K8S.maxPods, Math.max(K8S.minPods, desired)));
+    }
+    this.schedule();
+  }
+
   // ---------------------------------------------------------------- 仮想化
 
   hvError(id: number, on: boolean): string | null {
     const d = this.facility.devices.get(id);
     if (!d || MODEL_BY_ID[d.model].category !== 'server') return 'ハイパーバイザにできるのはサーバだけです';
     if (on && !this.unlocks.has('virtualization')) return `投資の「${UNLOCK_BY_ID.virtualization.name}」が必要です`;
+    if (on && d.k8s) return 'Kubernetes のワーカーはハイパーバイザにできません';
     if (!on && this.facility.vmsOn(id).length) return 'VM が載っている間はやめられません';
     return null;
   }
@@ -525,7 +667,9 @@ export class Simulation {
   }
 
   vmRoleError(id: number, role: RoleKey): string | null {
-    if (!this.facility.vms.has(id)) return 'VM が見つかりません';
+    const vm = this.facility.vms.get(id);
+    if (!vm) return 'VM が見つかりません';
+    if (vm.k8s) return 'Kubernetes のワーカーには役割を付けられません(Pod が自動で置かれます)';
     return this.roleUnlockError(role);
   }
 
@@ -699,14 +843,23 @@ export class Simulation {
       pv: pv ? (pv[id] ?? 0) : this.trafficOf(id, this.time),
       work: this.workloadOf(id),
     }));
-    return computeFlow(this.facility, {
+    const flow = computeFlow(this.facility, {
       services,
+      pods: this.pods,
       uplinkGbps: this.uplinkGbps,
       roles: this.availableRoles,
       now: this.time,
       bgp: this.unlocks.has('bgp'),
       down: this.downDevices,
     });
+    for (const [key, n] of this.podsPending) {
+      const [s, r] = splitRole(key);
+      flow.problems.push(`${SERVICES[s].name}の ${r} の Pod が ${n} 個、置き場所がなくて待っています(ワーカーを増やす)`);
+    }
+    if (this.deployments.size && !this.pods.length && !this.podsPending.size) {
+      flow.problems.push('Kubernetes のワーカーがありません');
+    }
+    return flow;
   }
 
   private tick(): void {
@@ -734,6 +887,11 @@ export class Simulation {
       parts,
     );
     if (!this.fixedTraffic) this.updateUsers(dt);
+    if (this.deployments.size && this.time - this.scaleAt >= K8S.scaleEveryMs) {
+      this.scaleAt = this.time;
+      this.autoscale();
+      this.refreshFlow();
+    }
     if (this.time - this.capacityAt >= METRICS.capacityEveryMs) this.estimateCapacity();
     this.metrics.advance(this.time, () => this.snapshot());
   }

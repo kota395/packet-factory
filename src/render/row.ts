@@ -165,7 +165,7 @@ export class RowRenderer {
     this.view = view;
     const { width, height } = this.app.screen;
     if (width !== this.lastW || height !== this.lastH) this.relayout(width, height);
-    const key = `${sim.layoutVersion}|${view.face}|${sim.rackPowerW}|${sim.facility.racks.size}`;
+    const key = `${sim.layoutVersion}|${view.face}|${sim.rackPowerW}|${sim.facility.racks.size}|${sim.podVersion}`;
     if (key !== this.builtKey || this.labels.children.length === 0) this.rebuild(sim, view.face, key);
     if (this.fitted !== sim) this.fit();
 
@@ -455,12 +455,18 @@ export class RowRenderer {
           const vms = f.vmsOn(d.id);
           const count = new Map<string, number>();
           for (const v of vms) {
-            const key = v.roles.length ? rolesText(v.roles) : '役割なし';
+            const key = v.k8s ? 'k8s' : v.roles.length ? rolesText(v.roles) : '役割なし';
             count.set(key, (count.get(key) ?? 0) + 1);
           }
           const parts = [...count].map(([k, n]) => (n > 1 ? `${k}×${n}` : k));
           const text = vms.length ? `VM ${vms.length} 台: ${parts.join('・')}` : 'VM なし';
           const t = this.label(text, r.x + 108, r.y + r.h / 2, 10, 0xb7e4c7, 0, false, true);
+          const maxW = r.w - 108 - 64;
+          if (t.width > maxW) t.scale.set(maxW / t.width);
+        } else if (d.k8s) {
+          // Kubernetes のワーカー: 置かれた Pod を役割ごとに
+          const parts = sim.pods.filter((p) => p.worker === d.id).map((p) => `${rolesText([p.role])}×${p.count}`);
+          const t = this.label(`k8s ${parts.join('・') || 'Pod なし'}`, r.x + 108, r.y + r.h / 2, 10, 0xc9b6ff, 0, false, true);
           const maxW = r.w - 108 - 64;
           if (t.width > maxW) t.scale.set(maxW / t.width);
         } else if (d.roles.length) {

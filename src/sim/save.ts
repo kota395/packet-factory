@@ -38,10 +38,12 @@ export interface SaveData {
   upgrades: Record<UpgradeId, number>;
   /** 借りているラックの位置 */
   racks: number[];
-  /** [ID, 機種, ラック, U, 役割, 購入額, 名前, ハイパーバイザか, BGP を使うか, メンテナンス中か] */
-  devices: [number, ModelId, number, number, RoleKey[], number, string, boolean, boolean, boolean][];
-  /** [ID, 名前, ホスト, 大きさ, 役割, ディスク] */
-  vms: [number, string, number, VmSize, RoleKey[], DiskKind][];
+  /** [ID, 機種, ラック, U, 役割, 購入額, 名前, ハイパーバイザか, BGP を使うか, メンテナンス中か, Kubernetes のワーカーか] */
+  devices: [number, ModelId, number, number, RoleKey[], number, string, boolean, boolean, boolean, boolean][];
+  /** [ID, 名前, ホスト, 大きさ, 役割, ディスク, Kubernetes のワーカーか] */
+  vms: [number, string, number, VmSize, RoleKey[], DiskKind, boolean][];
+  /** Kubernetes の Deployment と、その時点の Pod の数 */
+  deployments: [RoleKey, number][];
   /** [ID, 機器 A, ポート A, 機器 B, ポート B, 購入額] */
   cables: [number, number, number, number, number, number][];
 }
@@ -75,8 +77,9 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     disabled: [...sim.disabledFeatures],
     upgrades: { ...sim.upgrades },
     racks: [...f.racks.keys()],
-    devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name, d.hv, d.bgp, d.down]),
-    vms: [...f.vms.values()].map((v) => [v.id, v.name, v.host, v.size, [...v.roles], v.disk]),
+    devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name, d.hv, d.bgp, d.down, d.k8s]),
+    vms: [...f.vms.values()].map((v) => [v.id, v.name, v.host, v.size, [...v.roles], v.disk, v.k8s]),
+    deployments: [...sim.deployments],
     cables: [...f.cables.values()].map((c) => [c.id, c.a.device, c.a.port, c.b.device, c.b.port, c.paid]),
   };
 }
@@ -93,24 +96,27 @@ export function loadSave(save: SaveData): Simulation {
   sim.campaign = { until: sim.time + save.campaign[0], cooldownUntil: sim.time + save.campaign[1] };
   const f = sim.facility;
   for (const slot of save.racks) f.rent(slot);
-  for (const [id, model, slot, u, roles, paid, name, hv, bgp, down] of save.devices) {
+  for (const [id, model, slot, u, roles, paid, name, hv, bgp, down, k8s] of save.devices) {
     // 壊れた配置(重なり・ラック外)は読み飛ばす。電力は昔の上限で置いたものもそのまま戻す
     if (f.placeError(model, slot, u, Infinity) !== null) continue;
     const d = f.place(model, slot, u, paid, { id, name });
     if (hv) f.setHv(d.id, true);
     if (bgp) f.setBgp(d.id, true);
     if (down) f.setDown(d.id, true);
+    if (k8s && !hv) f.setK8s(d.id, true);
     f.setRoles(d.id, roles);
   }
-  for (const [id, name, host, size, roles, disk] of save.vms) {
+  for (const [id, name, host, size, roles, disk, k8s] of save.vms) {
     if (!f.devices.get(host)?.hv) continue;
-    f.createVm(host, size, { id, name, roles, disk });
+    f.createVm(host, size, { id, name, roles: k8s ? [] : roles, disk, k8s });
   }
   for (const [id, da, pa, db, pb, paid] of save.cables) {
     const a = { device: da, port: pa };
     const b = { device: db, port: pb };
     if (f.connectError(a, b) === null) f.connect(a, b, paid, id);
   }
+  for (const [key, count] of save.deployments) sim.deployments.set(key, count);
+  sim.schedule();
   sim.refreshFlow();
   return sim;
 }
@@ -205,22 +211,28 @@ export function parseSave(data: unknown): SaveData | null {
       ? roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId)).map((r) => roleKey('blog', r))
       : roles.filter(isRoleKey);
   for (const item of d.devices as unknown[]) {
-    // 古いセーブは 7 要素(仮想化の前)か 8 要素(BGP の前)
-    if (!Array.isArray(item) || ![7, 8, 10].includes(item.length)) return null;
-    const [id, model, slot, u, roles, paid, name, hv, bgp, down] = item;
+    // 古いセーブは 7 要素(仮想化の前)・8 要素(BGP の前)・10 要素(Kubernetes の前)
+    if (!Array.isArray(item) || ![7, 8, 10, 11].includes(item.length)) return null;
+    const [id, model, slot, u, roles, paid, name, hv, bgp, down, k8s] = item;
     if (!isInt(id) || id < 0 || typeof model !== 'string' || !(model in MODEL_BY_ID)) return null;
     if (!isInt(slot) || !isInt(u) || !Array.isArray(roles) || !isNum(paid) || typeof name !== 'string') return null;
-    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true, bgp === true, down === true]);
+    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true, bgp === true, down === true, k8s === true]);
   }
 
   const vms: SaveData['vms'] = [];
   for (const item of (Array.isArray(d.vms) ? d.vms : []) as unknown[]) {
-    if (!Array.isArray(item) || item.length !== 6) return null;
-    const [id, name, host, size, roles, disk] = item;
+    if (!Array.isArray(item) || (item.length !== 6 && item.length !== 7)) return null;
+    const [id, name, host, size, roles, disk, k8s] = item;
     if (!isInt(id) || id < 1 || typeof name !== 'string' || !isInt(host) || !Array.isArray(roles)) return null;
     if (size !== 's' && size !== 'm' && size !== 'l') return null;
     if (disk !== 'local' && disk !== 'shared') return null;
-    vms.push([id, name.slice(0, 32), host, size, okRoles(roles), disk]);
+    vms.push([id, name.slice(0, 32), host, size, okRoles(roles), disk, k8s === true]);
+  }
+
+  const deployments: SaveData['deployments'] = [];
+  for (const item of (Array.isArray(d.deployments) ? d.deployments : []) as unknown[]) {
+    if (!Array.isArray(item) || item.length !== 2 || !isRoleKey(item[0]) || !isInt(item[1]) || item[1] < 0) return null;
+    deployments.push([item[0], Math.min(item[1], 1000)]);
   }
 
   const cables: SaveData['cables'] = [];
@@ -250,5 +262,6 @@ export function parseSave(data: unknown): SaveData | null {
     devices,
     vms,
     cables,
+    deployments,
   };
 }

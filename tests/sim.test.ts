@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID } from '../src/sim/catalog';
-import { BLOG_FEATURES, CAMPAIGN, RACK, SERVICES, WORK } from '../src/sim/config';
+import { BLOG_FEATURES, CAMPAIGN, K8S, RACK, SERVICES, WORK } from '../src/sim/config';
 import { createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
 import { forecastSeries, logistic, secondsUntil } from '../src/sim/forecast';
@@ -533,6 +533,89 @@ describe('複数のサービス', () => {
     expect(parsed.users.blog).toBe(500);
     expect(parsed.devices.find((d) => d[4].length)![4]).toEqual(['blog:web', 'blog:db']);
     expect(loadSave(parsed).flow.services.blog!.success).toBe(1);
+  });
+});
+
+describe('Kubernetes', () => {
+  /** db はサーバ、web は Pod。ワーカーを 2 台 */
+  function cluster(pv: number, unlocks: UnlockId[] = []) {
+    const b = base({ pv, unlocks: ['kubernetes', ...unlocks] });
+    b.server('srv-2u-db', 10, ['blog:db']);
+    const w1 = b.server('srv-1u-d', 20, []);
+    const w2 = b.server('srv-1u-d', 22, []);
+    expect(b.s.setK8sWorker({ device: w1 }, true).ok).toBe(true);
+    expect(b.s.setK8sWorker({ device: w2 }, true).ok).toBe(true);
+    return { ...b, w1, w2 };
+  }
+  const webPods = (s: Simulation) => s.pods.filter((p) => p.role === 'blog:web').reduce((n, p) => n + p.count, 0);
+
+  it('ワーカーには役割を付けられず、状態を持つ役割は Deployment にできない', () => {
+    const { s, server } = base();
+    const srv = server('srv-1u-d', 20, ['blog:web']);
+    expect(s.setK8sWorker({ device: srv }, true).ok).toBe(false); // 未解放
+    s.unlock('kubernetes');
+    expect(s.setK8sWorker({ device: srv }, true).ok).toBe(true);
+    expect(s.facility.devices.get(srv)!.roles).toEqual([]);
+    expect(s.toggleRole(srv, 'blog:web').ok).toBe(false);
+    expect(s.toggleDeployment('blog:db').ok).toBe(false);
+    expect(s.toggleDeployment('blog:web').ok).toBe(true);
+    expect(webPods(s)).toBe(K8S.minPods);
+  });
+
+  it('Pod はワーカーに分散して置かれ、負荷に合わせて自動で増える', () => {
+    const { s, server, w1, w2 } = cluster(300, ['lb']);
+    server('srv-1u-d', 30, ['blog:lb']);
+    s.toggleDeployment('blog:web');
+    expect(new Set(s.pods.map((p) => p.worker))).toEqual(new Set([w1, w2]));
+    const before = run(s, 1000);
+    expect(before.success).toBeLessThan(0.9);
+    run(s, 30_000);
+    expect(webPods(s)).toBeGreaterThan(K8S.minPods);
+    expect(s.flow.success).toBe(1);
+    // 負荷が下がると減っていく
+    const many = webPods(s);
+    (s as unknown as { fixedTraffic: Record<string, () => number> }).fixedTraffic.blog = () => 20;
+    run(s, 60_000);
+    expect(webPods(s)).toBeLessThan(many);
+  });
+
+  it('LB も BGP もなければ届くのは Pod 1 つ。BGP を使うワーカーの Pod は LB なしで受けられる', () => {
+    const { s, w1, w2 } = cluster(50, ['bgp']);
+    s.toggleDeployment('blog:web');
+    const one = run(s, 1000);
+    expect(one.services.blog!.entries).toHaveLength(1);
+    expect(one.problems.join()).toContain('LB がない');
+    s.setBgp(w1, true);
+    s.setBgp(w2, true);
+    const direct = run(s, 1000);
+    expect(direct.services.blog!.entries.length).toBe(2);
+    expect(direct.success).toBe(1);
+  });
+
+  it('ワーカーが止まると、Pod は残りのワーカーに置き直される', () => {
+    const { s, server, w1, w2 } = cluster(100, ['lb']);
+    server('srv-1u-d', 30, ['blog:lb']);
+    s.toggleDeployment('blog:web');
+    run(s, 20_000);
+    s.setMaintenance(w1, true);
+    expect(s.pods.every((p) => p.worker === w2)).toBe(true);
+    run(s, 20_000);
+    expect(s.flow.success).toBe(1);
+  });
+
+  it('VM もワーカーにでき、セーブで Deployment とワーカーが残る', () => {
+    const { s, server } = base({ pv: 30, unlocks: ['kubernetes', 'virtualization'] });
+    server('srv-2u-db', 10, ['blog:db']);
+    const h = server('srv-2u-hv', 20, []);
+    s.setHv(h, true);
+    const vm = s.createVm(h, 'l').id!;
+    expect(s.setK8sWorker({ vm }, true).ok).toBe(true);
+    s.toggleDeployment('blog:web');
+    expect(run(s, 5000).success).toBe(1);
+    const b = loadSave(decodeSave(encodeSave(createSave(s)))!);
+    expect(b.facility.vms.get(vm)!.k8s).toBe(true);
+    expect(b.deployments.get('blog:web')).toBe(s.deployments.get('blog:web'));
+    expect(b.flow.success).toBe(1);
   });
 });
 

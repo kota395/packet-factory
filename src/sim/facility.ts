@@ -23,6 +23,8 @@ export interface Device {
   hv: boolean;
   /** BGP で経路を交換するか(物理サーバ。ハイパーバイザは BGP を解放すれば自動で使う) */
   bgp: boolean;
+  /** Kubernetes のワーカーにしているか(役割は持たず、Pod が自動で置かれる) */
+  k8s: boolean;
   /** メンテナンスで止めているか */
   down: boolean;
   /** 障害で止まっている。この時刻(シミュレーション時間)まで */
@@ -41,6 +43,8 @@ export interface Vm {
   readonly size: VmSize;
   roles: RoleKey[];
   disk: DiskKind;
+  /** Kubernetes のワーカーにしているか */
+  k8s: boolean;
   /** 別のホストへ移している間は止まる。この時刻(シミュレーション時間)まで */
   downUntil: number;
 }
@@ -142,7 +146,7 @@ export class Facility {
   place(model: ModelId, slot: number, u: number, paid: number, opts: { id?: number; name?: string } = {}): Device {
     const id = opts.id ?? this.nextDeviceId;
     this.nextDeviceId = Math.max(this.nextDeviceId, id + 1);
-    const device: Device = { id, model, slot, u, roles: [], hv: false, bgp: false, down: false, failedUntil: 0, paid, name: opts.name ?? this.newName(model) };
+    const device: Device = { id, model, slot, u, roles: [], hv: false, bgp: false, k8s: false, down: false, failedUntil: 0, paid, name: opts.name ?? this.newName(model) };
     this.devices.set(id, device);
     this.version++;
     return device;
@@ -179,6 +183,22 @@ export class Facility {
     if (!d) return;
     d.hv = on;
     if (on) d.roles = [];
+    this.version++;
+  }
+
+  setK8s(id: number, on: boolean): void {
+    const d = this.devices.get(id);
+    if (!d) return;
+    d.k8s = on;
+    if (on) d.roles = [];
+    this.version++;
+  }
+
+  setVmK8s(id: number, on: boolean): void {
+    const v = this.vms.get(id);
+    if (!v) return;
+    v.k8s = on;
+    if (on) v.roles = [];
     this.version++;
   }
 
@@ -229,7 +249,11 @@ export class Facility {
     return null;
   }
 
-  createVm(host: number, size: VmSize, opts: { id?: number; name?: string; roles?: RoleKey[]; disk?: DiskKind } = {}): Vm {
+  createVm(
+    host: number,
+    size: VmSize,
+    opts: { id?: number; name?: string; roles?: RoleKey[]; disk?: DiskKind; k8s?: boolean } = {},
+  ): Vm {
     const id = opts.id ?? this.nextVmId;
     this.nextVmId = Math.max(this.nextVmId, id + 1);
     const used = new Set([...this.vms.values()].map((v) => v.name));
@@ -238,7 +262,7 @@ export class Facility {
       const candidate = `vm${String(n).padStart(2, '0')}`;
       if (!used.has(candidate)) name = candidate;
     }
-    const vm: Vm = { id, name, host, size, roles: opts.roles ?? [], disk: opts.disk ?? 'local', downUntil: 0 };
+    const vm: Vm = { id, name, host, size, roles: opts.roles ?? [], disk: opts.disk ?? 'local', k8s: opts.k8s ?? false, downUntil: 0 };
     this.vms.set(id, vm);
     this.version++;
     return vm;

@@ -244,6 +244,27 @@ export const VIRT = {
   storageMs: 1.5,
 } as const;
 
+/**
+ * Kubernetes。ワーカーにしたサーバ / VM の上に、サービスの役割ごとの Pod を自動で置き、
+ * 負荷に合わせて Pod の数を自動で増減する(HPA)。VM は手で作るまま
+ */
+export const K8S = {
+  /** Pod 1 個に割り当てる CPU とメモリ(GB) */
+  pod: { vcpu: 1, memGB: 2 },
+  /** ワーカー自身(kubelet など)が使うメモリ(GB) */
+  systemMemGB: 2,
+  /** Pod で動かせる役割(状態を持たないもの)。db・replica・media はサーバか VM で */
+  roles: ['web', 'cache', 'search', 'worker'] as readonly RoleId[],
+  /** Pod の数の下限・上限(Deployment ごと) */
+  minPods: 2,
+  maxPods: 200,
+  /** オートスケールの目標 CPU 使用率と、見直す間隔(シミュレーション時間 ms) */
+  targetCpu: 0.6,
+  scaleEveryMs: 5000,
+  /** 1 回で減らす Pod の割合の上限(急に減らしすぎない) */
+  scaleDownRate: 0.2,
+} as const;
+
 export const NET = {
   /** 利用者とのやり取りの往復時間(ms) */
   internetRttMs: 40,
