@@ -9,7 +9,7 @@ import { MODEL_BY_ID, portsOf } from '../src/sim/catalog';
 import { RACK } from '../src/sim/config';
 import { unlockCost } from '../src/sim/economy';
 import { createSave, newGame } from '../src/sim/save';
-import type { ModelId, PortRef, RoleId, UnlockId } from '../src/sim/types';
+import type { ModelId, PortRef, RoleKey, UnlockId } from '../src/sim/types';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -21,7 +21,7 @@ it(`balance bot (${MINUTES} min)`, () => {
   const log: string[] = [];
   const event = (m: string) => log.push(`${(s.time / 60000).toFixed(1).padStart(5)}m  ${m}`);
 
-  const devices = (pred: (d: { model: ModelId; roles: RoleId[] }) => boolean) => [...f.devices.values()].filter(pred);
+  const devices = (pred: (d: { model: ModelId; roles: RoleKey[] }) => boolean) => [...f.devices.values()].filter(pred);
   const isSwitch = (m: ModelId) => MODEL_BY_ID[m].category === 'switch';
   const freePort = (id: number): PortRef | null => {
     const d = f.devices.get(id)!;
@@ -34,7 +34,7 @@ it(`balance bot (${MINUTES} min)`, () => {
     return null;
   };
   /** 機器を買って、同じラックの ToR(なければ最初のスイッチ)につなぐ */
-  const buyServer = (model: ModelId, roles: RoleId[]): number | null => {
+  const buyServer = (model: ModelId, roles: RoleKey[]): number | null => {
     // ケーブル代も残しておく
     if (s.money < s.devicePrice(model) + 30) return null;
     for (const slot of [...f.racks.keys()].sort((a, b) => a - b)) {
@@ -114,31 +114,31 @@ it(`balance bot (${MINUTES} min)`, () => {
       const dev = [...f.devices.values()].find((d) => d.name === name);
       if (dev && MODEL_BY_ID[dev.model].category === 'server') {
         // レプリカが詰まっている: レプリカを足す
-        if (dev.roles.includes('replica')) {
-          return buyServer('srv-2u-db', ['replica']) !== null || powerOrRack('srv-2u-db');
+        if (dev.roles.includes('blog:replica')) {
+          return buyServer('srv-2u-db', ['blog:replica']) !== null || powerOrRack('srv-2u-db');
         }
         // db が詰まっている: 上位機種へ移す
-        if (dev.roles.includes('db')) {
+        if (dev.roles.includes('blog:db')) {
           const target: ModelId = dev.model === 'srv-1u-e' ? 'srv-1u-d' : 'srv-2u-db';
           if (dev.model === 'srv-2u-db') {
             if (!s.unlocks.has('cache')) return tryUnlock('cache');
-            if (!flow.instances.cache.length) return buyServer('srv-1u-e', ['cache']) !== null;
+            if (!flow.services.blog!.instances.cache.length) return buyServer('srv-1u-e', ['blog:cache']) !== null;
             if (!s.unlocks.has('replication')) return tryUnlock('replication');
-            return buyServer('srv-2u-db', ['replica']) !== null || powerOrRack('srv-2u-db');
+            return buyServer('srv-2u-db', ['blog:replica']) !== null || powerOrRack('srv-2u-db');
           }
-          const id = buyServer(target, ['db']);
+          const id = buyServer(target, ['blog:db']);
           if (id === null) return powerOrRack(target);
-          s.toggleRole(dev.id, 'db');
-          if (!dev.roles.length) s.toggleRole(dev.id, 'web');
+          s.toggleRole(dev.id, 'blog:db');
+          if (!dev.roles.length) s.toggleRole(dev.id, 'blog:web');
           event(`db を ${f.devices.get(id)!.name} へ移す`);
           return true;
         }
         // web が詰まっている: LB の後ろに web を足す
-        if (dev.roles.includes('web') || dev.roles.includes('lb')) {
+        if (dev.roles.includes('blog:web') || dev.roles.includes('blog:lb')) {
           if (!s.unlocks.has('lb')) return tryUnlock('lb');
-          if (!flow.instances.lb.length) return buyServer('srv-1u-e', ['lb']) !== null;
-          if (dev.roles.includes('lb')) return buyServer('srv-1u-d', ['lb']) !== null;
-          const id = buyServer('srv-1u-d', ['web']);
+          if (!flow.services.blog!.instances.lb.length) return buyServer('srv-1u-e', ['blog:lb']) !== null;
+          if (dev.roles.includes('blog:lb')) return buyServer('srv-1u-d', ['blog:lb']) !== null;
+          const id = buyServer('srv-1u-d', ['blog:web']);
           return id !== null || powerOrRack('srv-1u-d');
         }
       }
@@ -153,7 +153,7 @@ it(`balance bot (${MINUTES} min)`, () => {
         }
         const server = [x, y].find((d) => MODEL_BY_ID[d.model].category === 'server');
         if (server && server.roles.length) {
-          const role = server.roles.includes('lb') ? 'lb' : server.roles[0];
+          const role = server.roles.includes('blog:lb') ? 'blog:lb' : server.roles[0];
           return buyServer('srv-1u-d', [role]) !== null || powerOrRack('srv-1u-d');
         }
       }

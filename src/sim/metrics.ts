@@ -3,6 +3,7 @@
  * 1 秒ごとにダッシュボード用の推移(最大 METRICS.historySec 秒)を残す。
  */
 import { METRICS } from './config';
+import type { ServiceId } from './types';
 
 export interface RollingStats {
   /** ページビュー/秒(成功 + 失敗) */
@@ -26,6 +27,30 @@ export interface Snapshot {
   capacity: number;
   /** 資源ごとの使用率(キーは識別子、label は表示名) */
   resources: { key: string; label: string; rho: number }[];
+  /** 動いているサービスごとのユーザー数・市場規模・キャパシティ */
+  services: { id: ServiceId; users: number; market: number; capacity: number }[];
+}
+
+/** サービスごとの推移。History.t と同じ長さで、サービスを始める前は null */
+export interface ServiceHistory {
+  pv: (number | null)[];
+  errorRate: (number | null)[];
+  latency: (number | null)[];
+  p99: (number | null)[];
+  users: (number | null)[];
+  market: (number | null)[];
+  revenue: (number | null)[];
+  capacity: (number | null)[];
+}
+
+/** 1 回の記録(dtMs の間の件数) */
+export interface Sample {
+  dtMs: number;
+  pv: number;
+  errors: number;
+  latencyMs: number;
+  p99Ms: number;
+  revenue: number;
 }
 
 /** 1 秒ごとの推移。同じ長さの配列を並べる(uPlot にそのまま渡せる形) */
@@ -43,15 +68,6 @@ export interface History {
   capacity: number[];
 }
 
-interface Sample {
-  dtMs: number;
-  pv: number;
-  errors: number;
-  latencyMs: number;
-  p99Ms: number;
-  revenue: number;
-}
-
 const emptyHistory = (): History => ({
   t: [],
   pv: [],
@@ -66,22 +82,15 @@ const emptyHistory = (): History => ({
   capacity: [],
 });
 
-export class Metrics {
-  totalPv = 0;
-  totalErrors = 0;
-  readonly history: History = emptyHistory();
-  /** 資源ごとの使用率の推移。history.t と同じ長さで、その秒に無かった資源は null */
-  readonly resources = new Map<string, { label: string; rho: (number | null)[] }>();
+const emptyStats = (): RollingStats => ({ pv: 0, errorRate: 0, latencyMs: 0, p99Ms: 0, revenuePerSec: 0 });
 
+/** 直近 METRICS.windowMs の集計 */
+class Rolling {
+  stats: RollingStats = emptyStats();
   private samples: Sample[] = [];
-  private second = 0;
-  private stats: RollingStats = { pv: 0, errorRate: 0, latencyMs: 0, p99Ms: 0, revenuePerSec: 0 };
 
-  /** dtMs の間に pv 件(/秒ではなく件数)が来て、errors 件が失敗し、revenue を稼いだ */
-  record(dtMs: number, pv: number, errors: number, latencyMs: number, p99Ms: number, revenue: number): void {
-    this.totalPv += pv;
-    this.totalErrors += errors;
-    this.samples.push({ dtMs, pv, errors, latencyMs, p99Ms, revenue });
+  add(s: Sample): void {
+    this.samples.push(s);
     let span = 0;
     for (let i = this.samples.length - 1; i >= 0; i--) {
       span += this.samples[i].dtMs;
@@ -90,7 +99,76 @@ export class Metrics {
         break;
       }
     }
-    this.recompute();
+    let ms = 0;
+    let pv = 0;
+    let errors = 0;
+    let revenue = 0;
+    let lat = 0;
+    let p99 = 0;
+    for (const x of this.samples) {
+      ms += x.dtMs;
+      pv += x.pv;
+      errors += x.errors;
+      revenue += x.revenue;
+      lat += x.latencyMs * x.pv;
+      p99 = Math.max(p99, x.p99Ms);
+    }
+    const sec = ms / 1000;
+    this.stats = {
+      pv: sec ? pv / sec : 0,
+      errorRate: pv ? errors / pv : 0,
+      latencyMs: pv ? lat / pv : 0,
+      p99Ms: pv ? p99 : 0,
+      revenuePerSec: sec ? revenue / sec : 0,
+    };
+  }
+}
+
+const emptyServiceHistory = (len: number): ServiceHistory => {
+  const nulls = () => new Array<number | null>(len).fill(null);
+  return {
+    pv: nulls(),
+    errorRate: nulls(),
+    latency: nulls(),
+    p99: nulls(),
+    users: nulls(),
+    market: nulls(),
+    revenue: nulls(),
+    capacity: nulls(),
+  };
+};
+
+export class Metrics {
+  totalPv = 0;
+  totalErrors = 0;
+  readonly history: History = emptyHistory();
+  /** サービスごとの推移 */
+  readonly services = new Map<ServiceId, ServiceHistory>();
+  /** 資源ごとの使用率の推移。history.t と同じ長さで、その秒に無かった資源は null */
+  readonly resources = new Map<string, { label: string; rho: (number | null)[] }>();
+
+  private second = 0;
+  private total = new Rolling();
+  private bySvc = new Map<ServiceId, Rolling>();
+
+  /**
+   * dtMs の間に pv 件(/秒ではなく件数)が来て、errors 件が失敗し、revenue を稼いだ。
+   * services はサービスごとの内訳(合計が total)
+   */
+  record(total: Sample, services: (Sample & { id: ServiceId })[] = []): void {
+    this.totalPv += total.pv;
+    this.totalErrors += total.errors;
+    this.total.add(total);
+    for (const s of services) {
+      let r = this.bySvc.get(s.id);
+      if (!r) this.bySvc.set(s.id, (r = new Rolling()));
+      r.add(s);
+    }
+  }
+
+  /** サービスの直近の集計(まだ動いていなければすべて 0) */
+  rollingOf(id: ServiceId): RollingStats {
+    return this.bySvc.get(id)?.stats ?? emptyStats();
   }
 
   /** 秒の境目で推移を記録する。snapshot は境目を越えたときだけ呼ばれる */
@@ -105,23 +183,39 @@ export class Metrics {
   }
 
   get rolling(): RollingStats {
-    return this.stats;
+    return this.total.stats;
   }
 
   private push(sec: number, s: Snapshot): void {
     const h = this.history;
+    const st = this.total.stats;
     h.t.push(sec);
-    h.pv.push(this.stats.pv);
-    h.errorRate.push(this.stats.errorRate);
-    h.latency.push(this.stats.latencyMs);
-    h.p99.push(this.stats.p99Ms);
+    h.pv.push(st.pv);
+    h.errorRate.push(st.errorRate);
+    h.latency.push(st.latencyMs);
+    h.p99.push(st.p99Ms);
     h.users.push(s.users);
     h.market.push(s.market);
-    h.revenue.push(this.stats.revenuePerSec);
+    h.revenue.push(st.revenuePerSec);
     h.upkeep.push(s.upkeep);
     h.money.push(s.money);
     h.capacity.push(s.capacity);
     const len = h.t.length;
+    for (const svc of s.services) {
+      if (!this.services.has(svc.id)) this.services.set(svc.id, emptyServiceHistory(len - 1));
+    }
+    for (const [id, sh] of this.services) {
+      const snap = s.services.find((x) => x.id === id);
+      const r = this.bySvc.get(id)?.stats;
+      sh.pv.push(snap && r ? r.pv : null);
+      sh.errorRate.push(snap && r ? r.errorRate : null);
+      sh.latency.push(snap && r ? r.latencyMs : null);
+      sh.p99.push(snap && r ? r.p99Ms : null);
+      sh.revenue.push(snap && r ? r.revenuePerSec : null);
+      sh.users.push(snap?.users ?? null);
+      sh.market.push(snap?.market ?? null);
+      sh.capacity.push(snap?.capacity ?? null);
+    }
     const seen = new Set<string>();
     for (const r of s.resources) {
       seen.add(r.key);
@@ -137,35 +231,11 @@ export class Metrics {
 
     if (len > METRICS.historySec) {
       for (const series of Object.values(h)) series.shift();
+      for (const sh of this.services.values()) for (const series of Object.values(sh)) series.shift();
       for (const [key, series] of this.resources) {
         series.rho.shift();
         if (series.rho.every((v) => v === null)) this.resources.delete(key);
       }
     }
-  }
-
-  private recompute(): void {
-    let ms = 0;
-    let pv = 0;
-    let errors = 0;
-    let revenue = 0;
-    let lat = 0;
-    let p99 = 0;
-    for (const s of this.samples) {
-      ms += s.dtMs;
-      pv += s.pv;
-      errors += s.errors;
-      revenue += s.revenue;
-      lat += s.latencyMs * s.pv;
-      p99 = Math.max(p99, s.p99Ms);
-    }
-    const sec = ms / 1000;
-    this.stats = {
-      pv: sec ? pv / sec : 0,
-      errorRate: pv ? errors / pv : 0,
-      latencyMs: pv ? lat / pv : 0,
-      p99Ms: pv ? p99 : 0,
-      revenuePerSec: sec ? revenue / sec : 0,
-    };
   }
 }

@@ -2,17 +2,34 @@ import { MODEL_BY_ID, portsOf } from './catalog';
 import { OFFLINE, RACK, ROW } from './config';
 import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades } from './economy';
 import { Simulation } from './simulation';
-import { ROLE_IDS, type DiskKind, type ModelId, type RoleId, type UnlockId, type UpgradeId, type VmSize } from './types';
+import {
+  ROLE_IDS,
+  SERVICE_IDS,
+  isRoleKey,
+  roleKey,
+  type DiskKind,
+  type ModelId,
+  type RoleId,
+  type RoleKey,
+  type ServiceId,
+  type UnlockId,
+  type UpgradeId,
+  type VmSize,
+} from './types';
 
 /**
  * セーブデータ。構成(ラック・機器・ケーブル)・お金・ユーザー数・投資状況を残す。
- * v3 = ラックと配線の版。それより前(ノード図の版)は読み込めない
+ * v4 = 複数のサービスの版(役割は「blog:web」のようにサービスつき)。
+ * v3(ブログだけの版)は読み込むときに役割をブログのものとして移す。それより前(ノード図の版)は読み込めない
  */
 export interface SaveData {
-  v: 3;
+  v: 4;
   savedAt: number;
   money: number;
-  users: number;
+  /** サービスごとのユーザー数 */
+  users: Partial<Record<ServiceId, number>>;
+  /** キャンペーンの残り時間とクールタイムの残り(ms) */
+  campaign: [number, number];
   lifetimeEarned: number;
   /** 保存時点の収支/秒。放置収入の計算に使う */
   incomePerSec: number;
@@ -22,9 +39,9 @@ export interface SaveData {
   /** 借りているラックの位置 */
   racks: number[];
   /** [ID, 機種, ラック, U, 役割, 購入額, 名前, ハイパーバイザか, BGP を使うか, メンテナンス中か] */
-  devices: [number, ModelId, number, number, RoleId[], number, string, boolean, boolean, boolean][];
+  devices: [number, ModelId, number, number, RoleKey[], number, string, boolean, boolean, boolean][];
   /** [ID, 名前, ホスト, 大きさ, 役割, ディスク] */
-  vms: [number, string, number, VmSize, RoleId[], DiskKind][];
+  vms: [number, string, number, VmSize, RoleKey[], DiskKind][];
   /** [ID, 機器 A, ポート A, 機器 B, ポート B, 購入額] */
   cables: [number, number, number, number, number, number][];
 }
@@ -37,7 +54,7 @@ export function newGame(): Simulation {
   const isp = f.place('handoff', 0, RACK.units, 0);
   const sw = f.place('sw-24', 0, RACK.units - 2, 0);
   const srv = f.place('srv-1u-e', 0, RACK.units - 4, 0);
-  f.setRoles(srv.id, ['web', 'db']);
+  f.setRoles(srv.id, ['blog:web', 'blog:db']);
   f.connect({ device: isp.id, port: 0 }, { device: sw.id, port: 0 }, 0);
   f.connect({ device: sw.id, port: 1 }, { device: srv.id, port: 0 }, 0);
   sim.refreshFlow();
@@ -47,10 +64,11 @@ export function newGame(): Simulation {
 export function createSave(sim: Simulation, now = Date.now()): SaveData {
   const f = sim.facility;
   return {
-    v: 3,
+    v: 4,
     savedAt: now,
     money: sim.money,
-    users: sim.users,
+    users: { ...sim.serviceUsers },
+    campaign: [Math.max(0, sim.campaign.until - sim.time), Math.max(0, sim.campaign.cooldownUntil - sim.time)],
     lifetimeEarned: sim.lifetimeEarned,
     incomePerSec: sim.incomePerSec,
     unlocks: [...sim.unlocks],
@@ -72,6 +90,7 @@ export function loadSave(save: SaveData): Simulation {
     upgrades: save.upgrades,
   });
   sim.lifetimeEarned = save.lifetimeEarned;
+  sim.campaign = { until: sim.time + save.campaign[0], cooldownUntil: sim.time + save.campaign[1] };
   const f = sim.facility;
   for (const slot of save.racks) f.rent(slot);
   for (const [id, model, slot, u, roles, paid, name, hv, bgp, down] of save.devices) {
@@ -131,8 +150,26 @@ export function parseSave(data: unknown): SaveData | null {
   const isNum = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
   const isInt = (n: unknown): n is number => Number.isInteger(n);
 
-  if (d.v !== 3) return null;
-  if (!isNum(d.savedAt) || !isNum(d.money) || !isNum(d.users) || d.users < 0) return null;
+  if (d.v !== 3 && d.v !== 4) return null;
+  if (!isNum(d.savedAt) || !isNum(d.money)) return null;
+  // ユーザー数: v3 はブログだけの数値
+  const users: Partial<Record<ServiceId, number>> = {};
+  if (d.v === 3) {
+    if (!isNum(d.users) || d.users < 0) return null;
+    users.blog = d.users;
+  } else {
+    if (!d.users || typeof d.users !== 'object') return null;
+    for (const [k, v] of Object.entries(d.users as Record<string, unknown>)) {
+      if (!SERVICE_IDS.includes(k as ServiceId)) continue;
+      if (!isNum(v) || v < 0) return null;
+      users[k as ServiceId] = v;
+    }
+  }
+  const campaign: [number, number] = [0, 0];
+  if (Array.isArray(d.campaign) && d.campaign.length === 2 && d.campaign.every((x) => isNum(x) && x >= 0)) {
+    campaign[0] = d.campaign[0] as number;
+    campaign[1] = d.campaign[1] as number;
+  }
   if (!isNum(d.lifetimeEarned) || !isNum(d.incomePerSec)) return null;
   if (![d.unlocks, d.disabled, d.racks, d.devices, d.cables].every(Array.isArray)) return null;
   if (!d.upgrades || typeof d.upgrades !== 'object') return null;
@@ -162,7 +199,11 @@ export function parseSave(data: unknown): SaveData | null {
   }
 
   const devices: SaveData['devices'] = [];
-  const okRoles = (roles: unknown[]) => roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId));
+  /** v4 はサービスつきの役割、v3 は役割の名前だけ(ブログの役割として読む) */
+  const okRoles = (roles: unknown[]): RoleKey[] =>
+    d.v === 3
+      ? roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId)).map((r) => roleKey('blog', r))
+      : roles.filter(isRoleKey);
   for (const item of d.devices as unknown[]) {
     // 古いセーブは 7 要素(仮想化の前)か 8 要素(BGP の前)
     if (!Array.isArray(item) || ![7, 8, 10].includes(item.length)) return null;
@@ -195,10 +236,11 @@ export function parseSave(data: unknown): SaveData | null {
   }
 
   return {
-    v: 3,
+    v: 4,
     savedAt: d.savedAt,
     money: d.money,
-    users: d.users,
+    users,
+    campaign,
     lifetimeEarned: d.lifetimeEarned,
     incomePerSec: d.incomePerSec,
     unlocks,

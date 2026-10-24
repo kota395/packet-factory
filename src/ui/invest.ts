@@ -11,11 +11,12 @@ import {
   type StageDef,
   type UpgradeDef,
 } from '../sim/economy';
+import { CAMPAIGN } from '../sim/config';
 import type { Simulation } from '../sim/simulation';
 import type { UnlockId, UpgradeId } from '../sim/types';
 import { money } from './format';
 
-type Item = { type: 'unlock'; id: UnlockId } | { type: 'upgrade'; id: UpgradeId };
+type Item = { type: 'unlock'; id: UnlockId } | { type: 'upgrade'; id: UpgradeId } | { type: 'campaign'; id: 'shopSale' };
 
 export function formatUpgradeEffect(def: UpgradeDef, level: number): string {
   return def.format(def.effect(level));
@@ -34,7 +35,7 @@ function stageOfUnlock(id: UnlockId): StageDef | null {
 }
 
 function describeFeature(effect: FeatureEffect): string {
-  return `単価 ×${effect.revenue}`;
+  return `ブログの単価 ×${effect.revenue}`;
 }
 
 const TAB_KEY = 'packet-factory:invest-tab';
@@ -42,6 +43,8 @@ const TAB_KEY = 'packet-factory:invest-tab';
 /** タブ(系統)の中身。段階の順に、まだ買っていない解放と強化を並べる */
 function lineItems(sim: Simulation, line: LineDef): Item[] {
   return [
+    // ショッピングを始めていれば、事業のタブの先頭にキャンペーン
+    ...(line.id === 'business' && sim.isServiceActive('shop') ? [{ type: 'campaign' as const, id: 'shopSale' as const }] : []),
     ...line.upgrades.map((id) => ({ type: 'upgrade' as const, id })),
     ...line.unlocks.filter((id) => !sim.unlocks.has(id)).map((id) => ({ type: 'unlock' as const, id })),
   ];
@@ -97,7 +100,9 @@ export class InvestPanel {
       const sim = this.getSim();
       const id = button.dataset.id!;
       const r =
-        button.dataset.type === 'unlock'
+        button.dataset.type === 'campaign'
+          ? sim.startCampaign()
+          : button.dataset.type === 'unlock'
           ? sim.unlock(id as UnlockId)
           : button.dataset.type === 'feature'
             ? sim.setFeatureEnabled(id as UnlockId, !sim.isFeatureActive(id as UnlockId))
@@ -133,11 +138,16 @@ export class InvestPanel {
       const blocker = this.blocker(sim, item);
       button.disabled = blocker !== null;
       button.title = blocker ?? '';
+      if (item.type === 'campaign') {
+        button.textContent = money(sim.campaignPrice());
+        const note = button.closest('.inv-item')?.querySelector<HTMLElement>('.inv-effect');
+        if (note) note.textContent = blocker && blocker.startsWith('資金') ? '打てます' : (blocker ?? '打てます');
+      }
     }
     // タブの印: そのタブに今買えるものがある
     for (const line of LINES) {
       const badge = this.tabs.querySelector<HTMLElement>(`button[data-tab="${line.id}"] .badge`);
-      if (badge) badge.hidden = !lineItems(sim, line).some((item) => this.blocker(sim, item) === null);
+      if (badge) badge.hidden = !lineItems(sim, line).some((item) => item.type !== 'campaign' && this.blocker(sim, item) === null);
     }
   }
 
@@ -149,6 +159,7 @@ export class InvestPanel {
   }
 
   private blocker(sim: Simulation, item: Item): string | null {
+    if (item.type === 'campaign') return sim.campaignError();
     return item.type === 'unlock' ? sim.canUnlock(item.id) : sim.canBuyUpgrade(item.id);
   }
 
@@ -194,13 +205,25 @@ export class InvestPanel {
   }
 
   private itemHtml(sim: Simulation, item: Item): string {
+    if (item.type === 'campaign') {
+      return row({
+        stage: null,
+        tag: '施策',
+        title: 'キャンペーン(ショッピング)',
+        desc: `払うとすぐ始まり、${CAMPAIGN.durationSec} 秒間 訪問が ×${CAMPAIGN.trafficMul}、注文の単価が ×${CAMPAIGN.revenueMul}。終わると ${CAMPAIGN.cooldownSec} 秒は打てない。急に増える流量に耐えられるよう、先に余裕を作っておく。`,
+        effect: '打てます',
+        cost: sim.campaignPrice(),
+        type: 'campaign',
+        id: 'shopSale',
+      });
+    }
     if (item.type === 'unlock') {
       const def = UNLOCK_BY_ID[item.id];
       const needs = def.requires && !sim.unlocks.has(def.requires) ? `要: ${UNLOCK_BY_ID[def.requires].name}` : '';
       const effect = def.effect ? describeFeature(def.effect) : '';
       return row({
         stage: stageOfUnlock(def.id),
-        tag: def.effect ? 'コンテンツ' : '解放',
+        tag: def.service ? 'サービス' : def.effect ? 'コンテンツ' : '解放',
         title: def.name,
         desc: def.description,
         effect: [effect, needs].filter(Boolean).join(' ・ '),

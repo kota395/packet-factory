@@ -1,20 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID } from '../src/sim/catalog';
-import { BLOG, RACK } from '../src/sim/config';
+import { BLOG_FEATURES, CAMPAIGN, RACK, SERVICES, WORK } from '../src/sim/config';
 import { createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
 import { forecastSeries, logistic, secondsUntil } from '../src/sim/forecast';
 import { MODEL_PRICES, PRICE_SCALE, START_MONEY, UNLOCK_PRICES, cablePrice } from '../src/sim/pricing';
-import type { ModelId, RoleId, UnlockId } from '../src/sim/types';
+import type { ModelId, RoleKey, ServiceId, UnlockId } from '../src/sim/types';
 
 const constant = (pv: number) => () => pv;
 const RICH = 1_000_000;
 
 /** 回線終端と ToR スイッチだけのラック 1 本 */
-function base(opts: { pv?: number; unlocks?: UnlockId[]; uplink?: number } = {}) {
+function base(opts: { pv?: number; traffic?: Partial<Record<ServiceId, number>>; unlocks?: UnlockId[]; uplink?: number } = {}) {
   const s = new Simulation({
     startMoney: RICH,
-    traffic: constant(opts.pv ?? 10),
+    traffic: opts.traffic
+      ? Object.fromEntries(Object.entries(opts.traffic).map(([k, v]) => [k, constant(v)]))
+      : constant(opts.pv ?? 10),
     unlocks: opts.unlocks,
     upgrades: { uplink: opts.uplink ?? 2, rackPower: 3 },
   });
@@ -25,7 +27,7 @@ function base(opts: { pv?: number; unlocks?: UnlockId[]; uplink?: number } = {})
   expect(s.connect({ device: isp.id, port: 0 }, { device: sw, port: 0 }).ok).toBe(true);
   let nextPort = 1;
   /** サーバを買って役割を付け、ToR につなぐ */
-  const server = (model: ModelId, u: number, roles: RoleId[], slot = 0, toSw = sw) => {
+  const server = (model: ModelId, u: number, roles: RoleKey[], slot = 0, toSw = sw) => {
     const r = s.buyDevice(model, slot, u);
     expect(r.ok, r.message).toBe(true);
     for (const role of roles) expect(s.toggleRole(r.id!, role).ok).toBe(true);
@@ -80,7 +82,7 @@ describe('物理層', () => {
 
   it('機器を売ると半額が戻り、つながっていたケーブルも外れる', () => {
     const { s, f, server } = base();
-    const id = server('srv-1u-e', 30, ['web']);
+    const id = server('srv-1u-e', 30, ['blog:web']);
     const before = s.money;
     const r = s.sellDevice(id);
     expect(r.ok).toBe(true);
@@ -91,9 +93,9 @@ describe('物理層', () => {
   it('解放していない機種や役割は使えない', () => {
     const { s, server } = base();
     expect(s.buyDevice('agg-10g', 0, 20).ok).toBe(false);
-    const id = server('srv-1u-e', 30, ['web']);
-    expect(s.toggleRole(id, 'cache').ok).toBe(false);
-    expect(s.toggleRole(s.facility.devices.values().next().value!.id, 'web').ok).toBe(false); // 回線終端
+    const id = server('srv-1u-e', 30, ['blog:web']);
+    expect(s.toggleRole(id, 'blog:cache').ok).toBe(false);
+    expect(s.toggleRole(s.facility.devices.values().next().value!.id, 'blog:web').ok).toBe(false); // 回線終端
   });
 });
 
@@ -108,13 +110,13 @@ describe('流量モデル', () => {
 
   it('db がない・回線から届かないとエラーになり、警告が出る', () => {
     const { s, server } = base();
-    server('srv-1u-e', 30, ['web']);
+    server('srv-1u-e', 30, ['blog:web']);
     let flow = run(s);
     expect(flow.success).toBe(0);
     expect(flow.problems.join()).toContain('db');
     // 別のスイッチにつながった web は回線から届かない
     const { s: s2, server: server2 } = base();
-    const lonely = server2('srv-1u-e', 30, ['web', 'db'], 0, -1);
+    const lonely = server2('srv-1u-e', 30, ['blog:web', 'blog:db'], 0, -1);
     flow = run(s2);
     expect(flow.success).toBe(0);
     expect(flow.problems.join()).toContain(s2.facility.devices.get(lonely)!.name);
@@ -123,13 +125,13 @@ describe('流量モデル', () => {
   it('エントリー機の db はディスク IO で先に詰まり、メモリの多い DB 向け機種に移すと捌ける', () => {
     const pv = 80;
     const { s, server } = base({ pv });
-    const small = server('srv-1u-e', 30, ['web', 'db']);
+    const small = server('srv-1u-e', 30, ['blog:web', 'blog:db']);
     let flow = run(s);
     expect(flow.devices.get(small)!.io).toBeGreaterThan(1);
     expect(flow.bottleneck!.label).toContain('ディスク IO');
     expect(flow.success).toBeLessThan(0.9);
-    const big = server('srv-2u-db', 20, ['db']);
-    s.toggleRole(small, 'db');
+    const big = server('srv-2u-db', 20, ['blog:db']);
+    s.toggleRole(small, 'blog:db');
     flow = run(s);
     expect(flow.devices.get(big)!.io).toBeLessThan(0.5);
     expect(flow.success).toBeGreaterThan(0.99);
@@ -137,32 +139,32 @@ describe('流量モデル', () => {
 
   it('LB がないとインターネットから届くのは web 1 台だけ。LB を置くと並べた web に分散する', () => {
     const { s, server } = base({ pv: 150, unlocks: ['lb'] });
-    server('srv-2u-db', 20, ['db']);
-    const w1 = server('srv-1u-e', 30, ['web']);
-    const w2 = server('srv-1u-e', 31, ['web']);
+    server('srv-2u-db', 20, ['blog:db']);
+    const w1 = server('srv-1u-e', 30, ['blog:web']);
+    const w2 = server('srv-1u-e', 31, ['blog:web']);
     let flow = run(s);
-    expect(flow.nodeLoads.get(w2)!.work.web ?? 0).toBe(0);
+    expect(flow.nodeLoads.get(w2)!.work['blog:web'] ?? 0).toBe(0);
     expect(flow.problems.join()).toContain('LB');
-    server('srv-1u-e', 32, ['lb']);
+    server('srv-1u-e', 32, ['blog:lb']);
     flow = run(s);
-    expect(flow.nodeLoads.get(w1)!.work.web).toBeCloseTo(75, 0);
-    expect(flow.nodeLoads.get(w2)!.work.web).toBeCloseTo(75, 0);
+    expect(flow.nodeLoads.get(w1)!.work['blog:web']).toBeCloseTo(75, 0);
+    expect(flow.nodeLoads.get(w2)!.work['blog:web']).toBeCloseTo(75, 0);
   });
 
   it('memcached があると db に行く読み込みが減る', () => {
     const { s, server } = base({ pv: 50, unlocks: ['cache'] });
-    const db = server('srv-2u-db', 20, ['db']);
-    server('srv-1u-d', 30, ['web']);
-    const before = run(s).nodeLoads.get(db)!.work.db!;
-    server('srv-1u-e', 31, ['cache']);
-    const after = run(s).nodeLoads.get(db)!.work.db!;
-    expect(after / before).toBeCloseTo(1 - BLOG.cacheHitRate, 1);
+    const db = server('srv-2u-db', 20, ['blog:db']);
+    server('srv-1u-d', 30, ['blog:web']);
+    const before = run(s).nodeLoads.get(db)!.work['blog:db']!;
+    server('srv-1u-e', 31, ['blog:cache']);
+    const after = run(s).nodeLoads.get(db)!.work['blog:db']!;
+    expect(after / before).toBeCloseTo(1 - WORK.cacheHitRate, 1);
   });
 
   it('回線契約の速度を超えると溢れる。画像を載せると回線が先に詰まる', () => {
     const { s, server } = base({ pv: 100, uplink: 0 });
-    server('srv-2u-db', 20, ['db']);
-    server('srv-1u-d', 30, ['web']);
+    server('srv-2u-db', 20, ['blog:db']);
+    server('srv-1u-d', 30, ['blog:web']);
     const plain = run(s);
     expect(plain.success).toBeGreaterThan(0.99);
     // 100 PV/秒 × 180KB = 144 Mbps > 100 Mbps
@@ -177,9 +179,9 @@ describe('流量モデル', () => {
     const { s, sw, server } = base({ pv: 400, unlocks: ['images'] });
     s.facility.rent(1);
     const sw2 = s.buyDevice('sw-24', 1, 40).id!;
-    const db = server('srv-2u-db', 20, ['db'], 1, -1);
+    const db = server('srv-2u-db', 20, ['blog:db'], 1, -1);
     s.connect({ device: db, port: 0 }, { device: sw2, port: 1 });
-    for (let i = 0; i < 3; i++) server('srv-1u-d', 30 + i, ['web']);
+    for (let i = 0; i < 3; i++) server('srv-1u-d', 30 + i, ['blog:web']);
     s.connect({ device: sw, port: 20 }, { device: sw2, port: 20 });
     const one = run(s);
     const uplink = one.links.find((l) => (l.a === sw && l.b === sw2) || (l.a === sw2 && l.b === sw))!;
@@ -196,8 +198,8 @@ describe('流量モデル', () => {
     // 回線 → スイッチ → サーバ A → サーバ B と数珠つなぎにしても B には届かない
     const a = s.buyDevice('srv-1u-e', 0, 30).id!;
     const b = s.buyDevice('srv-1u-e', 0, 31).id!;
-    s.toggleRole(b, 'web');
-    s.toggleRole(b, 'db');
+    s.toggleRole(b, 'blog:web');
+    s.toggleRole(b, 'blog:db');
     s.connect({ device: a, port: 0 }, { device: sw, port: 1 });
     s.connect({ device: a, port: 1 }, { device: b, port: 0 });
     expect(isp).toBeGreaterThan(0);
@@ -208,30 +210,30 @@ describe('流量モデル', () => {
 describe('レプリカ・仮想化・共有ストレージ', () => {
   it('レプリカは db から複製を受けて読み込みを肩代わりし、書き込みの反映も負担する', () => {
     const { s, server } = base({ pv: 200, unlocks: ['replication', 'comments'] });
-    const db = server('srv-2u-db', 20, ['db']);
-    for (let i = 0; i < 2; i++) server('srv-1u-d', 30 + i, ['web']);
+    const db = server('srv-2u-db', 20, ['blog:db']);
+    for (let i = 0; i < 2; i++) server('srv-1u-d', 30 + i, ['blog:web']);
     const before = run(s);
-    const r1 = server('srv-2u-db', 10, ['replica']);
-    const r2 = server('srv-2u-db', 12, ['replica']);
+    const r1 = server('srv-2u-db', 10, ['blog:replica']);
+    const r2 = server('srv-2u-db', 12, ['blog:replica']);
     const after = run(s);
-    const reads = 200 * BLOG.dbReads;
+    const reads = 200 * SERVICES.blog.work.dbReads;
     // LB がないので web は 1 台だけ。読み込みは 2 台のレプリカに半分ずつ
-    expect(before.nodeLoads.get(db)!.work.db!).toBeGreaterThan(reads * 0.9);
-    expect(after.nodeLoads.get(r1)!.work.replica!).toBeCloseTo(reads / 2, 0);
-    expect(after.nodeLoads.get(r2)!.work.replica!).toBeCloseTo(reads / 2, 0);
+    expect(before.nodeLoads.get(db)!.work['blog:db']!).toBeGreaterThan(reads * 0.9);
+    expect(after.nodeLoads.get(r1)!.work['blog:replica']!).toBeCloseTo(reads / 2, 0);
+    expect(after.nodeLoads.get(r2)!.work['blog:replica']!).toBeCloseTo(reads / 2, 0);
     // プライマリには書き込みだけが残る
-    expect(after.nodeLoads.get(db)!.work.db!).toBeCloseTo(200 * BLOG.dbWrites, 1);
+    expect(after.nodeLoads.get(db)!.work['blog:db']!).toBeCloseTo(200 * BLOG_FEATURES.commentWrites, 1);
     // 複製の分、レプリカのディスク IO は読み込みだけのときより多い
-    expect(after.nodeLoads.get(r1)!.ioOps).toBeGreaterThan(200 * BLOG.dbWrites * BLOG.dbWriteIo);
+    expect(after.nodeLoads.get(r1)!.ioOps).toBeGreaterThan(200 * BLOG_FEATURES.commentWrites * WORK.dbWriteIo);
   });
 
   it('db から届かないレプリカは使われない', () => {
     const { s, server } = base({ pv: 20, unlocks: ['replication'] });
-    server('srv-2u-db', 20, ['db']);
-    server('srv-1u-d', 30, ['web']);
-    const lonely = server('srv-2u-db', 10, ['replica'], 0, -1);
+    server('srv-2u-db', 20, ['blog:db']);
+    server('srv-1u-d', 30, ['blog:web']);
+    const lonely = server('srv-2u-db', 10, ['blog:replica'], 0, -1);
     const flow = run(s);
-    expect(flow.nodeLoads.get(lonely)!.work.replica ?? 0).toBe(0);
+    expect(flow.nodeLoads.get(lonely)!.work['blog:replica'] ?? 0).toBe(0);
     expect(flow.problems.join()).toContain('複製できず');
     expect(flow.success).toBe(1);
   });
@@ -241,14 +243,14 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     const host = server('srv-2u-hv', 20, []);
     expect(s.createVm(host, 'm').ok).toBe(false); // まだハイパーバイザではない
     expect(s.setHv(host, true).ok).toBe(true);
-    expect(s.toggleRole(host, 'web').ok).toBe(false);
+    expect(s.toggleRole(host, 'blog:web').ok).toBe(false);
     const web = s.createVm(host, 'm').id!;
     const db = s.createVm(host, 'l').id!;
-    s.toggleVmRole(web, 'web');
-    s.toggleVmRole(db, 'db');
+    s.toggleVmRole(web, 'blog:web');
+    s.toggleVmRole(db, 'blog:db');
     const flow = run(s);
     expect(flow.success).toBe(1);
-    expect(flow.nodeLoads.get(-web)!.work.web).toBeCloseTo(30, 0);
+    expect(flow.nodeLoads.get(-web)!.work['blog:web']).toBeCloseTo(30, 0);
     // 同じホストの VM 同士の通信はネットワークを通らない
     expect(flow.devices.get(host)!.gbps).toBeLessThan(0.01);
     // 256GB - 8GB(ハイパーバイザ)に 48GB の L は 4 台(と M 1 台)まで
@@ -265,8 +267,8 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     s.setHv(h1, true);
     s.setHv(h2, true);
     const vm = s.createVm(h1, 'm').id!;
-    s.toggleVmRole(vm, 'web');
-    s.toggleVmRole(vm, 'db');
+    s.toggleVmRole(vm, 'blog:web');
+    s.toggleVmRole(vm, 'blog:db');
     expect(run(s).success).toBe(1);
     expect(s.vmMoveInfo(vm, h2).downtimeMs).toBeGreaterThan(0);
     expect(s.moveVm(vm, h2).ok).toBe(true);
@@ -290,8 +292,8 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     const h = server('srv-2u-hv', 20, []);
     s.setHv(h, true);
     const vm = s.createVm(h, 'l').id!;
-    s.toggleVmRole(vm, 'web');
-    s.toggleVmRole(vm, 'db');
+    s.toggleVmRole(vm, 'blog:web');
+    s.toggleVmRole(vm, 'blog:db');
     const serviceOnly = run(s).devices.get(sw)!.gbps;
     s.setVmDisk(vm, 'shared');
     // ストレージ専用の 10G スイッチに、NAS とホストの 10G NIC(ポート 2)をつなぐ
@@ -312,8 +314,8 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     const h = server('srv-2u-hv', 20, []);
     s.setHv(h, true);
     const vm = s.createVm(h, 'm').id!;
-    s.toggleVmRole(vm, 'web');
-    s.toggleVmRole(vm, 'db');
+    s.toggleVmRole(vm, 'blog:web');
+    s.toggleVmRole(vm, 'blog:db');
     s.setVmDisk(vm, 'shared');
     const flow = run(s);
     expect(flow.success).toBe(0);
@@ -325,11 +327,11 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     const h = server('srv-2u-hv', 20, []);
     s.setHv(h, true);
     const vm = s.createVm(h, 's').id!;
-    s.toggleVmRole(vm, 'web');
+    s.toggleVmRole(vm, 'blog:web');
     const save = createSave(s, 1000);
     const b = loadSave(parseSave(JSON.parse(JSON.stringify(save)))!);
     expect(b.facility.devices.get(h)!.hv).toBe(true);
-    expect(b.facility.vms.get(vm)!.roles).toEqual(['web']);
+    expect(b.facility.vms.get(vm)!.roles).toEqual(['blog:web']);
   });
 });
 
@@ -347,8 +349,8 @@ describe('BGP による冗長化', () => {
     s.connect({ device: core, port: 1 }, { device: t1, port: 0 });
     s.connect({ device: core, port: 2 }, { device: t2, port: 0 });
     const srv = s.buyDevice('srv-2u-db', 0, 20).id!;
-    s.toggleRole(srv, 'web');
-    s.toggleRole(srv, 'db');
+    s.toggleRole(srv, 'blog:web');
+    s.toggleRole(srv, 'blog:db');
     s.connect({ device: srv, port: 0 }, { device: t1, port: 1 });
     s.connect({ device: srv, port: 1 }, { device: t2, port: 1 });
     return { s, f, core, t1, t2, srv };
@@ -429,9 +431,108 @@ describe('メトリクスと需要予測', () => {
     const io = [...s.metrics.resources.values()].find((r) => r.label === 'srv01 ディスク');
     expect(io?.rho.length).toBe(10);
     // 市場規模(1,500 人 = 15 PV/秒)ではキャパシティ(約 50)に届かない。広告で市場を広げると届く
-    expect(s.secondsToSaturation).toBeNull();
+    expect(s.secondsToSaturation()).toBeNull();
     s.upgrades.marketing = 4;
-    expect(s.secondsToSaturation).toBeGreaterThan(0);
+    expect(s.secondsToSaturation()).toBeGreaterThan(0);
+  });
+});
+
+describe('複数のサービス', () => {
+  it('サービスの役割は、そのサービスを始めるまで付けられない', () => {
+    const { s, server } = base();
+    const srv = server('srv-1u-e', 30, []);
+    expect(s.toggleRole(srv, 'shop:web').ok).toBe(false);
+    expect(s.toggleRole(srv, 'blog:search').ok).toBe(false); // ブログに検索はない
+    s.unlock('shop');
+    expect(s.toggleRole(srv, 'shop:web').ok).toBe(true);
+    expect(s.toggleRole(srv, 'shop:search').ok).toBe(true);
+    expect(s.toggleRole(srv, 'photo:media').ok).toBe(false);
+  });
+
+  it('同じサーバに相乗りさせると負荷が合算され、分ければ別々になる', () => {
+    const { s, server } = base({ traffic: { blog: 20, shop: 20 }, unlocks: ['shop'] });
+    const a = server('srv-2u-db', 10, ['blog:web', 'blog:db', 'shop:web', 'shop:db']);
+    const shared = run(s);
+    expect(shared.services.blog!.success).toBe(1);
+    expect(shared.services.shop!.success).toBe(1);
+    const both = shared.devices.get(a)!.cpu;
+    // ショッピングを別のサーバへ
+    const b = server('srv-2u-db', 20, ['shop:web', 'shop:db']);
+    s.toggleRole(a, 'shop:web');
+    s.toggleRole(a, 'shop:db');
+    const split = run(s);
+    expect(split.devices.get(a)!.cpu).toBeLessThan(both);
+    expect(split.devices.get(b)!.cpu).toBeGreaterThan(0);
+    expect(split.services.shop!.instances.web).toEqual([b]);
+  });
+
+  it('検索サーバがなければ db が検索を肩代わりし、search を置くと db が軽くなる', () => {
+    const { s, server } = base({ traffic: { blog: 0, shop: 30 }, unlocks: ['shop'] });
+    server('srv-1u-e', 30, ['shop:web']);
+    const db = server('srv-2u-db', 20, ['shop:db']);
+    const before = run(s);
+    expect(before.problems.join()).toContain('search');
+    const dbCpu = before.devices.get(db)!.cpu;
+    const search = server('srv-1u-d', 28, ['shop:search']);
+    const after = run(s);
+    expect(after.devices.get(db)!.cpu).toBeLessThan(dbCpu * 0.5);
+    expect(after.nodeLoads.get(search)!.work['shop:search']).toBeCloseTo(30 * SERVICES.shop.work.search!.perPv, 1);
+  });
+
+  it('写真共有: media・worker がなければ web が肩代わりし、置けばそちらへ流れる', () => {
+    const { s, server } = base({ traffic: { blog: 0, photo: 10 }, unlocks: ['shop', 'photo'] });
+    const web = server('srv-2u-db', 10, ['photo:web', 'photo:db']);
+    const before = run(s);
+    expect(before.services.photo!.success).toBe(1);
+    expect(before.nodeLoads.get(web)!.work['photo:web']).toBeGreaterThan(10);
+    const media = server('srv-2u-db', 20, ['photo:media']);
+    const worker = server('srv-1u-d', 30, ['photo:worker']);
+    const after = run(s);
+    const w = SERVICES.photo.work;
+    expect(after.nodeLoads.get(worker)!.work['photo:worker']).toBeCloseTo(10 * w.upload!.perPv, 3);
+    expect(after.nodeLoads.get(media)!.work['photo:media']).toBeCloseTo(10 * w.media!.perPv, 1);
+    expect(after.nodeLoads.get(media)!.ioOps).toBeGreaterThan(0);
+    expect(after.problems.join()).not.toContain('肩代わり');
+  });
+
+  it('キャンペーン: 払うとすぐ訪問が増え、終わるとクールタイム', () => {
+    const s = new Simulation({ startMoney: RICH, unlocks: ['shop'], startUsers: { shop: 1000 } });
+    const pv0 = s.trafficOf('shop', s.time);
+    const money = s.money;
+    expect(s.startCampaign().ok).toBe(true);
+    expect(money - s.money).toBe(s.campaignPrice());
+    expect(s.trafficOf('shop', s.time)).toBeCloseTo(pv0 * CAMPAIGN.trafficMul, 6);
+    expect(s.startCampaign().ok).toBe(false);
+    s.step(CAMPAIGN.durationSec * 1000 + 200);
+    expect(s.campaignActive).toBe(false);
+    expect(s.campaignError()).toContain('あと');
+    s.step(CAMPAIGN.cooldownSec * 1000);
+    expect(s.campaignError()).toBeNull();
+  });
+
+  it('キャパシティはサービスごとにも見積もる', () => {
+    const { s, server } = base({ traffic: { blog: 10, shop: 10 }, unlocks: ['shop'] });
+    server('srv-2u-db', 10, ['blog:web', 'blog:db']);
+    server('srv-1u-e', 20, ['shop:web', 'shop:db']);
+    s.estimateCapacity();
+    expect(s.capacityOf('blog')).toBeGreaterThan(s.capacityOf('shop'));
+    expect(s.capacityOf('photo')).toBe(0);
+    expect(s.capacityPv).toBeGreaterThan(20);
+  });
+
+  it('v3(ブログだけの版)のセーブは、役割をブログのものとして読み込む', () => {
+    const v4 = createSave(newGame(), 1000);
+    const v3 = {
+      ...v4,
+      v: 3,
+      users: 500,
+      devices: v4.devices.map((d) => [...d.slice(0, 4), d[4].map((r) => r.split(':')[1]), ...d.slice(5)]),
+    };
+    const parsed = parseSave(v3)!;
+    expect(parsed.v).toBe(4);
+    expect(parsed.users.blog).toBe(500);
+    expect(parsed.devices.find((d) => d[4].length)![4]).toEqual(['blog:web', 'blog:db']);
+    expect(loadSave(parsed).flow.services.blog!.success).toBe(1);
   });
 });
 
@@ -477,8 +578,8 @@ describe('経済', () => {
 describe('セーブ', () => {
   it('保存 → 文字列化 → 復元で同じ構成になる', () => {
     const { s, server } = base({ unlocks: ['lb'] });
-    server('srv-2u-db', 20, ['db']);
-    server('srv-1u-e', 30, ['web', 'lb']);
+    server('srv-2u-db', 20, ['blog:db']);
+    server('srv-1u-e', 30, ['blog:web', 'blog:lb']);
     s.step(2000);
     const save = createSave(s, 1000);
     const decoded = decodeSave(encodeSave(save));

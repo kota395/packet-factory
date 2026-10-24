@@ -1,15 +1,17 @@
 import { MODEL_BY_ID } from './catalog';
 import {
+  BLOG_FEATURES,
+  CAMPAIGN,
   CHURN,
   DIFFICULTY,
   GROWTH_RATE,
   MIN_USERS,
   PV_PER_USER,
-  REVENUE_PER_PV,
   METRICS,
-  START_USERS,
+  SERVICES,
   TICK_MS,
   VIRT,
+  type Workload,
 } from './config';
 import { secondsUntil } from './forecast';
 import {
@@ -21,7 +23,7 @@ import {
   upgradeCost,
 } from './economy';
 import { Facility, type Cable, type Device } from './facility';
-import { computeFlow, type FlowResult } from './flow';
+import { computeFlow, type FlowResult, type ServiceLoad } from './flow';
 import { Metrics, type Snapshot } from './metrics';
 import {
   RACK_PRICE,
@@ -29,10 +31,23 @@ import {
   START_MONEY,
   UPKEEP,
   cablePrice,
+  campaignPrice,
   growingPrice,
   modelPrice,
 } from './pricing';
-import type { DiskKind, ModelId, PortRef, RoleId, UnlockId, UpgradeId, VmSize } from './types';
+import {
+  SERVICE_IDS,
+  splitRole,
+  type DiskKind,
+  type ModelId,
+  type PortRef,
+  type RoleId,
+  type RoleKey,
+  type ServiceId,
+  type UnlockId,
+  type UpgradeId,
+  type VmSize,
+} from './types';
 
 export interface ActionResult {
   ok: boolean;
@@ -42,16 +57,28 @@ export interface ActionResult {
 
 export interface SimOptions {
   startMoney?: number;
-  startUsers?: number;
-  /** ページビュー/秒を固定の関数で与える(テスト用)。指定するとユーザーの増減を行わない */
-  traffic?: (tMs: number) => number;
+  /** ブログの最初のユーザー数(数値)か、サービスごとのユーザー数 */
+  startUsers?: number | Partial<Record<ServiceId, number>>;
+  /**
+   * ページビュー/秒を固定の関数で与える(テスト用)。関数ならブログ、サービスごとに与えることもできる
+   * (与えていないサービスは 0)。指定するとユーザーの増減を行わない
+   */
+  traffic?: ((tMs: number) => number) | Partial<Record<ServiceId, (tMs: number) => number>>;
   unlocks?: Iterable<UnlockId>;
   disabledFeatures?: Iterable<UnlockId>;
   upgrades?: Partial<Record<UpgradeId, number>>;
 }
 
-/** 役割を割り当てるのに必要な解放(web と db は最初から使える) */
+/** 役割を割り当てるのに必要な解放(web と db は最初から使える。search・media・worker はそれを使うサービスを始めれば使える) */
 const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = { lb: 'lb', cache: 'cache', replica: 'replication' };
+
+/** キャンペーンの状態(シミュレーション時刻 ms) */
+export interface CampaignState {
+  /** この時刻まで続く */
+  until: number;
+  /** この時刻まで次を打てない */
+  cooldownUntil: number;
+}
 
 /**
  * ゲーム全体の状態。物理層(Facility)と、流量モデルによる計算、お金とユーザーを持つ。
@@ -60,8 +87,11 @@ const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = { lb: 'lb', cache: 'cache
 export class Simulation {
   time = 0;
   money: number;
-  users: number;
+  /** サービスごとのユーザー数(始めていないサービスも、始めたときの値を持っておく) */
+  readonly serviceUsers: Record<ServiceId, number>;
   lifetimeEarned = 0;
+  /** ショッピングのキャンペーン */
+  campaign: CampaignState = { until: 0, cooldownUntil: 0 };
   /** 投資のたびに増える。UI の再構築判定に使う */
   purchaseVersion = 0;
   readonly facility = new Facility();
@@ -72,13 +102,15 @@ export class Simulation {
   /** 直近の流量計算の結果 */
   flow: FlowResult;
 
-  private readonly fixedTraffic: ((tMs: number) => number) | null;
+  private readonly fixedTraffic: Partial<Record<ServiceId, (tMs: number) => number>> | null;
   private pendingMs = 0;
 
   constructor(opts: SimOptions = {}) {
     this.money = opts.startMoney ?? START_MONEY;
-    this.users = opts.startUsers ?? START_USERS;
-    this.fixedTraffic = opts.traffic ?? null;
+    this.serviceUsers = Object.fromEntries(SERVICE_IDS.map((id) => [id, SERVICES[id].startUsers])) as Record<ServiceId, number>;
+    if (typeof opts.startUsers === 'number') this.serviceUsers.blog = opts.startUsers;
+    else if (opts.startUsers) Object.assign(this.serviceUsers, opts.startUsers);
+    this.fixedTraffic = typeof opts.traffic === 'function' ? { blog: opts.traffic } : (opts.traffic ?? null);
     this.unlocks = new Set(opts.unlocks ?? []);
     this.upgrades = { ...emptyUpgrades(), ...opts.upgrades };
     this.disabledFeatures = new Set(opts.disabledFeatures ?? []);
@@ -91,8 +123,33 @@ export class Simulation {
 
   // ---------------------------------------------------------------- 経済の参照
 
+  /** そのサービスを始めているか(ブログは最初から) */
+  isServiceActive(id: ServiceId): boolean {
+    return id === 'blog' || this.unlocks.has(id);
+  }
+
+  /** 始めているサービス */
+  get activeServices(): ServiceId[] {
+    return SERVICE_IDS.filter((id) => this.isServiceActive(id));
+  }
+
+  /** 始めているサービスのユーザー数の合計 */
+  get users(): number {
+    return this.activeServices.reduce((s, id) => s + this.serviceUsers[id], 0);
+  }
+
+  set users(v: number) {
+    this.serviceUsers.blog = v;
+  }
+
+  /** サービスの市場規模(潜在ユーザー数) */
+  marketOf(id: ServiceId): number {
+    return SERVICES[id].baseMarket * UPGRADE_BY_ID.marketing.effect(this.upgrades.marketing);
+  }
+
+  /** 始めているサービスの市場規模の合計 */
   get marketSize(): number {
-    return UPGRADE_BY_ID.marketing.effect(this.upgrades.marketing);
+    return this.activeServices.reduce((s, id) => s + this.marketOf(id), 0);
   }
 
   get uplinkGbps(): number {
@@ -103,11 +160,24 @@ export class Simulation {
     return UPGRADE_BY_ID.rackPower.effect(this.upgrades.rackPower);
   }
 
-  /** 1 ページビューあたりの収益 */
-  get revenuePerPv(): number {
+  /** サービスの 1 ページビューあたりの収益 */
+  revenuePerPv(id: ServiceId = 'blog'): number {
     let m = UPGRADE_BY_ID.monetize.effect(this.upgrades.monetize);
-    for (const u of UNLOCKS) if (u.effect && this.isFeatureActive(u.id)) m *= u.effect.revenue;
-    return REVENUE_PER_PV * m;
+    // 画像投稿・コメントはブログの機能
+    if (id === 'blog') for (const u of UNLOCKS) if (u.effect && this.isFeatureActive(u.id)) m *= u.effect.revenue;
+    if (id === 'shop' && this.campaignActive) m *= CAMPAIGN.revenueMul;
+    return SERVICES[id].revenuePerPv * m;
+  }
+
+  /** サービスの 1 ページビューあたりの仕事量(機能のオン/オフを反映) */
+  workloadOf(id: ServiceId): Workload {
+    const w = SERVICES[id].work;
+    if (id !== 'blog') return w;
+    return {
+      ...w,
+      pageKB: w.pageKB + (this.isFeatureActive('images') ? BLOG_FEATURES.imageKB : 0),
+      dbWrites: w.dbWrites + (this.isFeatureActive('comments') ? BLOG_FEATURES.commentWrites : 0),
+    };
   }
 
   /** 維持費の内訳($/秒) */
@@ -128,22 +198,66 @@ export class Simulation {
     return this.metrics.rolling.revenuePerSec - this.upkeepPerSec;
   }
 
-  /** 時刻 t のページビュー/秒 */
-  trafficAt(tMs: number): number {
-    if (this.fixedTraffic) return this.fixedTraffic(tMs);
+  /** 時刻 t のサービスのページビュー/秒(始めていなければ 0) */
+  trafficOf(id: ServiceId, tMs: number): number {
+    if (!this.isServiceActive(id)) return 0;
+    if (this.fixedTraffic) return this.fixedTraffic[id]?.(tMs) ?? 0;
     const wave = 1 + DIFFICULTY.dayWave * Math.sin((2 * Math.PI * tMs) / DIFFICULTY.dayCycleMs);
-    return this.users * PV_PER_USER * wave;
+    const boost = id === 'shop' && this.campaignActive ? CAMPAIGN.trafficMul : 1;
+    return this.serviceUsers[id] * PV_PER_USER * wave * boost;
+  }
+
+  /** 時刻 t のページビュー/秒(すべてのサービスの合計) */
+  trafficAt(tMs: number): number {
+    return this.activeServices.reduce((s, id) => s + this.trafficOf(id, tMs), 0);
+  }
+
+  // ---------------------------------------------------------------- キャンペーン
+
+  get campaignActive(): boolean {
+    return this.campaign.until > this.time;
+  }
+
+  campaignPrice(): number {
+    return campaignPrice(this.serviceUsers.shop);
+  }
+
+  campaignError(): string | null {
+    if (!this.isServiceActive('shop')) return `投資の「${UNLOCK_BY_ID.shop.name}」が必要です`;
+    if (this.campaignActive) return 'キャンペーン中です';
+    if (this.campaign.cooldownUntil > this.time) {
+      return `次に打てるまであと ${Math.ceil((this.campaign.cooldownUntil - this.time) / 1000)} 秒`;
+    }
+    if (this.money < this.campaignPrice()) return `資金が足りません($${this.campaignPrice()} 必要)`;
+    return null;
+  }
+
+  /** キャンペーンを打つ。払った瞬間に始まり、終わるとクールタイム */
+  startCampaign(): ActionResult {
+    const err = this.campaignError();
+    if (err) return { ok: false, message: err };
+    this.money -= this.campaignPrice();
+    this.campaign = {
+      until: this.time + CAMPAIGN.durationSec * 1000,
+      cooldownUntil: this.time + (CAMPAIGN.durationSec + CAMPAIGN.cooldownSec) * 1000,
+    };
+    this.purchaseVersion++;
+    this.refreshFlow();
+    return { ok: true, message: `キャンペーンを始めました(${CAMPAIGN.durationSec} 秒、訪問 ×${CAMPAIGN.trafficMul})` };
   }
 
   isFeatureActive(id: UnlockId): boolean {
     return this.unlocks.has(id) && !this.disabledFeatures.has(id);
   }
 
-  /** 割り当てられる役割 */
+  /** 解放済みの役割の種類 */
   get availableRoles(): Set<RoleId> {
     const roles = new Set<RoleId>(['web', 'db']);
     for (const [role, unlock] of Object.entries(ROLE_UNLOCK) as [RoleId, UnlockId][]) {
       if (this.unlocks.has(unlock)) roles.add(role);
+    }
+    for (const id of this.activeServices) {
+      for (const r of SERVICES[id].roles) if (!ROLE_UNLOCK[r]) roles.add(r);
     }
     return roles;
   }
@@ -256,21 +370,24 @@ export class Simulation {
     return { ok: true, message: `${this.facility.portName(c.a)} ⇄ ${this.facility.portName(c.b)} のケーブルを抜きました` };
   }
 
-  roleError(id: number, role: RoleId): string | null {
+  roleError(id: number, role: RoleKey): string | null {
     const d = this.facility.devices.get(id);
     if (!d || MODEL_BY_ID[d.model].category !== 'server') return '役割はサーバにだけ割り当てられます';
     if (d.hv) return 'ハイパーバイザには役割を付けられません。VM に付けてください';
     return this.roleUnlockError(role);
   }
 
-  private roleUnlockError(role: RoleId): string | null {
+  private roleUnlockError(key: RoleKey): string | null {
+    const [service, role] = splitRole(key);
+    if (!SERVICES[service].roles.includes(role)) return `${SERVICES[service].name}には役割「${role}」はありません`;
+    if (!this.isServiceActive(service)) return `投資の「${UNLOCK_BY_ID[service as UnlockId].name}」が必要です`;
     const unlock = ROLE_UNLOCK[role];
     if (unlock && !this.unlocks.has(unlock)) return `投資の「${UNLOCK_BY_ID[unlock].name}」が必要です`;
     return null;
   }
 
   /** 役割の割り当てを切り替える */
-  toggleRole(id: number, role: RoleId): ActionResult {
+  toggleRole(id: number, role: RoleKey): ActionResult {
     const d = this.facility.devices.get(id);
     const err = this.roleError(id, role);
     if (!d || err) return { ok: false, message: err ?? '機器が見つかりません' };
@@ -407,12 +524,12 @@ export class Simulation {
     };
   }
 
-  vmRoleError(id: number, role: RoleId): string | null {
+  vmRoleError(id: number, role: RoleKey): string | null {
     if (!this.facility.vms.has(id)) return 'VM が見つかりません';
     return this.roleUnlockError(role);
   }
 
-  toggleVmRole(id: number, role: RoleId): ActionResult {
+  toggleVmRole(id: number, role: RoleKey): ActionResult {
     const vm = this.facility.vms.get(id);
     const err = this.vmRoleError(id, role);
     if (!vm || err) return { ok: false, message: err ?? 'VM が見つかりません' };
@@ -503,46 +620,88 @@ export class Simulation {
 
   /**
    * 今の構成で捌けるページビュー/秒の見積もり(成功率 METRICS.capacitySuccess を保てる最大)。
+   *  - capacityPv: すべてのサービスの流量を同じ倍率で増やしたときの、合計の上限
+   *  - capacityOf: そのサービスだけを増やしたとき(ほかは今の流量のまま)の、そのサービスの上限
    * 流量を変えて計算し直す二分探索なので、数秒ごとにだけ更新する
    */
   capacityPv = 0;
+  readonly capacityBy: Partial<Record<ServiceId, number>> = {};
   private capacityAt = -Infinity;
 
+  capacityOf(id: ServiceId): number {
+    return this.capacityBy[id] ?? 0;
+  }
+
+  /** f(x) が成り立つ最大の x(start から倍々に広げてから二分探索) */
+  private static searchMax(ok: (x: number) => boolean, start: number): number {
+    if (!ok(start / 1000)) return 0;
+    let lo = start / 1000;
+    let hi = Math.max(start, lo * 2);
+    while (ok(hi) && hi < 1e8) {
+      lo = hi;
+      hi *= 2;
+    }
+    for (let i = 0; i < 14; i++) {
+      const mid = (lo + hi) / 2;
+      if (ok(mid)) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  }
+
   estimateCapacity(): number {
-    const ok = (pv: number) => this.computeFlow(pv).success >= METRICS.capacitySuccess;
-    let cap = 0;
-    if (ok(0.5)) {
-      let lo = 0.5;
-      let hi = Math.max(1, this.trafficAt(this.time)) * 2;
-      while (ok(hi) && hi < 1e8) {
-        lo = hi;
-        hi *= 2;
+    const now = Object.fromEntries(this.activeServices.map((id) => [id, this.trafficOf(id, this.time)])) as Partial<
+      Record<ServiceId, number>
+    >;
+    const success = (pv: Partial<Record<ServiceId, number>>) => this.computeFlow(pv);
+    const target = METRICS.capacitySuccess;
+    // 合計: 今の割合のまま全体を増やす(まだ流量がなければ均等に)
+    const total = Object.values(now).reduce((a, b) => a + b!, 0);
+    const ids = this.activeServices;
+    const share = (id: ServiceId) => (total > 0 ? now[id]! / total : 1 / ids.length);
+    this.capacityPv = Simulation.searchMax(
+      (x) => success(Object.fromEntries(ids.map((id) => [id, x * share(id)]))).success >= target,
+      Math.max(1, total) * 2,
+    );
+    for (const id of SERVICE_IDS) {
+      if (!this.isServiceActive(id)) {
+        delete this.capacityBy[id];
+        continue;
       }
-      for (let i = 0; i < 14; i++) {
-        const mid = (lo + hi) / 2;
-        if (ok(mid)) lo = mid;
-        else hi = mid;
-      }
-      cap = lo;
+      this.capacityBy[id] = Simulation.searchMax(
+        (x) => (success({ ...now, [id]: x }).services[id]?.success ?? 0) >= target,
+        Math.max(1, now[id] ?? 0) * 2,
+      );
     }
     // 見積もりの計算で共有の経路データを使い回すので、今の流量で計算し直しておく
     this.refreshFlow();
-    this.capacityPv = cap;
     this.capacityAt = this.time;
-    return cap;
+    return this.capacityPv;
   }
 
-  /** 需要がキャパシティに届くまでの秒数(広告で市場を広げない場合)。届かないなら null、もう超えていれば 0 */
-  get secondsToSaturation(): number | null {
-    return secondsUntil(this.users, this.marketSize, GROWTH_RATE, this.capacityPv / PV_PER_USER);
+  /**
+   * 需要がキャパシティに届くまでの秒数(広告で市場を広げない場合)。届かないなら null、もう超えていれば 0。
+   * サービスを指定しなければ、いちばん早く届くサービス
+   */
+  secondsToSaturation(id?: ServiceId): number | null {
+    if (!id) {
+      const all = this.activeServices.map((s) => this.secondsToSaturation(s)).filter((x): x is number => x !== null);
+      return all.length ? Math.min(...all) : null;
+    }
+    const boost = id === 'shop' && this.campaignActive ? CAMPAIGN.trafficMul : 1;
+    return secondsUntil(this.serviceUsers[id], this.marketOf(id), GROWTH_RATE, this.capacityOf(id) / PV_PER_USER / boost);
   }
 
-  private computeFlow(pv = this.trafficAt(this.time)): FlowResult {
+  /** 流量を計算する。pv を与えればそのページビュー/秒で(キャパシティの見積もり用) */
+  private computeFlow(pv?: Partial<Record<ServiceId, number>>): FlowResult {
+    const services: ServiceLoad[] = this.activeServices.map((id) => ({
+      id,
+      pv: pv ? (pv[id] ?? 0) : this.trafficOf(id, this.time),
+      work: this.workloadOf(id),
+    }));
     return computeFlow(this.facility, {
-      pv,
+      services,
       uplinkGbps: this.uplinkGbps,
-      images: this.isFeatureActive('images'),
-      comments: this.isFeatureActive('comments'),
       roles: this.availableRoles,
       now: this.time,
       bgp: this.unlocks.has('bgp'),
@@ -556,12 +715,24 @@ export class Simulation {
     this.rollFailures(dt);
     const flow = this.computeFlow();
     this.flow = flow;
+    const parts = [];
+    let revenue = 0;
+    let served = 0;
+    for (const sf of Object.values(flow.services)) {
+      const pv = sf.pv * dt;
+      const ok = pv * sf.success;
+      const rev = ok * this.revenuePerPv(sf.id);
+      served += ok;
+      revenue += rev;
+      parts.push({ id: sf.id, dtMs: TICK_MS, pv, errors: Math.max(0, pv - ok), latencyMs: sf.latencyMs, p99Ms: sf.p99Ms, revenue: rev });
+    }
     const pv = flow.pv * dt;
-    const served = pv * flow.success;
-    const revenue = served * this.revenuePerPv;
     this.money += revenue - this.upkeepPerSec * dt;
     this.lifetimeEarned += revenue;
-    this.metrics.record(TICK_MS, pv, pv - served, flow.latencyMs, flow.p99Ms, revenue);
+    this.metrics.record(
+      { dtMs: TICK_MS, pv, errors: Math.max(0, pv - served), latencyMs: flow.latencyMs, p99Ms: flow.p99Ms, revenue },
+      parts,
+    );
     if (!this.fixedTraffic) this.updateUsers(dt);
     if (this.time - this.capacityAt >= METRICS.capacityEveryMs) this.estimateCapacity();
     this.metrics.advance(this.time, () => this.snapshot());
@@ -597,18 +768,28 @@ export class Simulation {
       upkeep: this.upkeepPerSec,
       capacity: this.capacityPv,
       resources,
+      services: this.activeServices.map((id) => ({
+        id,
+        users: this.serviceUsers[id],
+        market: this.marketOf(id),
+        capacity: this.capacityOf(id),
+      })),
     };
   }
 
-  /** ロジスティック成長 − 品質による離脱 */
+  /** サービスごとに、ロジスティック成長 − 品質による離脱(+ キャンペーンで残るユーザー) */
   private updateUsers(dt: number): void {
-    const u = this.users;
-    const growth = GROWTH_RATE * u * (1 - u / this.marketSize);
-    const r = this.metrics.rolling;
-    let churn = 0;
-    if (r.errorRate > CHURN.errorThreshold) churn += CHURN.errorFactor * (r.errorRate - CHURN.errorThreshold);
-    if (r.p99Ms > CHURN.slowMs) churn += CHURN.slowRate;
-    this.users = Math.max(MIN_USERS, u + (growth - churn * u) * dt);
+    for (const id of this.activeServices) {
+      const u = this.serviceUsers[id];
+      const market = this.marketOf(id);
+      let growth = GROWTH_RATE * u * (1 - u / market);
+      if (id === 'shop' && this.campaignActive && u < market) growth += (CAMPAIGN.retainRate * market) / CAMPAIGN.durationSec;
+      const r = this.metrics.rollingOf(id);
+      let churn = 0;
+      if (r.errorRate > CHURN.errorThreshold) churn += CHURN.errorFactor * (r.errorRate - CHURN.errorThreshold);
+      if (r.p99Ms > CHURN.slowMs) churn += CHURN.slowRate;
+      this.serviceUsers[id] = Math.max(MIN_USERS, u + (growth - churn * u) * dt);
+    }
   }
 }
 

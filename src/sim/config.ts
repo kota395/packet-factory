@@ -2,14 +2,14 @@
  * ゲームの調整値。数値はここで変えれば全体に反映される。
  *  - 列とラック …… ROW / RACK / UPLINK_LEVELS_GBPS
  *  - ケーブルの長さ …… CABLE
- *  - ブログの仕事量(1 ページビューあたり)…… BLOG
+ *  - サービスの仕事量(1 ページビューあたり)…… WORK / SERVICES / BLOG_FEATURES / CAMPAIGN
  *  - ユーザーの増減 …… ユーザー / CHURN
  *  - 機器の性能 …… catalog.ts
  *  - 価格・維持費 …… pricing.ts
  *  - 投資の効果と段階 …… economy.ts
  * 設計は docs/design.md。変えたら `npm run balance` で進行の速さを確認する。
  */
-import type { RoleId } from './types';
+import type { RoleId, ServiceId } from './types';
 
 // ---- 列とラック -------------------------------------------------------
 export const ROW = {
@@ -41,28 +41,19 @@ export const CABLE = {
 /** 流量を計算し直す間隔(シミュレーション時間 ms) */
 export const TICK_MS = 200;
 
-// ---- ブログの仕事量(1 ページビューあたり) ----------------------------
-export const BLOG = {
+// ---- 仕事量 -----------------------------------------------------------
+/** どのサービスでも共通の仕事量(1 リクエスト・1 クエリあたり) */
+export const WORK = {
   /** リクエストの大きさ(KB) */
   requestKB: 1,
-  /** 返すページ(HTML など)の大きさ(KB) */
-  pageKB: 30,
-  /** 画像投稿を入れたときに 1 ページに載る画像(KB) */
-  imageKB: 150,
-  /** web の CPU 時間(コア性能 1.0 で ms) */
-  webCpuMs: 12,
-  /** LB の CPU 時間(ms) */
+  /** LB の CPU 時間(コア性能 1.0 で ms) */
   lbCpuMs: 0.2,
-  /** db への読み込みクエリ数 */
-  dbReads: 3,
+  /** db の読み込み 1 回の CPU 時間(ms)・返るデータ(KB)・クエリの大きさ(KB) */
   dbReadCpuMs: 1.2,
-  /** 読み込み 1 回で返るデータ(KB)とクエリの大きさ(KB) */
   dbReadKB: 4,
   queryKB: 0.5,
-  /** コメント機能を入れたあとの、1 ページあたりの書き込み数 */
-  dbWrites: 0.05,
+  /** 書き込み 1 回の CPU 時間(ms)とディスク IO 数 */
   dbWriteCpuMs: 3,
-  /** 書き込み 1 回のディスク IO 数 */
   dbWriteIo: 3,
   /** 読み込みがディスクに行く割合 = この値 ÷ db に使えるメモリ(GB)。メモリが多いほどキャッシュに乗る */
   dbMissPerGB: 2.4,
@@ -75,8 +66,156 @@ export const BLOG = {
   cacheCpuMs: 0.05,
 } as const;
 
-/** 役割ごとに使うメモリ(GB)。db とレプリカはサーバの残りのメモリを読み込みのキャッシュに使う */
-export const ROLE_MEM_GB: Readonly<Record<RoleId, number>> = { web: 1, lb: 0.5, cache: 2, db: 1, replica: 1 };
+/**
+ * サービスの 1 ページビューあたりの仕事量。
+ *  - search: 検索。役割「search」がなければ db が LIKE 検索で肩代わりする(重い)
+ *  - media: 画像・動画の配信。ページとは別のリクエストで、役割「media」がなければ web が配る
+ *  - upload: 投稿。web が受けて、役割「worker」が加工(サムネイル・エンコード)して media に保存する。
+ *    worker がなければ web が加工する
+ */
+export interface Workload {
+  /** 返すページ(HTML など)の大きさ(KB) */
+  readonly pageKB: number;
+  /** web の CPU 時間(ms) */
+  readonly webCpuMs: number;
+  /** db への読み込みクエリ数と書き込み数 */
+  readonly dbReads: number;
+  readonly dbWrites: number;
+  readonly search?: {
+    /** 1 ページあたりの検索の回数 */
+    readonly perPv: number;
+    /** 検索サーバの CPU 時間(ms)と返す結果(KB) */
+    readonly cpuMs: number;
+    readonly resultKB: number;
+    /** 検索の索引がメモリに乗らない割合 = この値 ÷ 使えるメモリ(GB)。外れるとディスク IO が 1 回 */
+    readonly missPerGB: number;
+    /** search がなく db が肩代わりするときの CPU 時間(ms)と、読むディスク IO の数 */
+    readonly dbCpuMs: number;
+    readonly dbIo: number;
+  };
+  readonly media?: {
+    /** 1 ページあたりの取得の回数と 1 回の大きさ(KB) */
+    readonly perPv: number;
+    readonly kb: number;
+    /** 1 回の CPU 時間(ms) */
+    readonly cpuMs: number;
+    /** 1 回のディスク IO 数(メモリに乗らなかったとき) */
+    readonly io: number;
+    /** メモリに乗らない割合 = この値 ÷ 使えるメモリ(GB) */
+    readonly missPerGB: number;
+  };
+  readonly upload?: {
+    /** 1 ページあたりの投稿の数と 1 件の大きさ(KB) */
+    readonly perPv: number;
+    readonly kb: number;
+    /** 加工(サムネイル生成・エンコード)の CPU 時間(ms) */
+    readonly workerCpuMs: number;
+    /** 保存する大きさ(KB)と、保存のディスク IO 数 */
+    readonly storedKB: number;
+    readonly storeIo: number;
+  };
+}
+
+export interface ServiceDef {
+  readonly name: string;
+  /** このサービスで使う役割(並び順は UI の表示順) */
+  readonly roles: readonly RoleId[];
+  /** 始めたときのユーザー数・市場規模(広告 Lv0)・1 ページビューあたりの基本収益 */
+  readonly startUsers: number;
+  readonly baseMarket: number;
+  readonly revenuePerPv: number;
+  readonly work: Workload;
+}
+
+export const SERVICES: Readonly<Record<ServiceId, ServiceDef>> = {
+  blog: {
+    name: 'ブログ',
+    roles: ['lb', 'web', 'cache', 'db', 'replica'],
+    startUsers: 300,
+    baseMarket: 1500,
+    revenuePerPv: 0.05,
+    work: { pageKB: 30, webCpuMs: 12, dbReads: 3, dbWrites: 0 },
+  },
+  shop: {
+    name: 'ショッピング',
+    roles: ['lb', 'web', 'cache', 'search', 'db', 'replica'],
+    startUsers: 200,
+    baseMarket: 3000,
+    revenuePerPv: 0.15,
+    work: {
+      pageKB: 40,
+      webCpuMs: 18,
+      dbReads: 6,
+      // 注文とカート。在庫の整合性のため書き込みは db(プライマリ)だけ
+      dbWrites: 0.04,
+      search: { perPv: 0.4, cpuMs: 6, resultKB: 6, missPerGB: 4, dbCpuMs: 40, dbIo: 4 },
+    },
+  },
+  photo: {
+    name: '写真共有',
+    roles: ['lb', 'web', 'cache', 'db', 'replica', 'media', 'worker'],
+    startUsers: 200,
+    baseMarket: 6000,
+    revenuePerPv: 0.08,
+    work: {
+      pageKB: 25,
+      webCpuMs: 10,
+      dbReads: 4,
+      dbWrites: 0.02,
+      // 1 ページにサムネイルがたくさん並ぶ
+      media: { perPv: 12, kb: 40, cpuMs: 0.1, io: 1, missPerGB: 6 },
+      upload: { perPv: 0.02, kb: 3000, workerCpuMs: 400, storedKB: 3200, storeIo: 8 },
+    },
+  },
+  video: {
+    name: '動画配信',
+    roles: ['lb', 'web', 'cache', 'db', 'replica', 'media', 'worker'],
+    startUsers: 100,
+    baseMarket: 5000,
+    revenuePerPv: 0.6,
+    work: {
+      pageKB: 40,
+      webCpuMs: 15,
+      dbReads: 4,
+      dbWrites: 0.01,
+      // 1 ページビュー = 数秒ぶんの動画の取得
+      media: { perPv: 1, kb: 6000, cpuMs: 0.5, io: 24, missPerGB: 1.5 },
+      upload: { perPv: 0.002, kb: 200_000, workerCpuMs: 60_000, storedKB: 300_000, storeIo: 1200 },
+    },
+  },
+};
+
+/** ブログの機能(投資)で増える仕事量 */
+export const BLOG_FEATURES = {
+  /** 画像投稿を入れたときに 1 ページに載る画像(KB) */
+  imageKB: 150,
+  /** コメント機能を入れたあとの、1 ページあたりの書き込み数 */
+  commentWrites: 0.05,
+} as const;
+
+/** ショッピングのキャンペーン: お金を払うとすぐ始まり、終わるとしばらく使えない(価格は pricing.ts) */
+export const CAMPAIGN = {
+  /** 続く時間とクールタイム(秒) */
+  durationSec: 90,
+  cooldownSec: 300,
+  /** 期間中の訪問(ページビュー)の倍率と、1 ページビューあたりの収益の倍率(注文が増える) */
+  trafficMul: 2.5,
+  revenueMul: 1.3,
+  /** 期間中に新しく来て、そのまま残るユーザーの割合(期間中の市場規模に対して) */
+  retainRate: 0.05,
+} as const;
+
+/** 役割ごとに使うメモリ(GB)。db・レプリカ・search・media はサーバの残りのメモリをキャッシュに使う */
+export const ROLE_MEM_GB: Readonly<Record<RoleId, number>> = {
+  web: 1,
+  lb: 0.5,
+  cache: 2,
+  db: 1,
+  replica: 1,
+  search: 1,
+  media: 0.5,
+  worker: 1,
+};
 
 /** レプリケーション: レプリカが書き込みを反映するときの CPU と IO(元の書き込みに対する割合) */
 export const REPLICATION = {
@@ -118,14 +257,10 @@ export const MAX_QUEUE_RHO = 0.97;
 export const P99_FACTOR = 2.5;
 
 // ---- ユーザー ---------------------------------------------------------
-export const START_USERS = 300;
+// 始めたときのユーザー数・市場規模・単価はサービスごと(SERVICES)
 export const MIN_USERS = 50;
 /** ユーザー 1 人あたりのページビュー/秒 */
 export const PV_PER_USER = 0.01;
-/** 1 ページビューあたりの基本収益(広告など) */
-export const REVENUE_PER_PV = 0.05;
-/** 市場規模(潜在ユーザー数)の初期値 */
-export const BASE_MARKET = 1500;
 /** 口コミによる自然増加率(/秒)。市場規模に近づくほど鈍る(ロジスティック成長) */
 export const GROWTH_RATE = 0.03;
 

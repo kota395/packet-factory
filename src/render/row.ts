@@ -4,7 +4,7 @@ import { RACK, ROW } from '../sim/config';
 import type { Device } from '../sim/facility';
 import type { Simulation } from '../sim/simulation';
 import type { PortRef } from '../sim/types';
-import { compact, money } from '../ui/format';
+import { compact, money, rolesText } from '../ui/format';
 import {
   PORT,
   RACK_W,
@@ -455,7 +455,7 @@ export class RowRenderer {
           const vms = f.vmsOn(d.id);
           const count = new Map<string, number>();
           for (const v of vms) {
-            const key = v.roles.length ? v.roles.join('+') : '役割なし';
+            const key = v.roles.length ? rolesText(v.roles) : '役割なし';
             count.set(key, (count.get(key) ?? 0) + 1);
           }
           const parts = [...count].map(([k, n]) => (n > 1 ? `${k}×${n}` : k));
@@ -464,7 +464,9 @@ export class RowRenderer {
           const maxW = r.w - 108 - 64;
           if (t.width > maxW) t.scale.set(maxW / t.width);
         } else if (d.roles.length) {
-          this.label(d.roles.join('・'), r.x + 108, r.y + r.h / 2, 11, 0x9fd8ff, 0, false, true);
+          const t = this.label(rolesText(d.roles), r.x + 108, r.y + r.h / 2, 11, 0x9fd8ff, 0, false, true);
+          const maxW = r.w - 108 - 64;
+          if (t.width > maxW) t.scale.set(maxW / t.width);
         }
       } else {
         g.roundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 3)

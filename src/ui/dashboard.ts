@@ -4,10 +4,11 @@
  */
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
-import { GROWTH_RATE, METRICS, PV_PER_USER } from '../sim/config';
+import { CAMPAIGN, GROWTH_RATE, METRICS, PV_PER_USER, SERVICES } from '../sim/config';
 import { UPGRADE_BY_ID } from '../sim/economy';
 import { logistic } from '../sim/forecast';
 import type { Simulation } from '../sim/simulation';
+import type { ServiceId } from '../sim/types';
 import { compact, duration, money, rate } from './format';
 
 /** 系列の色(暗い背景向けに検証済みの順番。系列は必ずこの順に割り当てる) */
@@ -43,8 +44,14 @@ const fmtMin = (sec: number) => {
   return `${m > 0 ? '+' : ''}${m.toFixed(1)}分`;
 };
 
+/** 見る範囲: すべてのサービスの合計か、サービス 1 つ */
+type Scope = 'all' | ServiceId;
+
 export class Dashboard {
   private range: RangeId = '15';
+  private scope: Scope = 'all';
+  private scopeSignature = '';
+  private readonly scopeBox: HTMLElement;
   private readonly panels = new Map<string, Panel>();
   private lastLength = -1;
   private lastSim: Simulation | null = null;
@@ -66,6 +73,7 @@ export class Dashboard {
     root.innerHTML = `
       <header class="dash-head">
         <h2>メトリクス</h2>
+        <div class="dash-scope" role="group" aria-label="サービス"></div>
         <div class="dash-range" role="group" aria-label="表示する期間">
           ${RANGES.map((r) => `<button type="button" data-range="${r.id}">${r.label}</button>`).join('')}
         </div>
@@ -77,6 +85,14 @@ export class Dashboard {
         <p class="dash-note">予測はユーザーが市場規模に向かって伸びる前提(ロジスティック成長)。エラーや遅さでの離脱は入れていません。キャパシティは、今の構成で成功率 ${METRICS.capacitySuccess * 100}% を保てるページビュー/秒の見積もりです。</p>
       </div>`;
     this.tiles = root.querySelector('.dash-tiles')!;
+    this.scopeBox = root.querySelector('.dash-scope')!;
+    this.scopeBox.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-scope]');
+      if (!b) return;
+      this.scope = b.dataset.scope as Scope;
+      this.scopeSignature = '';
+      this.update(true);
+    });
     this.grid = root.querySelector('.dash-grid')!;
     root.querySelector('.dash-close')!.addEventListener('click', () => this.toggle(false));
     root.querySelector('.dash-range')!.addEventListener('click', (e) => {
@@ -96,7 +112,7 @@ export class Dashboard {
       ['resources', `資源の使用率(上位 ${TOP_RESOURCES}、%)`],
       ['errors', 'エラー率(%)'],
       ['latency', '応答 p99(ms)'],
-      ['money', '収支($/秒)'],
+      ['money', '収支(全体、$/秒)'],
     ] as const) {
       const box = document.createElement('section');
       box.className = `dash-panel ${id === 'demand' ? 'wide' : ''}`;
@@ -133,6 +149,7 @@ export class Dashboard {
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('button[data-range]')) {
       b.classList.toggle('active', b.dataset.range === this.range);
     }
+    this.renderScope(sim);
     this.renderTiles(sim);
     if (!force && h.t.length === this.lastLength) return;
     this.lastLength = h.t.length;
@@ -142,19 +159,29 @@ export class Dashboard {
     let start = 0;
     while (start < h.t.length && h.t[start] < now - span) start++;
     const x = h.t.slice(start).map((t) => t - now);
-    const pick = (arr: number[], f = (v: number) => v) => arr.slice(start).map(f);
+    const pick = (arr: (number | null)[], f = (v: number) => v) => arr.slice(start).map((v) => (v === null ? null : f(v)));
+    const src = this.source(sim);
 
     // 需要とキャパシティ: 過去の実績に、未来の予測を続ける
     const future: number[] = [];
     for (let s = FORECAST_STEP; s <= METRICS.forecastSec; s += FORECAST_STEP) future.push(s);
     const lv = sim.upgrades.marketing;
-    const nextMarket = UPGRADE_BY_ID.marketing.effect(lv + 1);
-    const pvAt = (market: number, s: number) => logistic(sim.users, market, GROWTH_RATE, s) * PV_PER_USER;
+    const adRatio = UPGRADE_BY_ID.marketing.effect(lv + 1) / UPGRADE_BY_ID.marketing.effect(lv);
+    const ids = this.scope === 'all' ? sim.activeServices : [this.scope];
+    /** s 秒後のページビュー/秒(市場規模を ratio 倍にしたとき) */
+    const campaignLeft = sim.campaignActive ? (sim.campaign.until - sim.time) / 1000 : 0;
+    const pvAt = (ratio: number, s: number) =>
+      ids.reduce((sum, id) => {
+        // キャンペーン中のショッピングは、終わるまで訪問が増えたまま
+        const boost = id === 'shop' && s < campaignLeft ? CAMPAIGN.trafficMul : 1;
+        return sum + logistic(sim.serviceUsers[id], sim.marketOf(id) * ratio, GROWTH_RATE, s) * PV_PER_USER * boost;
+      }, 0);
     const pastNull = x.map(() => null);
     const futNull = future.map(() => null);
     const demandX = [...x, ...future];
-    const cap = sim.capacityPv;
+    const cap = this.scope === 'all' ? sim.capacityPv : sim.capacityOf(this.scope);
     // 「今」の点で予測と実績をつなぐ
+    const lastPv = src.pv.at(-1) ?? 0;
     const joinAt = (v: number) => [...pastNull.slice(0, -1), v];
     this.plot(
       'demand',
@@ -166,10 +193,10 @@ export class Dashboard {
       ],
       [
         demandX,
-        [...pick(h.pv), ...futNull],
-        [...pick(h.capacity), ...future.map(() => cap)],
-        [...(x.length ? joinAt(h.pv.at(-1) ?? 0) : []), ...future.map((s) => pvAt(sim.marketSize, s))],
-        [...(x.length ? joinAt(h.pv.at(-1) ?? 0) : []), ...future.map((s) => pvAt(nextMarket, s))],
+        [...pick(src.pv), ...futNull],
+        [...pick(src.capacity), ...future.map(() => cap)],
+        [...(x.length ? joinAt(lastPv ?? 0) : []), ...future.map((s) => pvAt(1, s))],
+        [...(x.length ? joinAt(lastPv ?? 0) : []), ...future.map((s) => pvAt(adRatio, s))],
       ],
       (v) => compact(v, 1),
       undefined,
@@ -181,15 +208,15 @@ export class Dashboard {
         { label: 'ユーザー', color: SERIES[0] },
         { label: '市場規模', color: SERIES[1] },
       ],
-      [x, pick(h.users), pick(h.market)],
+      [x, pick(src.users), pick(src.market)],
       (v) => compact(v),
     );
     // 値が 0 のままでも目盛りが潰れないよう、縦軸の上限に下限を設ける
-    this.plot('errors', [{ label: 'エラー率', color: SERIES[0] }], [x, pick(h.errorRate, (v) => v * 100)], (v) => v.toFixed(1), {
+    this.plot('errors', [{ label: 'エラー率', color: SERIES[0] }], [x, pick(src.errorRate, (v) => v * 100)], (v) => v.toFixed(1), {
       min: 0,
       max: 5,
     });
-    this.plot('latency', [{ label: 'p99', color: SERIES[0] }], [x, pick(h.p99)], (v) => compact(v), { min: 0, max: 500 });
+    this.plot('latency', [{ label: 'p99', color: SERIES[0] }], [x, pick(src.p99)], (v) => compact(v), { min: 0, max: 500 });
     this.plot(
       'money',
       [
@@ -201,6 +228,42 @@ export class Dashboard {
       (v) => compact(v, 1),
     );
     this.plotResources(sim, start, x);
+  }
+
+  /** 見ている範囲の推移 */
+  private source(sim: Simulation): {
+    pv: (number | null)[];
+    capacity: (number | null)[];
+    users: (number | null)[];
+    market: (number | null)[];
+    errorRate: (number | null)[];
+    p99: (number | null)[];
+  } {
+    const h = sim.metrics.history;
+    if (this.scope === 'all') return h;
+    const sh = sim.metrics.services.get(this.scope);
+    if (!sh) {
+      const nulls = h.t.map(() => null);
+      return { pv: nulls, capacity: nulls, users: nulls, market: nulls, errorRate: nulls, p99: nulls };
+    }
+    return sh;
+  }
+
+  /** サービスの切り替え。2 つ以上始めていれば出す */
+  private renderScope(sim: Simulation): void {
+    const active = sim.activeServices;
+    if (this.scope !== 'all' && !active.includes(this.scope)) this.scope = 'all';
+    const signature = `${active.join(',')}|${this.scope}`;
+    if (signature === this.scopeSignature) return;
+    this.scopeSignature = signature;
+    this.scopeBox.hidden = active.length < 2;
+    const scopes: Scope[] = ['all', ...active];
+    this.scopeBox.innerHTML = scopes
+      .map(
+        (s) =>
+          `<button type="button" data-scope="${s}" class="${s === this.scope ? 'active' : ''}">${s === 'all' ? '全体' : SERVICES[s].name}</button>`,
+      )
+      .join('');
   }
 
   resize(): void {
@@ -310,13 +373,16 @@ export class Dashboard {
   }
 
   private renderTiles(sim: Simulation): void {
-    const r = sim.metrics.rolling;
-    const cap = sim.capacityPv;
+    const all = this.scope === 'all';
+    const r = all ? sim.metrics.rolling : sim.metrics.rollingOf(this.scope as ServiceId);
+    const cap = all ? sim.capacityPv : sim.capacityOf(this.scope as ServiceId);
+    const market = all ? sim.marketSize : sim.marketOf(this.scope as ServiceId);
     const headroom = cap > 0 ? 1 - r.pv / cap : 0;
-    const sat = sim.secondsToSaturation;
+    const sat = all ? sim.secondsToSaturation() : sim.secondsToSaturation(this.scope as ServiceId);
     const satText = sat === null ? '届かない' : sat === 0 ? '超えている' : `あと ${duration(sat * 1000) === '0 分' ? `${Math.round(sat)} 秒` : duration(sat * 1000)}`;
     const satClass = sat === 0 ? 'bad' : sat !== null && sat < 300 ? 'warn' : '';
-    const satNote = sat === null ? `市場規模 ${compact(sim.marketSize)} 人で頭打ち` : '広告を買わない場合';
+    const satNote =
+      sat === null ? `市場規模 ${compact(market)} 人で頭打ち` : all && sim.activeServices.length > 1 ? 'いちばん早いサービス・広告なし' : '広告を買わない場合';
     const tiles: [string, string, string?, string?][] = [
       ['ページビュー', `${compact(r.pv, 1)}/秒`],
       ['キャパシティ', `${compact(cap, 1)}/秒`],
@@ -324,7 +390,7 @@ export class Dashboard {
       ['需要がキャパシティに届くまで', satText, satClass, satNote],
       ['成功率', `${(100 - r.errorRate * 100).toFixed(1)}%`, r.errorRate > 0.05 ? 'bad' : r.errorRate > 0.01 ? 'warn' : ''],
       ['応答 p99', `${Math.round(r.p99Ms)} ms`, r.p99Ms > 1500 ? 'bad' : r.p99Ms > 800 ? 'warn' : ''],
-      ['収支', rate(sim.incomePerSec), sim.incomePerSec < 0 ? 'bad' : ''],
+      all ? ['収支', rate(sim.incomePerSec), sim.incomePerSec < 0 ? 'bad' : ''] : ['売上', rate(r.revenuePerSec)],
       ['資金', money(sim.money)],
     ];
     this.tiles.innerHTML = tiles

@@ -2,9 +2,9 @@
  * 投資(解放・強化・契約)の効果と、段階・タブのまとめ方。
  * 価格は pricing.ts、機器の性能は catalog.ts、仕事量は config.ts にある。
  */
-import { BASE_MARKET, RACK, UPLINK_LEVELS_GBPS } from './config';
+import { RACK, SERVICES, UPLINK_LEVELS_GBPS } from './config';
 import { UPGRADE_PRICES, growingPrice, unlockPrice } from './pricing';
-import type { RoleId, UnlockId, UpgradeId } from './types';
+import type { RoleId, ServiceId, UnlockId, UpgradeId } from './types';
 
 /** 配信内容を変える解放の効果。オン/オフを切り替えられる */
 export interface FeatureEffect {
@@ -20,6 +20,8 @@ export interface UnlockDef {
   readonly effect?: FeatureEffect;
   /** この解放で割り当てられるようになる役割 */
   readonly role?: RoleId;
+  /** この解放で始まるサービス */
+  readonly service?: ServiceId;
 }
 
 export interface UpgradeDef {
@@ -46,6 +48,29 @@ export const UNLOCKS: readonly UnlockDef[] = [
     name: 'コメント機能',
     description: '読者がコメントを書ける。単価が上がるが、db に書き込みが来る(書き込みはディスク IO を多く使う)。',
     effect: { revenue: 1.3 },
+  },
+  {
+    id: 'shop',
+    name: `${SERVICES.shop.name}を始める`,
+    description:
+      '単価の高いサービス。商品の検索(役割「search」、なければ db が重い LIKE 検索で肩代わり)と、注文の書き込み(db のプライマリだけ)がある。キャンペーンを打つと、期間中は訪問が一気に増える。',
+    service: 'shop',
+  },
+  {
+    id: 'photo',
+    name: `${SERVICES.photo.name}を始める`,
+    description:
+      '1 ページにサムネイルがたくさん並び、画像の配信(役割「media」)で帯域とディスク IO を使う。投稿された写真のサムネイル生成(役割「worker」)は CPU を食う。media・worker がなければ web が肩代わりする。',
+    requires: 'shop',
+    service: 'photo',
+  },
+  {
+    id: 'video',
+    name: `${SERVICES.video.name}を始める`,
+    description:
+      '単価は高いが、配信(media)で帯域を桁違いに使う。投稿された動画のエンコード(worker)は 1 本で CPU を何十秒も使う。',
+    requires: 'photo',
+    service: 'video',
   },
   {
     id: 'lb',
@@ -104,14 +129,14 @@ export const UPGRADES: readonly UpgradeDef[] = [
   {
     id: 'marketing',
     name: '広告',
-    description: '潜在ユーザー数(市場規模)を増やす。',
-    effect: (l) => BASE_MARKET * 1.6 ** l,
-    format: (v) => `${Math.round(v).toLocaleString('en-US')} 人`,
+    description: 'すべてのサービスの潜在ユーザー数(市場規模)を増やす。',
+    effect: (l) => 1.6 ** l,
+    format: (v) => `市場 ×${v.toFixed(2)}`,
   },
   {
     id: 'monetize',
     name: '収益化の改善',
-    description: '1 ページビューあたりの収益を増やす。',
+    description: 'すべてのサービスの 1 ページビューあたりの収益を増やす。',
     effect: (l) => 1.25 ** l,
     format: (v) => `×${v.toFixed(2)}`,
   },
@@ -191,6 +216,13 @@ export const STAGES: readonly StageDef[] = [
     summary: 'サーバを 2 台の ToR につなぎ、BGP と ECMP で両方に流す。スイッチが 1 台止まってもサービスは続く。',
     unlocks: ['bgp'],
   },
+  {
+    id: 9,
+    name: '複数のサービス',
+    summary:
+      'ショッピング・写真共有・動画配信を始める。同じサーバに相乗りさせても、ラックごと分けてもよい。検索・画像配信・エンコードと、詰まる所が増える。',
+    unlocks: ['shop', 'photo', 'video'],
+  },
 ];
 
 /** 投資メニューのタブ */
@@ -206,8 +238,8 @@ export const LINES: readonly LineDef[] = [
   {
     id: 'business',
     name: '事業',
-    summary: 'ユーザーを集めて単価を上げる。新機能は単価が上がるぶん、インフラの負荷も増える。',
-    unlocks: ['images', 'comments'],
+    summary: 'ユーザーを集めて単価を上げ、新しいサービスを始める。新機能は単価が上がるぶん、インフラの負荷も増える。',
+    unlocks: ['images', 'comments', 'shop', 'photo', 'video'],
     upgrades: ['marketing', 'monetize'],
   },
   {

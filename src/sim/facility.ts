@@ -3,7 +3,7 @@
  */
 import { MODEL_BY_ID, portsOf, type PortDef } from './catalog';
 import { CABLE, RACK, ROW, VIRT } from './config';
-import type { DiskKind, ModelId, PortRef, RoleId, VmSize } from './types';
+import type { DiskKind, ModelId, PortRef, RoleKey, VmSize } from './types';
 
 export interface Rack {
   /** 列の中の位置(0 始まり) */
@@ -18,7 +18,7 @@ export interface Device {
   /** 一番下の U(1 始まり)。2U の機器は u と u+1 を使う */
   u: number;
   /** 割り当てた役割(サーバのみ。ハイパーバイザにしたサーバは役割を持たず、VM が持つ) */
-  roles: RoleId[];
+  roles: RoleKey[];
   /** ハイパーバイザ(VM を載せるホスト)にしているか */
   hv: boolean;
   /** BGP で経路を交換するか(物理サーバ。ハイパーバイザは BGP を解放すれば自動で使う) */
@@ -39,7 +39,7 @@ export interface Vm {
   /** 載っているホスト(機器 ID) */
   host: number;
   readonly size: VmSize;
-  roles: RoleId[];
+  roles: RoleKey[];
   disk: DiskKind;
   /** 別のホストへ移している間は止まる。この時刻(シミュレーション時間)まで */
   downUntil: number;
@@ -167,7 +167,7 @@ export class Facility {
     return removed;
   }
 
-  setRoles(id: number, roles: RoleId[]): void {
+  setRoles(id: number, roles: RoleKey[]): void {
     const d = this.devices.get(id);
     if (!d) return;
     d.roles = roles;
@@ -229,7 +229,7 @@ export class Facility {
     return null;
   }
 
-  createVm(host: number, size: VmSize, opts: { id?: number; name?: string; roles?: RoleId[]; disk?: DiskKind } = {}): Vm {
+  createVm(host: number, size: VmSize, opts: { id?: number; name?: string; roles?: RoleKey[]; disk?: DiskKind } = {}): Vm {
     const id = opts.id ?? this.nextVmId;
     this.nextVmId = Math.max(this.nextVmId, id + 1);
     const used = new Set([...this.vms.values()].map((v) => v.name));
@@ -257,7 +257,7 @@ export class Facility {
     this.version++;
   }
 
-  setVmRoles(id: number, roles: RoleId[]): void {
+  setVmRoles(id: number, roles: RoleKey[]): void {
     const v = this.vms.get(id);
     if (!v) return;
     v.roles = roles;

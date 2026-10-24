@@ -144,6 +144,7 @@ button.active {
 }
 
 .dash-head {
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -156,20 +157,39 @@ button.active {
   margin: 0;
   font-size: 15px;
   flex: 1;
+  white-space: nowrap;
 }
 
-.dash-range {
+@media (max-width: 600px) {
+  .dash-scope {
+    order: 5;
+    flex-basis: 100%;
+  }
+}
+
+.dash-range,
+.dash-scope {
   display: flex;
   gap: 4px;
 }
 
-.dash-range button {
+.dash-scope {
+  flex-wrap: wrap;
+}
+
+.dash-scope[hidden] {
+  display: none;
+}
+
+.dash-range button,
+.dash-scope button {
   min-height: 32px;
   padding: 0 10px;
   font-size: 12px;
 }
 
-.dash-range button.active {
+.dash-range button.active,
+.dash-scope button.active {
   background: var(--accent);
   border-color: var(--accent);
   color: #06121f;
@@ -712,6 +732,35 @@ button.danger {
   border-color: var(--line);
   color: var(--muted);
   cursor: not-allowed;
+}
+
+.role-group + .role-group {
+  margin-top: 8px;
+}
+
+.role-svc {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.svc-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.svc-tabs button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.svc-tabs button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
 }
 
 .role-buttons {

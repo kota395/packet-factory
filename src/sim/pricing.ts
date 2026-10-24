@@ -7,7 +7,8 @@
  *  - RACK_PRICE …… ラック区画を借りる初期費用(2 本目から)
  *  - UPKEEP …… 維持費($/秒)。ラックの賃料は電力契約のレベルで、回線は契約速度で変わる
  *  - CABLE_PRICES …… ケーブルの値段(本体 + 1m あたり)
- *  - UNLOCK_PRICES / UPGRADE_PRICES …… 投資の価格
+ *  - UNLOCK_PRICES / UPGRADE_PRICES …… 投資の価格(新しいサービスを始める価格も UNLOCK_PRICES)
+ *  - CAMPAIGN_PRICE …… ショッピングのキャンペーンの価格(ユーザー数で変わる)
  *
  * n 回目(0 始まり)の価格 = first × growth^n × PRICE_SCALE
  * 変えたら `npm run balance` で節目の時刻を確認する。
@@ -62,6 +63,10 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   // 事業
   images: 2500,
   comments: 6000,
+  // 新しいサービス
+  shop: 10_000,
+  photo: 40_000,
+  video: 150_000,
   // ソフトウェア
   lb: 800,
   cache: 2000,
@@ -82,6 +87,13 @@ export const UPGRADE_PRICES: Readonly<Record<UpgradeId, GrowingPrice>> = {
   /** 電力契約: すべてのラックの電力上限を上げる */
   rackPower: { first: 2500, growth: 3 },
 };
+
+/** キャンペーン 1 回の価格 = base + ショッピングのユーザー 1 人あたり perUser */
+export const CAMPAIGN_PRICE = { base: 500, perUser: 1 } as const;
+
+export function campaignPrice(users: number): number {
+  return Math.round((CAMPAIGN_PRICE.base + CAMPAIGN_PRICE.perUser * users) * PRICE_SCALE);
+}
 
 /** n 回目(0 始まり)の購入価格 */
 export function growingPrice(p: GrowingPrice, n: number): number {

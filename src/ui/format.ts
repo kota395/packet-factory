@@ -1,3 +1,5 @@
+import { SERVICE_IDS, splitRole, type RoleKey, type ServiceId } from '../sim/types';
+
 const UNITS = ['', 'k', 'M', 'B', 'T', 'Qa', 'Qi'];
 
 /** 1234 → 1.23k, 5600000 → 5.60M */
@@ -45,4 +47,25 @@ export function bandwidth(mbPerSec: number): string {
 export function dataSize(kb: number): string {
   if (kb >= 1000) return `${(kb / 1000).toFixed(kb >= 10_000 ? 0 : 1)} MB`;
   return `${Math.round(kb)} KB`;
+}
+
+/** サービスの短い名前(機器のラベルなど狭い所に出す) */
+export const SERVICE_SHORT: Readonly<Record<ServiceId, string>> = {
+  blog: 'ブログ',
+  shop: 'ショップ',
+  photo: '写真',
+  video: '動画',
+};
+
+/** 役割の並びを、サービスごとにまとめて書く(例: 「ブログ web・db / ショップ search」) */
+export function rolesText(keys: readonly RoleKey[]): string {
+  const by = new Map<ServiceId, string[]>();
+  for (const k of keys) {
+    const [s, r] = splitRole(k);
+    if (!by.has(s)) by.set(s, []);
+    by.get(s)!.push(r);
+  }
+  return SERVICE_IDS.filter((s) => by.has(s))
+    .map((s) => `${SERVICE_SHORT[s]} ${by.get(s)!.join('・')}`)
+    .join(' / ');
 }
