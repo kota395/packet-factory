@@ -333,6 +333,70 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
   });
 });
 
+describe('BGP による冗長化', () => {
+  /** 回線 → コア → ToR 2 台 → サーバ 1 台(両方の ToR につなぐ) */
+  function dual(unlocks: UnlockId[] = []) {
+    const s = new Simulation({ startMoney: RICH, traffic: constant(50), unlocks, upgrades: { uplink: 2, rackPower: 3 } });
+    const f = s.facility;
+    f.rent(0);
+    const isp = f.place('handoff', 0, RACK.units, 0).id;
+    const core = s.buyDevice('sw-24', 0, 40).id!;
+    const t1 = s.buyDevice('sw-24', 0, 38).id!;
+    const t2 = s.buyDevice('sw-24', 0, 37).id!;
+    s.connect({ device: isp, port: 0 }, { device: core, port: 0 });
+    s.connect({ device: core, port: 1 }, { device: t1, port: 0 });
+    s.connect({ device: core, port: 2 }, { device: t2, port: 0 });
+    const srv = s.buyDevice('srv-2u-db', 0, 20).id!;
+    s.toggleRole(srv, 'web');
+    s.toggleRole(srv, 'db');
+    s.connect({ device: srv, port: 0 }, { device: t1, port: 1 });
+    s.connect({ device: srv, port: 1 }, { device: t2, port: 1 });
+    return { s, f, core, t1, t2, srv };
+  }
+
+  it('BGP なしのサーバは一番若いポートの 1 本だけ使い、その ToR が止まると届かなくなる', () => {
+    const { s, t1, t2 } = dual();
+    let flow = run(s);
+    expect(flow.success).toBe(1);
+    expect(flow.devices.get(t1)!.gbps).toBeGreaterThan(0);
+    expect(flow.devices.get(t2)!.gbps).toBe(0);
+    s.setMaintenance(t1, true);
+    flow = run(s);
+    expect(flow.success).toBe(0);
+    expect(flow.problems.join()).toContain('止まっています');
+  });
+
+  it('BGP を使うと 2 台の ToR に ECMP で半分ずつ流れ、片方が止まっても続く', () => {
+    const { s, srv, t1, t2 } = dual(['bgp']);
+    expect(s.setBgp(srv, true).ok).toBe(true);
+    let flow = run(s);
+    const a = flow.devices.get(t1)!.gbps;
+    const b = flow.devices.get(t2)!.gbps;
+    expect(a).toBeGreaterThan(0);
+    expect(a).toBeCloseTo(b, 6);
+    s.setMaintenance(t1, true);
+    flow = run(s);
+    expect(flow.success).toBe(1);
+    expect(flow.devices.get(t2)!.gbps).toBeCloseTo(a * 2, 6);
+  });
+
+  it('BGP は解放が必要で、ハイパーバイザは自動で使う', () => {
+    const { s, srv } = dual();
+    expect(s.setBgp(srv, true).ok).toBe(false);
+    s.unlock('bgp');
+    s.unlock('virtualization');
+    expect(s.usesBgp(srv)).toBe(false);
+    s.setHv(srv, true);
+    expect(s.usesBgp(srv)).toBe(true);
+  });
+
+  it('障害は難易度オプションで、既定ではオフ', () => {
+    const s = newGame();
+    s.step(60_000);
+    expect(s.downDevices.size).toBe(0);
+  });
+});
+
 describe('メトリクスと需要予測', () => {
   it('キャパシティは今の構成で捌けるページビュー/秒(最初はエントリー機のディスク IO で約 50)', () => {
     const s = newGame();

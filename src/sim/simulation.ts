@@ -280,6 +280,68 @@ export class Simulation {
     return { ok: true };
   }
 
+  // ---------------------------------------------------------------- 冗長化と障害
+
+  /** 止まっている機器(メンテナンスで止めたもの・障害中のもの) */
+  get downDevices(): Set<number> {
+    const set = new Set<number>();
+    for (const d of this.facility.devices.values()) if (d.down || d.failedUntil > this.time) set.add(d.id);
+    return set;
+  }
+
+  /** その機器が BGP で経路を交換しているか(物理サーバはオンにしたもの、ハイパーバイザは自動) */
+  usesBgp(id: number): boolean {
+    const d = this.facility.devices.get(id);
+    return !!d && this.unlocks.has('bgp') && (d.bgp || d.hv);
+  }
+
+  bgpError(id: number): string | null {
+    const d = this.facility.devices.get(id);
+    if (!d || MODEL_BY_ID[d.model].category !== 'server') return 'BGP を使えるのはサーバだけです';
+    if (!this.unlocks.has('bgp')) return `投資の「${UNLOCK_BY_ID.bgp.name}」が必要です`;
+    if (d.hv) return 'ハイパーバイザは自動で BGP を使います';
+    return null;
+  }
+
+  setBgp(id: number, on: boolean): ActionResult {
+    const err = this.bgpError(id);
+    if (err) return { ok: false, message: err };
+    const d = this.facility.devices.get(id)!;
+    this.facility.setBgp(id, on);
+    this.refreshFlow();
+    return { ok: true, message: `${d.name} の BGP を${on ? 'オン' : 'オフ'}にしました` };
+  }
+
+  /** メンテナンスで止める / 戻す。止めている間は通信も役割も止まる */
+  setMaintenance(id: number, down: boolean): ActionResult {
+    const d = this.facility.devices.get(id);
+    if (!d) return { ok: false, message: '機器が見つかりません' };
+    if (MODEL_BY_ID[d.model].category === 'handoff') return { ok: false, message: '回線終端は止められません' };
+    this.facility.setDown(id, down);
+    this.refreshFlow();
+    return { ok: true, message: `${d.name} を${down ? 'メンテナンスで止めました' : '戻しました'}` };
+  }
+
+  /** 障害(難易度オプション): 機器がときどき壊れ、しばらくすると直る */
+  private rollFailures(dt: number): void {
+    const f = DIFFICULTY.failures;
+    if (!f.enabled) return;
+    for (const d of this.facility.devices.values()) {
+      if (MODEL_BY_ID[d.model].category === 'handoff' || d.failedUntil > this.time) continue;
+      if (this.random() < dt / f.mtbfSec) d.failedUntil = this.time + f.repairSec * 1000;
+    }
+  }
+
+  private seed = 0x9e3779b9;
+  /** 再現できる乱数(mulberry32) */
+  private random(): number {
+    this.seed = (this.seed + 0x6d2b79f5) >>> 0;
+    let t = this.seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
   // ---------------------------------------------------------------- 仮想化
 
   hvError(id: number, on: boolean): string | null {
@@ -483,12 +545,15 @@ export class Simulation {
       comments: this.isFeatureActive('comments'),
       roles: this.availableRoles,
       now: this.time,
+      bgp: this.unlocks.has('bgp'),
+      down: this.downDevices,
     });
   }
 
   private tick(): void {
     const dt = TICK_MS / 1000;
     this.time += TICK_MS;
+    this.rollFailures(dt);
     const flow = this.computeFlow();
     this.flow = flow;
     const pv = flow.pv * dt;

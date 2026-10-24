@@ -71,6 +71,7 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   tenGig: 5000,
   agg: 12_000,
   storage: 30_000,
+  bgp: 15_000,
 };
 
 export const UPGRADE_PRICES: Readonly<Record<UpgradeId, GrowingPrice>> = {

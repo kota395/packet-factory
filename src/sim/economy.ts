@@ -84,6 +84,12 @@ export const UNLOCKS: readonly UnlockDef[] = [
     requires: 'tenGig',
   },
   {
+    id: 'bgp',
+    name: 'BGP(L3 の冗長化)',
+    description:
+      'サーバと ToR スイッチの間で BGP を使えるようになる。物理サーバは詳細で「BGP を使う」をオンにする(ハイパーバイザは自動)。2 台の ToR につなぐと ECMP で両方に流れ、片方が止まっても残りで続く。BGP なしのサーバは一番若いポートの 1 本しか使わない。',
+  },
+  {
     id: 'storage',
     name: '共有ストレージ',
     description:
@@ -179,6 +185,12 @@ export const STAGES: readonly StageDef[] = [
     summary: 'VM のディスクを共有ストレージへ。止めずに移せるが、IO がネットワークを通るのでストレージ用の経路を分けたい。',
     unlocks: ['storage'],
   },
+  {
+    id: 8,
+    name: 'ネットワークの冗長化',
+    summary: 'サーバを 2 台の ToR につなぎ、BGP と ECMP で両方に流す。スイッチが 1 台止まってもサービスは続く。',
+    unlocks: ['bgp'],
+  },
 ];
 
 /** 投資メニューのタブ */
@@ -216,7 +228,7 @@ export const LINES: readonly LineDef[] = [
     id: 'hardware',
     name: '機器',
     summary: '買える機種を増やす。サーバの機種は前面の空き U から買う。',
-    unlocks: ['tenGig', 'agg', 'storage'],
+    unlocks: ['tenGig', 'agg', 'storage', 'bgp'],
     upgrades: [],
   },
 ];

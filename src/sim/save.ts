@@ -21,8 +21,8 @@ export interface SaveData {
   upgrades: Record<UpgradeId, number>;
   /** 借りているラックの位置 */
   racks: number[];
-  /** [ID, 機種, ラック, U, 役割, 購入額, 名前, ハイパーバイザか] */
-  devices: [number, ModelId, number, number, RoleId[], number, string, boolean][];
+  /** [ID, 機種, ラック, U, 役割, 購入額, 名前, ハイパーバイザか, BGP を使うか, メンテナンス中か] */
+  devices: [number, ModelId, number, number, RoleId[], number, string, boolean, boolean, boolean][];
   /** [ID, 名前, ホスト, 大きさ, 役割, ディスク] */
   vms: [number, string, number, VmSize, RoleId[], DiskKind][];
   /** [ID, 機器 A, ポート A, 機器 B, ポート B, 購入額] */
@@ -57,7 +57,7 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     disabled: [...sim.disabledFeatures],
     upgrades: { ...sim.upgrades },
     racks: [...f.racks.keys()],
-    devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name, d.hv]),
+    devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name, d.hv, d.bgp, d.down]),
     vms: [...f.vms.values()].map((v) => [v.id, v.name, v.host, v.size, [...v.roles], v.disk]),
     cables: [...f.cables.values()].map((c) => [c.id, c.a.device, c.a.port, c.b.device, c.b.port, c.paid]),
   };
@@ -74,11 +74,13 @@ export function loadSave(save: SaveData): Simulation {
   sim.lifetimeEarned = save.lifetimeEarned;
   const f = sim.facility;
   for (const slot of save.racks) f.rent(slot);
-  for (const [id, model, slot, u, roles, paid, name, hv] of save.devices) {
+  for (const [id, model, slot, u, roles, paid, name, hv, bgp, down] of save.devices) {
     // 壊れた配置(重なり・ラック外)は読み飛ばす。電力は昔の上限で置いたものもそのまま戻す
     if (f.placeError(model, slot, u, Infinity) !== null) continue;
     const d = f.place(model, slot, u, paid, { id, name });
     if (hv) f.setHv(d.id, true);
+    if (bgp) f.setBgp(d.id, true);
+    if (down) f.setDown(d.id, true);
     f.setRoles(d.id, roles);
   }
   for (const [id, name, host, size, roles, disk] of save.vms) {
@@ -162,12 +164,12 @@ export function parseSave(data: unknown): SaveData | null {
   const devices: SaveData['devices'] = [];
   const okRoles = (roles: unknown[]) => roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId));
   for (const item of d.devices as unknown[]) {
-    // 仮想化の前のセーブは 7 要素(ハイパーバイザの印がない)
-    if (!Array.isArray(item) || (item.length !== 7 && item.length !== 8)) return null;
-    const [id, model, slot, u, roles, paid, name, hv] = item;
+    // 古いセーブは 7 要素(仮想化の前)か 8 要素(BGP の前)
+    if (!Array.isArray(item) || ![7, 8, 10].includes(item.length)) return null;
+    const [id, model, slot, u, roles, paid, name, hv, bgp, down] = item;
     if (!isInt(id) || id < 0 || typeof model !== 'string' || !(model in MODEL_BY_ID)) return null;
     if (!isInt(slot) || !isInt(u) || !Array.isArray(roles) || !isNum(paid) || typeof name !== 'string') return null;
-    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true]);
+    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true, bgp === true, down === true]);
   }
 
   const vms: SaveData['vms'] = [];

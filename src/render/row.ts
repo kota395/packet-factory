@@ -519,6 +519,16 @@ export class RowRenderer {
     const f = sim.facility;
     const flow = sim.flow;
 
+    // 止まっている機器: メンテナンスは黄、障害は赤で覆う
+    for (const d of f.devices.values()) {
+      const failed = d.failedUntil > sim.time;
+      if (!d.down && !failed) continue;
+      const r = deviceRect(d);
+      g.rect(r.x + 1, r.y + 1, r.w - 2, r.h - 2)
+        .fill({ color: COLORS.bg, alpha: 0.55 })
+        .stroke({ width: 2, color: failed ? COLORS.bad : COLORS.warn });
+    }
+
     // ラックの電力メーター
     for (const slot of f.racks.keys()) {
       const r = rackRect(slot);

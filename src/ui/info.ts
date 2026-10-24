@@ -173,6 +173,12 @@ export class InfoPanel {
       case 'vm':
         this.actions.select({ kind: 'vm', id: Number(data.id) });
         return;
+      case 'bgp':
+        r = sim.setBgp(Number(data.id), data.on === '1');
+        break;
+      case 'maint':
+        r = sim.setMaintenance(Number(data.id), data.on === '1');
+        break;
       case 'hv':
         r = sim.setHv(Number(data.id), data.on === '1');
         break;
@@ -256,8 +262,17 @@ export class InfoPanel {
       const hvErr = sim.hvError(d.id, true);
       fixed += `<div class="actions"><button type="button" data-act="hv" data-id="${d.id}" data-on="1" ${hvErr ? `disabled title="${hvErr}"` : ''}>ハイパーバイザにする</button></div>`;
     }
+    if (m.category === 'server' && !d.hv && sim.unlocks.has('bgp')) {
+      fixed += section(
+        'BGP',
+        `<div class="role-buttons"><button type="button" class="toggle ${d.bgp ? 'on' : ''}" data-act="bgp" data-id="${d.id}" data-on="${d.bgp ? '0' : '1'}">BGP を使う</button></div>`,
+      );
+    }
     if (m.category !== 'handoff') {
-      fixed += `<div class="actions"><button type="button" class="danger" data-act="sell" data-id="${d.id}">売却する(+${money(Math.floor(d.paid * SELL_REFUND_RATE))})</button></div>`;
+      fixed += `<div class="actions">
+        <button type="button" data-act="maint" data-id="${d.id}" data-on="${d.down ? '0' : '1'}">${d.down ? 'メンテナンスから戻す' : 'メンテナンスで止める'}</button>
+        <button type="button" class="danger" data-act="sell" data-id="${d.id}">売却する(+${money(Math.floor(d.paid * SELL_REFUND_RATE))})</button>
+      </div>`;
     }
 
     const place: [string, string][] = [
@@ -265,6 +280,18 @@ export class InfoPanel {
       ['スペック', specOf(m)],
       ['電力', `${m.powerW} W`],
     ];
+    const failed = d.failedUntil > sim.time;
+    place.unshift([
+      '状態',
+      d.down
+        ? '<span class="warn">メンテナンス中</span>'
+        : failed
+          ? `<span class="bad">障害(あと ${Math.ceil((d.failedUntil - sim.time) / 1000)} 秒で復旧)</span>`
+          : '稼働中',
+    ]);
+    if (m.category === 'server') {
+      place.push(['BGP', sim.usesBgp(d.id) ? (d.hv ? '使う(ハイパーバイザは自動)' : '使う(ECMP)') : '使わない(一番若いポートの 1 本だけ)']);
+    }
     if (m.category === 'handoff') place.push(['回線契約', gbps(sim.uplinkGbps)]);
 
     const loadRows: [string, string][] = [];

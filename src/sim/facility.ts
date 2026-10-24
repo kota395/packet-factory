@@ -21,6 +21,12 @@ export interface Device {
   roles: RoleId[];
   /** ハイパーバイザ(VM を載せるホスト)にしているか */
   hv: boolean;
+  /** BGP で経路を交換するか(物理サーバ。ハイパーバイザは BGP を解放すれば自動で使う) */
+  bgp: boolean;
+  /** メンテナンスで止めているか */
+  down: boolean;
+  /** 障害で止まっている。この時刻(シミュレーション時間)まで */
+  failedUntil: number;
   /** 買ったときの値段(売却時の返金に使う) */
   readonly paid: number;
   readonly name: string;
@@ -136,7 +142,7 @@ export class Facility {
   place(model: ModelId, slot: number, u: number, paid: number, opts: { id?: number; name?: string } = {}): Device {
     const id = opts.id ?? this.nextDeviceId;
     this.nextDeviceId = Math.max(this.nextDeviceId, id + 1);
-    const device: Device = { id, model, slot, u, roles: [], hv: false, paid, name: opts.name ?? this.newName(model) };
+    const device: Device = { id, model, slot, u, roles: [], hv: false, bgp: false, down: false, failedUntil: 0, paid, name: opts.name ?? this.newName(model) };
     this.devices.set(id, device);
     this.version++;
     return device;
@@ -173,6 +179,20 @@ export class Facility {
     if (!d) return;
     d.hv = on;
     if (on) d.roles = [];
+    this.version++;
+  }
+
+  setBgp(id: number, on: boolean): void {
+    const d = this.devices.get(id);
+    if (!d) return;
+    d.bgp = on;
+    this.version++;
+  }
+
+  setDown(id: number, down: boolean): void {
+    const d = this.devices.get(id);
+    if (!d) return;
+    d.down = down;
     this.version++;
   }
 
