@@ -65,7 +65,11 @@ export type UnlockId =
   | 'agg'
   | 'storage'
   | 'nvme'
-  | 'bgp';
+  | 'bgp'
+  | 'partition'
+  | 'sharding'
+  | 'multihoming'
+  | 'cdn';
 
 /** 何度でも(上限まで)買える強化・契約 */
 export type UpgradeId = 'marketing' | 'monetize' | 'uplink' | 'rackPower';

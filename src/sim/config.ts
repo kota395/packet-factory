@@ -217,6 +217,21 @@ export const ROLE_MEM_GB: Readonly<Record<RoleId, number>> = {
   worker: 1,
 };
 
+/**
+ * CDN: 画像・動画など変わらないデータを、手前のキャッシュから配ってもらう。
+ * 当たった分はオリジン(自分のサーバ・回線)を通らない代わりに、配った量に応じてお金がかかる(価格は pricing.ts の CDN_PRICE_PER_GB)
+ */
+export const CDN = {
+  /** CDN で当たる割合 */
+  hitRate: 0.9,
+} as const;
+
+/** db(プライマリ)の分け方 */
+export const DB_SPLIT = {
+  /** 機能分割: 2 台目(書き込みの多いデータ。コメント・注文など)が受ける読み込みとデータの割合。書き込みはすべて 2 台目 */
+  functionalReadShare: 0.3,
+} as const;
+
 /** レプリケーション: レプリカが書き込みを反映するときの CPU と IO(元の書き込みに対する割合) */
 export const REPLICATION = {
   applyCpu: 0.5,

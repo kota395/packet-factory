@@ -11,6 +11,8 @@
  *  - CABLE_PRICES …… ケーブルの値段(本体 + 1m あたり)
  *  - UNLOCK_PRICES / UPGRADE_PRICES …… 投資の価格(新しいサービスを始める価格も UNLOCK_PRICES)
  *  - CAMPAIGN_PRICE …… ショッピングのキャンペーンの価格(ユーザー数で変わる)
+ *  - LINE_PRICE …… 回線を増やす工事費(維持費は UPKEEP.uplinkByLevel が回線の本数ぶん)
+ *  - CDN_PRICE_PER_GB …… CDN の従量課金
  *
  * n 回目(0 始まり)の価格 = first × growth^n × PRICE_SCALE
  * 変えたら `npm run balance` で節目の時刻を確認する。
@@ -125,6 +127,12 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   replication: 8000,
   virtualization: 20_000,
   kubernetes: 25_000,
+  // ソフトウェア(DB の分割)
+  partition: 30_000,
+  sharding: 80_000,
+  // 回線と配信
+  multihoming: 60_000,
+  cdn: 40_000,
   // 機器
   tenGig: 5000,
   agg: 12_000,
@@ -149,6 +157,12 @@ export function campaignPrice(users: number): number {
   return Math.round((CAMPAIGN_PRICE.base + CAMPAIGN_PRICE.perUser * users) * PRICE_SCALE);
 }
 
+/** 回線を増やす(回線終端を 1 本足す)工事費。1 本目は最初からあるので、2 本目が first */
+export const LINE_PRICE: GrowingPrice = { first: 5000, growth: 1.5 };
+
+/** CDN の従量課金: 配った 1GB あたり($) */
+export const CDN_PRICE_PER_GB = 0.02;
+
 /** n 回目(0 始まり)の購入価格 */
 export function growingPrice(p: GrowingPrice, n: number): number {
   return Math.round(p.first * p.growth ** n * PRICE_SCALE);
@@ -160,7 +174,7 @@ export function unlockPrice(id: UnlockId): number {
 
 /** スイッチ・ストレージの価格(サーバは serverPrice) */
 export function modelPrice(id: ModelId, owned: number): number {
-  if (id === 'handoff') return 0;
+  if (id === 'handoff') return growingPrice(LINE_PRICE, Math.max(0, owned - 1));
   if (id === 'srv-1u' || id === 'srv-2u') return Math.round(CHASSIS_PRICES[id] * PRICE_SCALE);
   return growingPrice(MODEL_PRICES[id], owned);
 }

@@ -121,6 +121,33 @@ export const UNLOCKS: readonly UnlockDef[] = [
       'サーバと ToR スイッチの間で BGP を使えるようになる。物理サーバは詳細で「BGP を使う」をオンにする(ハイパーバイザは自動)。2 台の ToR につなぐと ECMP で両方に流れ、片方が止まっても残りで続く。BGP なしのサーバは一番若いポートの 1 本しか使わない。',
   },
   {
+    id: 'partition',
+    name: 'DB の機能分割',
+    description:
+      'サービスの db(プライマリ)を 2 台にできる。1 台目が主なデータ、2 台目が書き込みの多いデータ(コメント・注文など)を持ち、書き込みはすべて 2 台目に行く。データが分かれるぶん、それぞれメモリに乗りやすくなる。',
+    requires: 'replication',
+  },
+  {
+    id: 'sharding',
+    name: 'シャーディング',
+    description:
+      'サービスの db(プライマリ)を何台にでも分けられる。読み込み・書き込み・データを台数で等分する。レプリカは順番にそれぞれの db の複製になる。書き込みの上限を台数で伸ばせる。',
+    requires: 'partition',
+  },
+  {
+    id: 'multihoming',
+    name: '回線の多重化',
+    description:
+      '回線終端を増やせるようになる(前面の空き U から買う。回線契約の速度と月額は 1 本ごと)。BGP で複数の回線に分けて流し、1 本が止まっても残りで続く。',
+    requires: 'bgp',
+  },
+  {
+    id: 'cdn',
+    name: 'CDN',
+    description:
+      'ブログの画像と、写真・動画の配信の多くを CDN が配る(オリジンの回線・サーバを通らない)。配った量に応じて従量課金がかかる。',
+  },
+  {
     id: 'nvme',
     name: 'NVMe SSD',
     description:
@@ -242,6 +269,18 @@ export const STAGES: readonly StageDef[] = [
       'Kubernetes のワーカーに Pod を自動で置き、負荷に合わせて数を増減する。ワーカーが止まっても Pod は別のワーカーに置き直される。BGP があれば LB なしで受けられる。',
     unlocks: ['kubernetes'],
   },
+  {
+    id: 11,
+    name: 'シャーディング',
+    summary: 'db の書き込みは 1 台が上限。機能分割で書き込みの多いデータを別の db へ、シャーディングで台数ぶんに分ける。',
+    unlocks: ['partition', 'sharding'],
+  },
+  {
+    id: 12,
+    name: '回線の多重化と CDN',
+    summary: '回線 1 本(10G)が上限。回線を増やして BGP で分け、画像・動画は CDN から配ってオリジンの帯域を減らす。',
+    unlocks: ['multihoming', 'cdn'],
+  },
 ];
 
 /** 投資メニューのタブ */
@@ -265,14 +304,14 @@ export const LINES: readonly LineDef[] = [
     id: 'facility',
     name: '回線・電力',
     summary: 'キャリアやデータセンターとの契約。回線の太さとラックの電力。',
-    unlocks: [],
+    unlocks: ['multihoming', 'cdn'],
     upgrades: ['uplink', 'rackPower'],
   },
   {
     id: 'software',
     name: 'ソフトウェア',
     summary: 'サーバに割り当てられる役割を増やす。',
-    unlocks: ['lb', 'cache', 'replication', 'virtualization', 'kubernetes'],
+    unlocks: ['lb', 'cache', 'replication', 'partition', 'sharding', 'virtualization', 'kubernetes'],
     upgrades: [],
   },
   {

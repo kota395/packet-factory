@@ -13,6 +13,7 @@ import {
 import {
   BLOG_FEATURES,
   CAMPAIGN,
+  CDN,
   CHURN,
   DIFFICULTY,
   K8S,
@@ -45,6 +46,7 @@ import {
   START_MONEY,
   UPKEEP,
   BACKPLANE_PRICE,
+  CDN_PRICE_PER_GB,
   cpuPrice,
   drivePrice,
   memoryPrice,
@@ -214,26 +216,53 @@ export class Simulation {
   /** サービスの 1 ページビューあたりの仕事量(機能のオン/オフを反映) */
   workloadOf(id: ServiceId): Workload {
     const w = SERVICES[id].work;
-    if (id !== 'blog') return w;
+    // CDN があれば、画像・動画の多くはオリジンまで来ない
+    const miss = this.unlocks.has('cdn') ? 1 - CDN.hitRate : 1;
+    if (id !== 'blog') return w.media && miss < 1 ? { ...w, media: { ...w.media, perPv: w.media.perPv * miss } } : w;
     return {
       ...w,
-      pageKB: w.pageKB + (this.isFeatureActive('images') ? BLOG_FEATURES.imageKB : 0),
+      pageKB: w.pageKB + (this.isFeatureActive('images') ? BLOG_FEATURES.imageKB * miss : 0),
       dbWrites: w.dbWrites + (this.isFeatureActive('comments') ? BLOG_FEATURES.commentWrites : 0),
     };
   }
 
-  /** 維持費の内訳($/秒) */
-  get upkeep(): { racks: number; uplink: number; power: number } {
+  /** 回線の本数(回線終端の数) */
+  get lineCount(): number {
+    let n = 0;
+    for (const d of this.facility.devices.values()) if (d.model === 'handoff') n++;
+    // 回線の契約は最初から 1 本ある
+    return Math.max(1, n);
+  }
+
+  /** 維持費の内訳($/秒)。回線は本数ぶん、CDN は配った量に応じて */
+  get upkeep(): { racks: number; uplink: number; power: number; cdn: number } {
     const racks = this.facility.racks.size * UPKEEP.rackByPowerLevel[this.upgrades.rackPower];
-    const uplink = UPKEEP.uplinkByLevel[this.upgrades.uplink];
+    const uplink = UPKEEP.uplinkByLevel[this.upgrades.uplink] * this.lineCount;
     let watts = 0;
     for (const d of this.facility.devices.values()) watts += specOf(d).powerW;
-    return { racks, uplink, power: (watts / 1000) * UPKEEP.perKw };
+    const cdn = this.cdnGBps * CDN_PRICE_PER_GB;
+    return { racks, uplink, power: (watts / 1000) * UPKEEP.perKw, cdn };
   }
 
   get upkeepPerSec(): number {
     const u = this.upkeep;
-    return u.racks + u.uplink + u.power;
+    return u.racks + u.uplink + u.power + u.cdn;
+  }
+
+  /** CDN が配っている量(GB/秒) */
+  get cdnGBps(): number {
+    if (!this.unlocks.has('cdn')) return 0;
+    let kb = 0;
+    for (const id of this.activeServices) kb += this.trafficOf(id, this.time) * this.cdnKBPerPv(id);
+    return kb / 1e6;
+  }
+
+  /** CDN が 1 ページビューあたりに配る量(KB) */
+  private cdnKBPerPv(id: ServiceId): number {
+    const w = SERVICES[id].work;
+    const images = id === 'blog' && this.isFeatureActive('images') ? BLOG_FEATURES.imageKB : 0;
+    const media = w.media ? w.media.perPv * w.media.kb : 0;
+    return (images + media) * CDN.hitRate;
   }
 
   get incomePerSec(): number {
@@ -348,9 +377,16 @@ export class Simulation {
     return PRESET_BY_ID[model === 'srv-1u' ? '1u-web' : '2u-hdd'].parts;
   }
 
+  /** 最初からある回線終端(動かせない・売れない・止められない) */
+  isMainLine(id: number): boolean {
+    let first: number | null = null;
+    for (const d of this.facility.devices.values()) if (d.model === 'handoff' && (first === null || d.id < first)) first = d.id;
+    return first === id;
+  }
+
   canBuyModel(model: ModelId, parts?: ServerParts): string | null {
     const m = MODEL_BY_ID[model];
-    if (m.category === 'handoff') return '回線終端は買えません';
+    if (m.category === 'handoff' && !this.unlocks.has('multihoming')) return `回線を増やすには投資の「${UNLOCK_BY_ID.multihoming.name}」が必要です`;
     if (m.requires && !this.unlocks.has(m.requires)) return `投資の「${UNLOCK_BY_ID[m.requires].name}」が必要です`;
     if (parts) return this.partsUnlockError(parts);
     return null;
@@ -501,7 +537,7 @@ export class Simulation {
   moveDevice(id: number, slot: number, u: number): ActionResult {
     const d = this.facility.devices.get(id);
     if (!d) return { ok: false, message: '機器が見つかりません' };
-    if (MODEL_BY_ID[d.model].category === 'handoff') return { ok: false, message: '回線終端は動かせません' };
+    if (this.isMainLine(d.id)) return { ok: false, message: '最初の回線終端は動かせません' };
     if (d.slot === slot && d.u === u) return { ok: true };
     const err = this.placeError(d.model, slot, u, id);
     if (err) return { ok: false, message: err };
@@ -513,7 +549,7 @@ export class Simulation {
   sellDevice(id: number): ActionResult {
     const d = this.facility.devices.get(id);
     if (!d) return { ok: false, message: '機器が見つかりません' };
-    if (MODEL_BY_ID[d.model].category === 'handoff') return { ok: false, message: '回線終端は撤去できません' };
+    if (this.isMainLine(d.id)) return { ok: false, message: '最初の回線終端は撤去できません' };
     const vms = this.facility.vmsOn(id);
     if (vms.length) return { ok: false, message: `${d.name} には VM が ${vms.length} 台載っています。先に移すか消してください` };
     // サーバは今の構成の価格で引き取る
@@ -613,7 +649,7 @@ export class Simulation {
   setMaintenance(id: number, down: boolean): ActionResult {
     const d = this.facility.devices.get(id);
     if (!d) return { ok: false, message: '機器が見つかりません' };
-    if (MODEL_BY_ID[d.model].category === 'handoff') return { ok: false, message: '回線終端は止められません' };
+    if (this.isMainLine(d.id)) return { ok: false, message: '最初の回線終端は止められません(増やした回線は止められる)' };
     this.facility.setDown(id, down);
     this.schedule();
     this.refreshFlow();
@@ -1019,6 +1055,7 @@ export class Simulation {
       roles: this.availableRoles,
       now: this.time,
       bgp: this.unlocks.has('bgp'),
+      dbSplit: this.unlocks.has('sharding') ? 'shard' : this.unlocks.has('partition') ? 'functional' : 'none',
       down: this.downDevices,
     });
     for (const [key, n] of this.podsPending) {

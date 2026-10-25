@@ -11,7 +11,7 @@
  * VM のディスクは、ホストのローカルディスクか共有ストレージ(ネットワーク越しの IO)に置く。
  */
 import { MODEL_BY_ID, portsOf, specOf } from './catalog';
-import { K8S, MAX_QUEUE_RHO, NET, P99_FACTOR, REPLICATION, ROLE_MEM_GB, SERVICES, VIRT, WORK, type Workload } from './config';
+import { DB_SPLIT, K8S, MAX_QUEUE_RHO, NET, P99_FACTOR, REPLICATION, ROLE_MEM_GB, SERVICES, VIRT, WORK, type Workload } from './config';
 import type { Facility } from './facility';
 import { ROLE_IDS, roleKey, splitRole, type DiskKind, type RoleId, type RoleKey, type ServiceId } from './types';
 
@@ -46,6 +46,8 @@ export interface FlowInput {
   readonly now: number;
   /** BGP を解放しているか */
   readonly bgp: boolean;
+  /** db(プライマリ)を分けられるか: 1 台だけ / 機能分割(2 台)/ シャーディング(何台でも) */
+  readonly dbSplit?: 'none' | 'functional' | 'shard';
   /** 止まっている機器(メンテナンス・障害) */
   readonly down: ReadonlySet<number>;
 }
@@ -452,8 +454,11 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     if (v.downUntil > input.now) problems.push(`${v.name} は別のホストへ移している途中で止まっています`);
   }
   const loads = new Map<number, NodeLoad>(nodeList.map((n) => [n.id, { cpu: 0, io: 0, ioOps: 0, work: {}, miss: {} }]));
-  const handoff = [...facility.devices.values()].find((d) => MODEL_BY_ID[d.model].category === 'handoff');
-  if (!handoff || !g.adj.has(handoff.id)) problems.push('回線終端にケーブルがつながっていません');
+  // 回線終端(回線を増やしていれば複数。BGP で、届く回線に均等に分かれる)
+  const handoffs = [...facility.devices.values()]
+    .filter((d) => MODEL_BY_ID[d.model].category === 'handoff' && !input.down.has(d.id) && g.adj.has(d.id))
+    .sort((a, b) => a.id - b.id);
+  if (!handoffs.length) problems.push('回線終端にケーブルがつながっていません');
   const activeServices = new Set(input.services.map((s) => s.id));
   /** その役割が今動いているか(サービスが始まっていて、役割が解放済み) */
   const isActive = (k: RoleKey) => {
@@ -490,8 +495,20 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   };
   /** ノードの間の通信(同じホストの VM 同士ならネットワークを通らない) */
   const send = (a: number, b: number, fwdGbps: number, backGbps: number) => sendDev(hostOf(a), hostOf(b), fwdGbps, backGbps);
-  /** 回線から(へ)の通信 */
-  const fromNet = (id: number, inGbps: number, outGbps: number) => (handoff ? sendDev(handoff.id, hostOf(id), inGbps, outGbps) : null);
+  /** そのノードに届く回線 */
+  const linesTo = (id: number) => handoffs.filter((h) => route(h.id, hostOf(id)));
+  /** 回線から(へ)の通信。届く回線に均等に分ける */
+  const fromNet = (id: number, inGbps: number, outGbps: number) => {
+    const lines = linesTo(id);
+    for (const h of lines) sendDev(h.id, hostOf(id), inGbps / lines.length, outGbps / lines.length);
+  };
+  /** 回線からノードまでを通って溢れない割合と時間(届く回線の平均) */
+  const fromNetAlong = (id: number): [number, number] => {
+    const lines = linesTo(id);
+    if (!lines.length) return [0, 0];
+    const parts = lines.map((h) => along(route(h.id, hostOf(id))));
+    return [avg(parts.map((x) => x[0])), avg(parts.map((x) => x[1]))];
+  };
 
   /** CPU の仕事を積む。Pod ならワーカーにも、VM(か VM の上の Pod)ならホストの CPU にも(仮想化のオーバーヘッド込みで) */
   const addCpu = (id: number, perSec: number, cpuMs: number) => {
@@ -563,10 +580,26 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
         if (s === svc.id && isActive(k)) inst[r].push(n.id);
       }
     }
-    if (inst.db.length > 1) {
-      sp.push(`db(プライマリ)は 1 台だけ使われます(${name(inst.db[0])})。読み込みを分けるならレプリカを使う`);
-      inst.db = inst.db.slice(0, 1);
+    // ---- db(プライマリ)の分け方
+    //  1 台: 読み書きすべて / 機能分割: 1 台目が主なデータ(読み込みの多く)、2 台目が書き込みの多いデータ(コメント・注文など)
+    //  シャーディング: 読み書きとデータを台数で等分
+    const split = input.dbSplit ?? 'none';
+    const maxDb = split === 'shard' ? Infinity : split === 'functional' ? 2 : 1;
+    if (inst.db.length > maxDb) {
+      sp.push(
+        split === 'functional'
+          ? `機能分割で使う db は 2 台までです(${name(inst.db[0])} と ${name(inst.db[1])})。もっと分けるならシャーディング`
+          : `db(プライマリ)は 1 台だけ使われます(${name(inst.db[0])})。読み込みを分けるならレプリカ、書き込みを分けるなら機能分割かシャーディング`,
+      );
+      inst.db = inst.db.slice(0, maxDb);
     }
+    const shards: { primary: number; read: number; write: number; data: number; replicas: number[] }[] =
+      inst.db.length === 2 && split === 'functional'
+        ? [
+            { primary: inst.db[0], read: 1 - DB_SPLIT.functionalReadShare, write: 0, data: 1 - DB_SPLIT.functionalReadShare, replicas: [] },
+            { primary: inst.db[1], read: DB_SPLIT.functionalReadShare, write: 1, data: DB_SPLIT.functionalReadShare, replicas: [] },
+          ]
+        : inst.db.map((id) => ({ primary: id, read: 1 / inst.db.length, write: 1 / inst.db.length, data: 1 / inst.db.length, replicas: [] }));
     const useLb = inst.lb.length > 0;
     // LB がなければ、BGP で広報している Pod(MetalLB)がそれぞれ受ける。それもなければ web 1 台だけ
     const advertised = inst.web.filter((n) => nodes.get(n)!.advertised);
@@ -581,6 +614,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     if (!inst.web.length) sp.push('役割「web」のサーバがありません');
     if (!inst.db.length) sp.push('役割「db」のサーバがありません(db がないとページを表示できない)');
     const webs = useLb ? inst.web : entries;
+    /** 検索の肩代わりなどに使う、最初の db */
     const primary: number | undefined = inst.db[0];
     const caches = inst.cache;
     const pv = svc.pv;
@@ -602,12 +636,12 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
       sp.push('役割「search」がないので、db が検索を肩代わりしています(LIKE 検索は重い)');
     }
 
-    // ---- レプリカ: プライマリから届くものだけ使う
-    const replicas = inst.replica.filter((r) => {
-      if (primary === undefined) return false;
-      if (path(primary, r)) return true;
-      sp.push(`${name(r)}(レプリカ)に db から届かないので複製できず、使われません`);
-      return false;
+    // ---- レプリカ: db を分けていれば、順番にそれぞれの db の複製にする(複製元から届くものだけ使う)
+    inst.replica.forEach((r, i) => {
+      if (!shards.length) return;
+      const sh = shards[i % shards.length];
+      if (path(sh.primary, r)) sh.replicas.push(r);
+      else sp.push(`${name(r)}(レプリカ)に ${name(sh.primary)}(db)から届かないので複製できず、使われません`);
     });
     if (inst.replica.length && primary === undefined) sp.push('レプリカの複製元(db)がありません');
 
@@ -645,6 +679,8 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     const jobsOn = new Map<number, number>();
     let dbSearches = 0;
     let totalWrites = 0;
+    /** db(プライマリ)ごとの書き込み */
+    const writesOn = new Map<number, number>();
     for (const w of webs) {
       const wpv = pvOf.get(w) ?? 0;
       const up = upOf.get(w) ?? 0;
@@ -661,17 +697,20 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
       // 書き込み: ページの書き込み(注文・コメント)と、投稿の登録
       const wr = wpv * W.dbWrites + up;
       totalWrites += wr;
-      // 読み込みはレプリカ(届くもの)に分け、なければプライマリ
-      const repReach = replicas.filter((r) => path(w, r));
-      for (const r of repReach) {
-        const n = toDb / repReach.length;
-        send(w, r, n * WORK.queryKB * GB_PER_KB, n * WORK.dbReadKB * GB_PER_KB);
-        readsOn.set(r, (readsOn.get(r) ?? 0) + n);
-      }
-      if (primary !== undefined) {
-        const toPrimary = repReach.length ? 0 : toDb;
-        send(w, primary, (toPrimary * WORK.queryKB + wr * WORK.queryKB * 2) * GB_PER_KB, toPrimary * WORK.dbReadKB * GB_PER_KB);
-        readsOn.set(primary, (readsOn.get(primary) ?? 0) + toPrimary);
+      for (const sh of shards) {
+        const rd = toDb * sh.read;
+        const wrs = wr * sh.write;
+        writesOn.set(sh.primary, (writesOn.get(sh.primary) ?? 0) + wrs);
+        // 読み込みはその db のレプリカ(届くもの)に分け、なければプライマリ
+        const repReach = sh.replicas.filter((r) => path(w, r));
+        for (const r of repReach) {
+          const n = rd / repReach.length;
+          send(w, r, n * WORK.queryKB * GB_PER_KB, n * WORK.dbReadKB * GB_PER_KB);
+          readsOn.set(r, (readsOn.get(r) ?? 0) + n);
+        }
+        const toPrimary = repReach.length ? 0 : rd;
+        send(w, sh.primary, (toPrimary * WORK.queryKB + wrs * WORK.queryKB * 2) * GB_PER_KB, toPrimary * WORK.dbReadKB * GB_PER_KB);
+        readsOn.set(sh.primary, (readsOn.get(sh.primary) ?? 0) + toPrimary);
       }
       // 検索: 届く search に分け、なければ db(プライマリ)が肩代わり
       if (W.search) {
@@ -700,28 +739,31 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     }
 
     // ---- db とレプリカ: CPU と、メモリに乗らなかった読み込み・書き込みのディスク IO
-    if (primary !== undefined) {
-      const reads = readsOn.get(primary) ?? 0;
-      const miss = missOf(primary, key('db'), WORK.dbMissPerGB);
-      addWork(primary, key('db'), reads, WORK.dbReadCpuMs);
-      if (totalWrites) addWork(primary, key('db'), totalWrites, WORK.dbWriteCpuMs);
-      let io = reads * miss + totalWrites * WORK.dbWriteIo;
-      if (W.search && dbSearches) {
-        addWork(primary, key('db'), dbSearches, W.search.dbCpuMs);
+    // データを分けると 1 台あたりのデータが減り、メモリに乗りやすくなる
+    for (const sh of shards) {
+      const p = sh.primary;
+      const reads = readsOn.get(p) ?? 0;
+      const writes = writesOn.get(p) ?? 0;
+      const miss = missOf(p, key('db'), WORK.dbMissPerGB * sh.data);
+      addWork(p, key('db'), reads, WORK.dbReadCpuMs);
+      if (writes) addWork(p, key('db'), writes, WORK.dbWriteCpuMs);
+      let io = reads * miss + writes * WORK.dbWriteIo;
+      if (W.search && dbSearches && p === primary) {
+        addWork(p, key('db'), dbSearches, W.search.dbCpuMs);
         io += dbSearches * W.search.dbIo * miss;
       }
-      addIo(primary, io);
-    }
-    for (const r of replicas) {
-      const reads = readsOn.get(r) ?? 0;
-      const miss = missOf(r, key('replica'), WORK.dbMissPerGB);
-      addWork(r, key('replica'), reads, WORK.dbReadCpuMs);
-      // 書き込みはすべてのレプリカに複製され、反映にも CPU と IO を使う
-      if (totalWrites) {
-        addCpu(r, totalWrites, WORK.dbWriteCpuMs * REPLICATION.applyCpu);
-        send(primary!, r, totalWrites * WORK.queryKB * 2 * GB_PER_KB, 0);
+      addIo(p, io);
+      for (const r of sh.replicas) {
+        const rr = readsOn.get(r) ?? 0;
+        const rmiss = missOf(r, key('replica'), WORK.dbMissPerGB * sh.data);
+        addWork(r, key('replica'), rr, WORK.dbReadCpuMs);
+        // その db の書き込みはすべてのレプリカに複製され、反映にも CPU と IO を使う
+        if (writes) {
+          addCpu(r, writes, WORK.dbWriteCpuMs * REPLICATION.applyCpu);
+          send(p, r, writes * WORK.queryKB * 2 * GB_PER_KB, 0);
+        }
+        addIo(r, rr * rmiss + writes * WORK.dbWriteIo * REPLICATION.applyIo);
       }
-      addIo(r, reads * miss + totalWrites * WORK.dbWriteIo * REPLICATION.applyIo);
     }
     // ---- 検索サーバ: 索引がメモリに乗らなければディスクへ
     if (W.search) {
@@ -773,21 +815,31 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
       const readOn = (id: number, k: RoleKey) => cpuMs(id, WORK.dbReadCpuMs) + (loads.get(id)!.miss[k] ?? 1) * ioMs(id);
 
       const dataPart = (w: number): [number, number] => {
-        if (primary === undefined && !replicas.length) return [0, 0];
+        if (!shards.length) return [0, 0];
+        // db ごとに、読み込み(レプリカに届けばレプリカ、なければプライマリ)と書き込み(プライマリ)を見て、割合で合わせる
+        let readOk = 0;
+        let readMs = 0;
+        let writeOk = 0;
+        let writeMs = 0;
         let primaryOk = 0;
         let primaryMs = 0;
-        if (primary !== undefined) {
-          const [netOk, netMs] = along(path(w, primary));
-          primaryOk = netOk * nodeOk(primary);
-          primaryMs = netMs;
-        }
-        // 読み込み: レプリカに届けばレプリカ、なければプライマリ
-        const reps = replicas.filter((r) => path(w, r));
-        let readOk = primaryOk;
-        let readMs = primary !== undefined ? primaryMs + readOn(primary, key('db')) : 0;
-        if (reps.length) {
-          readOk = avg(reps.map((r) => along(path(w, r))[0] * nodeOk(r)));
-          readMs = avg(reps.map((r) => along(path(w, r))[1] + readOn(r, key('replica'))));
+        for (const sh of shards) {
+          const [netOk, netMs] = along(path(w, sh.primary));
+          const pOk = netOk * nodeOk(sh.primary);
+          if (sh.primary === primary) {
+            primaryOk = pOk;
+            primaryMs = netMs;
+          }
+          const reps = sh.replicas.filter((r) => path(w, r));
+          if (reps.length) {
+            readOk += sh.read * avg(reps.map((r) => along(path(w, r))[0] * nodeOk(r)));
+            readMs += sh.read * avg(reps.map((r) => along(path(w, r))[1] + readOn(r, key('replica'))));
+          } else {
+            readOk += sh.read * pOk;
+            readMs += sh.read * (netMs + readOn(sh.primary, key('db')));
+          }
+          writeOk += sh.write * pOk;
+          writeMs += sh.write * (netMs + cpuMs(sh.primary, WORK.dbWriteCpuMs) + WORK.dbWriteIo * ioMs(sh.primary));
         }
         const cacheReach = caches.filter((c) => path(w, c));
         if (cacheReach.length) {
@@ -797,9 +849,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
         }
         // 書き込みはプライマリだけ。書き込むページの分だけ、プライマリが溢れると失敗する
         const writeShare = Math.min(1, W.dbWrites);
-        let ok = readOk * (1 - writeShare * (1 - primaryOk));
-        const writeMs =
-          primary !== undefined ? primaryMs + cpuMs(primary, WORK.dbWriteCpuMs) + WORK.dbWriteIo * ioMs(primary) : 0;
+        let ok = readOk * (1 - writeShare * (1 - writeOk));
         let ms = W.dbReads * readMs + W.dbWrites * writeMs;
         // 検索
         if (W.search) {
@@ -829,7 +879,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
       let pageOk = 0;
       let pageMs = 0;
       for (const e of entries) {
-        const [inOk, inMs] = along(handoff ? route(handoff.id, hostOf(e)) : null);
+        const [inOk, inMs] = fromNetAlong(e);
         let ok = 0;
         let ms = 0;
         if (useLb) {
@@ -858,7 +908,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
         let mOk = 0;
         let mMs = 0;
         for (const e of mediaEntries) {
-          const [inOk, inMs] = along(handoff ? route(handoff.id, hostOf(e)) : null);
+          const [inOk, inMs] = fromNetAlong(e);
           let ok: number;
           let ms: number;
           if (useLb) {
@@ -887,7 +937,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
         };
         let upOk = 0;
         for (const e of entries) {
-          const [inOk] = along(handoff ? route(handoff.id, hostOf(e)) : null);
+          const [inOk] = fromNetAlong(e);
           const ok = useLb ? nodeOk(e) * avg(webs.map((w) => along(path(e, w))[0] * workOk(w))) : workOk(e);
           upOk += (inOk * ok) / entries.length;
         }
@@ -899,13 +949,13 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     // ---- 届かない所の警告
     const warnRoutes = () => {
       for (const e of entries) {
-        if (handoff && g.adj.has(handoff.id) && !route(handoff.id, hostOf(e))) sp.push(`回線から ${name(e)} への経路がありません`);
+        if (handoffs.length && !linesTo(e).length) sp.push(`回線から ${name(e)} への経路がありません`);
       }
       if (useLb) {
         for (const e of entries) for (const w of webs) if (!path(e, w)) sp.push(`${name(e)}(lb)から ${name(w)}(web)への経路がありません`);
       }
-      if (primary !== undefined) {
-        for (const w of webs) if (!path(w, primary)) sp.push(`${name(w)}(web)から ${name(primary)}(db)への経路がありません`);
+      for (const sh of shards) {
+        for (const w of webs) if (!path(w, sh.primary)) sp.push(`${name(w)}(web)から ${name(sh.primary)}(db)への経路がありません`);
       }
       for (const w of webs) {
         if (caches.length && !caches.some((c) => path(w, c))) {
@@ -976,7 +1026,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     if (l.storage == null) return 0;
     return VIRT.storageMs * q(l.io) + along(route(n.host, l.storage))[1];
   }
-  const handoffLinks = handoff ? [...(g.adj.get(handoff.id)?.values() ?? [])] : [];
+  const handoffLinks = handoffs.flatMap((h) => [...(g.adj.get(h.id)?.values() ?? [])]);
   const uplinkRho = handoffLinks.length ? Math.max(...handoffLinks.map(linkRho)) : 0;
   /** 回線を通って利用者に届くまでの時間 */
   function transferMs(kb: number): number {

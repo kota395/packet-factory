@@ -422,7 +422,7 @@ export class InfoPanel {
         `<div class="role-buttons"><button type="button" class="toggle ${d.bgp ? 'on' : ''}" data-act="bgp" data-id="${d.id}" data-on="${d.bgp ? '0' : '1'}">BGP を使う</button></div>`,
       );
     }
-    if (m.category !== 'handoff') {
+    if (!sim.isMainLine(d.id)) {
       fixed += `<div class="actions">
         <button type="button" data-act="maint" data-id="${d.id}" data-on="${d.down ? '0' : '1'}">${d.down ? 'メンテナンスから戻す' : 'メンテナンスで止める'}</button>
         <button type="button" class="danger" data-act="sell" data-id="${d.id}">売却する(+${money(Math.floor(d.paid * SELL_REFUND_RATE))})</button>
@@ -622,6 +622,8 @@ export class InfoPanel {
         return item(MODEL_BY_ID[p.model], p.name, `${drives}(ミラー)。${p.description}`, p.id);
       }),
       ...BUYABLE_MODELS.filter((m) => !isServerModel(m.id)).map((m) => item(m, m.name, '')),
+      // 回線を増やす(回線の多重化を解放したら)
+      item(MODEL_BY_ID.handoff, '回線を追加(回線終端)', `回線契約(${gbps(sim.uplinkGbps)})が 1 本ぶん増え、月額も 1 本ぶんかかる。BGP で回線に分けて流す。`),
     ].join('');
     const power = sim.facility.powerUsed(slot);
     return {
@@ -757,7 +759,9 @@ export class InfoPanel {
     chain.push(`web ×${count('web')}`);
     if (count('cache')) chain.push(`cache ×${count('cache')}`);
     if (W.search) chain.push(count('search') ? `search ×${count('search')}` : 'search(db が肩代わり)');
-    chain.push(`db ×${count('db')}`);
+    const dbMode =
+      count('db') > 1 ? (sim.unlocks.has('sharding') ? '(シャーディング)' : sim.unlocks.has('partition') ? '(機能分割)' : '') : '';
+    chain.push(`db ×${count('db')}${dbMode}`);
     if (count('replica')) chain.push(`replica ×${count('replica')}`);
     const side: string[] = [];
     if (W.media) side.push(count('media') ? `media ×${count('media')}` : 'media(web が肩代わり)');
@@ -792,7 +796,8 @@ export class InfoPanel {
     const money_: [string, string][] = [
       ...active.map((s): [string, string] => [`売上(${SERVICES[s].name})`, rate(sim.metrics.rollingOf(s).revenuePerSec)]),
       ['ラック賃料', rate(-u.racks)],
-      ['回線', rate(-u.uplink)],
+      [`回線(${sim.lineCount} 本)`, rate(-u.uplink)],
+      ...(sim.unlocks.has('cdn') ? ([[`CDN(${(sim.cdnGBps * 8).toFixed(2)} Gbps)`, rate(-u.cdn)]] as [string, string][]) : []),
       ['電気代', rate(-u.power)],
     ];
     const b = flow.bottleneck;

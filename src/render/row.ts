@@ -311,7 +311,7 @@ export class RowRenderer {
         wireFrom = portAt(f, p, this.portRadius);
       } else {
         const d = this.deviceAtPoint(p);
-        if (d && MODEL_BY_ID[d.model].category !== 'handoff') {
+        if (d && !this.sim!.isMainLine(d.id)) {
           moveId = d.id;
           grabU = (unitAt(p.y) ?? d.u) - d.u;
         }
