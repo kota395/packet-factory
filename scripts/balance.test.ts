@@ -5,7 +5,8 @@
  * 調整値(src/sim/config.ts, pricing.ts, catalog.ts, economy.ts)を変えたら、ログの節目の時刻を見比べる。
  */
 import { it } from 'vitest';
-import { MODEL_BY_ID, portsOf } from '../src/sim/catalog';
+import { MODEL_BY_ID, PRESET_BY_ID, portsOf } from '../src/sim/catalog';
+import type { PartChange } from '../src/sim/simulation';
 import { RACK } from '../src/sim/config';
 import { unlockCost } from '../src/sim/economy';
 import { createSave, newGame } from '../src/sim/save';
@@ -25,7 +26,7 @@ it(`balance bot (${MINUTES} min)`, () => {
   const isSwitch = (m: ModelId) => MODEL_BY_ID[m].category === 'switch';
   const freePort = (id: number): PortRef | null => {
     const d = f.devices.get(id)!;
-    for (let i = 0; i < portsOf(d.model).length; i++) if (!f.cableAt({ device: id, port: i })) return { device: id, port: i };
+    for (let i = 0; i < portsOf(d).length; i++) if (!f.cableAt({ device: id, port: i })) return { device: id, port: i };
     return null;
   };
   /** そのラックで、上から空いている U を探す(電力も見る) */
@@ -33,19 +34,21 @@ it(`balance bot (${MINUTES} min)`, () => {
     for (let u = RACK.units - MODEL_BY_ID[model].u + 1; u >= 1; u--) if (!s.placeError(model, slot, u)) return u;
     return null;
   };
-  /** 機器を買って、同じラックの ToR(なければ最初のスイッチ)につなぐ */
-  const buyServer = (model: ModelId, roles: RoleKey[]): number | null => {
+  /** サーバ(プリセット)を買って、同じラックの ToR(なければ最初のスイッチ)につなぐ */
+  const buyServer = (preset: string, roles: RoleKey[]): number | null => {
+    const { model, parts } = PRESET_BY_ID[preset];
     // ケーブル代も残しておく
-    if (s.money < s.devicePrice(model) + 30) return null;
+    if (s.money < s.devicePrice(model, parts) + 30) return null;
     for (const slot of [...f.racks.keys()].sort((a, b) => a - b)) {
       const tor = devices((d) => isSwitch(d.model)).find((d) => (d as { slot: number }).slot === slot && freePort(d.id) !== null);
-      const u = findU(model, slot);
+      let u: number | null = null;
+      for (let x = RACK.units - MODEL_BY_ID[model].u + 1; x >= 1 && u === null; x--) if (!s.placeError(model, slot, x, undefined, parts)) u = x;
       if (u === null || !tor) continue;
-      const r = s.buyDevice(model, slot, u);
+      const r = s.buyServer(preset, slot, u);
       if (!r.ok) continue;
       s.connect({ device: r.id!, port: 0 }, freePort(tor.id)!);
       for (const role of roles) s.toggleRole(r.id!, role);
-      event(`${MODEL_BY_ID[model].short} 設置(${roles.join('+') || '役割なし'})`);
+      event(`${preset} 設置(${roles.join('+') || '役割なし'})`);
       return r.id!;
     }
     return null;
@@ -113,33 +116,38 @@ it(`balance bot (${MINUTES} min)`, () => {
       const name = label.split(' ')[0];
       const dev = [...f.devices.values()].find((d) => d.name === name);
       if (dev && MODEL_BY_ID[dev.model].category === 'server') {
-        // レプリカが詰まっている: レプリカを足す
-        if (dev.roles.includes('blog:replica')) {
-          return buyServer('srv-2u-db', ['blog:replica']) !== null || powerOrRack('srv-2u-db');
-        }
-        // db が詰まっている: 上位機種へ移す
-        if (dev.roles.includes('blog:db')) {
-          const target: ModelId = dev.model === 'srv-1u-e' ? 'srv-1u-d' : 'srv-2u-db';
-          if (dev.model === 'srv-2u-db') {
+        /** パーツを替えてみる(お金と電力が足りれば) */
+        const upgrade = (change: PartChange) => {
+          const r = s.changeParts(dev.id, change);
+          if (r.ok) event(`${dev.name} 強化: ${change.kind}${'type' in change ? ` ${change.type}` : ''}${'to' in change ? ` ${change.to}` : ''}`);
+          return r.ok;
+        };
+        const p = dev.parts!;
+        // ディスク IO: メモリ → SSD に替える → ドライブを足す → (db なら)キャッシュ・レプリカ
+        if (label.includes('ディスク IO')) {
+          if (p.memGB < 64 && s.partChangeInfo(dev.id, { kind: 'mem', dir: 1 }).cost < s.money / 2) return upgrade({ kind: 'mem', dir: 1 });
+          if (p.backplane === 'lff' && s.money > 1500) return upgrade({ kind: 'backplane', to: 'sff' });
+          if (p.backplane === 'sff' && p.drives.length < 8 && upgrade({ kind: 'drive-add', type: 'ssd' })) return true;
+          if (dev.roles.includes('blog:db')) {
             if (!s.unlocks.has('cache')) return tryUnlock('cache');
-            if (!flow.services.blog!.instances.cache.length) return buyServer('srv-1u-e', ['blog:cache']) !== null;
+            if (!flow.services.blog!.instances.cache.length) return buyServer('1u-small', ['blog:cache']) !== null;
             if (!s.unlocks.has('replication')) return tryUnlock('replication');
-            return buyServer('srv-2u-db', ['blog:replica']) !== null || powerOrRack('srv-2u-db');
           }
-          const id = buyServer(target, ['blog:db']);
-          if (id === null) return powerOrRack(target);
-          s.toggleRole(dev.id, 'blog:db');
-          if (!dev.roles.length) s.toggleRole(dev.id, 'blog:web');
-          event(`db を ${f.devices.get(id)!.name} へ移す`);
-          return true;
+          return buyServer('2u-ssd', ['blog:replica']) !== null || powerOrRack('2u-ssd');
+        }
+        // CPU: 16 コアまでは CPU を替える。そのあとは台数を足す
+        if (p.cpu < 16 && upgrade({ kind: 'cpu', dir: 1 })) return true;
+        if (dev.roles.includes('blog:db') || dev.roles.includes('blog:replica')) {
+          if (p.cpu < 64 && upgrade({ kind: 'cpu', dir: 1 })) return true;
+          return buyServer('2u-ssd', ['blog:replica']) !== null || powerOrRack('2u-ssd');
         }
         // web が詰まっている: LB の後ろに web を足す
         if (dev.roles.includes('blog:web') || dev.roles.includes('blog:lb')) {
           if (!s.unlocks.has('lb')) return tryUnlock('lb');
-          if (!flow.services.blog!.instances.lb.length) return buyServer('srv-1u-e', ['blog:lb']) !== null;
-          if (dev.roles.includes('blog:lb')) return buyServer('srv-1u-d', ['blog:lb']) !== null;
-          const id = buyServer('srv-1u-d', ['blog:web']);
-          return id !== null || powerOrRack('srv-1u-d');
+          if (!flow.services.blog!.instances.lb.length) return buyServer('1u-small', ['blog:lb']) !== null;
+          if (dev.roles.includes('blog:lb')) return buyServer('1u-web', ['blog:lb']) !== null;
+          const id = buyServer('1u-web', ['blog:web']);
+          return id !== null || powerOrRack('1u-web');
         }
       }
       // リンクの帯域: 空きポートがあれば束ね、サーバの NIC が埋まっていれば同じ役割のサーバを足す
@@ -154,7 +162,7 @@ it(`balance bot (${MINUTES} min)`, () => {
         const server = [x, y].find((d) => MODEL_BY_ID[d.model].category === 'server');
         if (server && server.roles.length) {
           const role = server.roles.includes('blog:lb') ? 'blog:lb' : server.roles[0];
-          return buyServer('srv-1u-d', [role]) !== null || powerOrRack('srv-1u-d');
+          return buyServer('1u-web', [role]) !== null || powerOrRack('1u-web');
         }
       }
     }
@@ -180,8 +188,13 @@ it(`balance bot (${MINUTES} min)`, () => {
   };
 
   /** 電力が足りずに置けないとき: 電力契約 → ラック追加 */
-  const powerOrRack = (model: ModelId): boolean => {
-    const anywhere = [...f.racks.keys()].some((slot) => findU(model, slot) !== null);
+  /** 置き場所(U と電力)がなければ、電力契約かラックを増やす */
+  const powerOrRack = (preset: string): boolean => {
+    const { model, parts } = PRESET_BY_ID[preset];
+    const anywhere = [...f.racks.keys()].some((slot) => {
+      for (let u = 1; u <= RACK.units; u++) if (!s.placeError(model, slot, u, undefined, parts)) return true;
+      return false;
+    });
     if (anywhere) return false;
     if (s.canBuyUpgrade('rackPower') === null) {
       s.buyUpgrade('rackPower');

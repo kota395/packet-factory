@@ -39,10 +39,8 @@ export type Category = 'server' | 'switch' | 'handoff' | 'storage';
 /** 機種 */
 export type ModelId =
   | 'handoff'
-  | 'srv-1u-e'
-  | 'srv-1u-d'
-  | 'srv-2u-db'
-  | 'srv-2u-hv'
+  | 'srv-1u'
+  | 'srv-2u'
   | 'nas-2u'
   | 'sw-24'
   | 'sw-48'
@@ -66,6 +64,7 @@ export type UnlockId =
   | 'tenGig'
   | 'agg'
   | 'storage'
+  | 'nvme'
   | 'bgp';
 
 /** 何度でも(上限まで)買える強化・契約 */
@@ -78,4 +77,25 @@ export type CampaignId = 'shopSale';
 export interface PortRef {
   readonly device: number;
   readonly port: number;
+}
+
+/** サーバのドライブの種類 */
+export type DriveType = 'hdd' | 'ssd' | 'nvme';
+
+/** 2U の前面のバックプレーン: 2.5 インチ(SSD・NVMe)か 3.5 インチ(HDD) */
+export type Backplane = 'sff' | 'lff';
+
+/** 増設の NIC */
+export type NicId = 'none' | 'sfp10';
+
+/** サーバの構成(シャーシに載せたパーツ) */
+export interface ServerParts {
+  /** CPU のコア数(CPU_OPTIONS のどれか) */
+  readonly cpu: number;
+  /** メモリ(GB、MEMORY_OPTIONS のどれか) */
+  readonly memGB: number;
+  readonly backplane: Backplane;
+  /** 前面のドライブ。2 本ずつミラーにする */
+  readonly drives: readonly DriveType[];
+  readonly nic: NicId;
 }

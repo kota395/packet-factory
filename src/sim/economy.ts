@@ -95,7 +95,7 @@ export const UNLOCKS: readonly UnlockDef[] = [
     id: 'virtualization',
     name: '仮想化(ハイパーバイザ)',
     description:
-      'サーバをハイパーバイザにして VM を載せられる。役割は VM に付ける。仮想化ホスト向けの大きな機種も買えるようになる。',
+      'サーバをハイパーバイザにして VM を載せられる。役割は VM に付ける。コアとメモリの多い構成にしたサーバに向く。',
   },
   {
     id: 'kubernetes',
@@ -119,6 +119,12 @@ export const UNLOCKS: readonly UnlockDef[] = [
     name: 'BGP(L3 の冗長化)',
     description:
       'サーバと ToR スイッチの間で BGP を使えるようになる。物理サーバは詳細で「BGP を使う」をオンにする(ハイパーバイザは自動)。2 台の ToR につなぐと ECMP で両方に流れ、片方が止まっても残りで続く。BGP なしのサーバは一番若いポートの 1 本しか使わない。',
+  },
+  {
+    id: 'nvme',
+    name: 'NVMe SSD',
+    description:
+      'サーバの 2.5 インチのベイに NVMe SSD を入れられるようになる(SATA SSD の 5 倍の IO)。db のディスク IO の壁を越える。',
   },
   {
     id: 'storage',
@@ -177,7 +183,7 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 1,
     name: '黎明期',
-    summary: '1 ラック・1 台の LAMP。最初に詰まるのは db のディスク IO。メモリの多い機種へ db を移す。',
+    summary: '1 ラックに web と db が 1 台ずつ。最初に詰まるのは db の HDD のディスク IO。サーバの詳細で db のメモリを増やし、SSD に替える。',
     unlocks: [],
   },
   {
@@ -201,8 +207,8 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 5,
     name: 'DB の冗長化',
-    summary: 'プライマリは 1 台のまま、読み込みをリードレプリカに分ける。書き込みは全レプリカに複製される。',
-    unlocks: ['replication'],
+    summary: 'プライマリは 1 台のまま、読み込みをリードレプリカに分ける。書き込みは全レプリカに複製される。NVMe で 1 台の IO も上げられる。',
+    unlocks: ['replication', 'nvme'],
   },
   {
     id: 6,
@@ -272,8 +278,8 @@ export const LINES: readonly LineDef[] = [
   {
     id: 'hardware',
     name: '機器',
-    summary: '買える機種を増やす。サーバの機種は前面の空き U から買う。',
-    unlocks: ['tenGig', 'agg', 'storage', 'bgp'],
+    summary: '買える機器とパーツを増やす。サーバは前面の空き U から買い、パーツは詳細で替える。',
+    unlocks: ['tenGig', 'agg', 'nvme', 'storage', 'bgp'],
     upgrades: [],
   },
 ];

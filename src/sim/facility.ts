@@ -1,9 +1,9 @@
 /**
  * 物理層: 列・ラック・機器・ポート・ケーブル。お金や電力契約は扱わず、置けるか・つなげるかだけを判断する。
  */
-import { MODEL_BY_ID, portsOf, type PortDef } from './catalog';
+import { MODEL_BY_ID, START_PARTS, isServerModel, portsOf, specOf, type PortDef } from './catalog';
 import { CABLE, RACK, ROW, VIRT } from './config';
-import type { DiskKind, ModelId, PortRef, RoleKey, VmSize } from './types';
+import type { DiskKind, ModelId, PortRef, RoleKey, ServerParts, VmSize } from './types';
 
 export interface Rack {
   /** 列の中の位置(0 始まり) */
@@ -17,6 +17,8 @@ export interface Device {
   slot: number;
   /** 一番下の U(1 始まり)。2U の機器は u と u+1 を使う */
   u: number;
+  /** サーバの構成(サーバ以外は null) */
+  parts: ServerParts | null;
   /** 割り当てた役割(サーバのみ。ハイパーバイザにしたサーバは役割を持たず、VM が持つ) */
   roles: RoleKey[];
   /** ハイパーバイザ(VM を載せるホスト)にしているか */
@@ -30,7 +32,7 @@ export interface Device {
   /** 障害で止まっている。この時刻(シミュレーション時間)まで */
   failedUntil: number;
   /** 買ったときの値段(売却時の返金に使う) */
-  readonly paid: number;
+  paid: number;
   readonly name: string;
 }
 
@@ -103,7 +105,7 @@ export class Facility {
   /** そのラックで使っている電力(W) */
   powerUsed(slot: number, ignore?: number): number {
     let w = 0;
-    for (const d of this.devices.values()) if (d.slot === slot && d.id !== ignore) w += MODEL_BY_ID[d.model].powerW;
+    for (const d of this.devices.values()) if (d.slot === slot && d.id !== ignore) w += specOf(d).powerW;
     return w;
   }
 
@@ -128,7 +130,14 @@ export class Facility {
    * model を slot の u(一番下の U)に置けない理由。置けるなら null。
    * powerLimitW はラックの電力の上限、ignore は動かそうとしている機器自身
    */
-  placeError(model: ModelId, slot: number, u: number, powerLimitW: number, ignore?: number): string | null {
+  placeError(
+    model: ModelId,
+    slot: number,
+    u: number,
+    powerLimitW: number,
+    ignore?: number,
+    parts: ServerParts | null = isServerModel(model) ? (this.devices.get(ignore ?? -1)?.parts ?? START_PARTS.web) : null,
+  ): string | null {
     const m = MODEL_BY_ID[model];
     if (!this.racks.has(slot)) return 'まだ借りていないラックです';
     if (!Number.isInteger(u) || u < 1 || u + m.u - 1 > RACK.units) return 'ラックに収まりません';
@@ -136,17 +145,24 @@ export class Facility {
       const other = this.deviceAt(slot, i);
       if (other && other.id !== ignore) return `${i}U は ${other.name} が使っています`;
     }
-    const power = this.powerUsed(slot, ignore) + m.powerW;
+    const power = this.powerUsed(slot, ignore) + specOf({ model, parts }).powerW;
     if (power > powerLimitW) {
       return `電力が足りません(${power}W / 上限 ${powerLimitW}W)。投資の「電力契約」か、別のラックへ`;
     }
     return null;
   }
 
-  place(model: ModelId, slot: number, u: number, paid: number, opts: { id?: number; name?: string } = {}): Device {
+  place(
+    model: ModelId,
+    slot: number,
+    u: number,
+    paid: number,
+    opts: { id?: number; name?: string; parts?: ServerParts } = {},
+  ): Device {
     const id = opts.id ?? this.nextDeviceId;
     this.nextDeviceId = Math.max(this.nextDeviceId, id + 1);
-    const device: Device = { id, model, slot, u, roles: [], hv: false, bgp: false, k8s: false, down: false, failedUntil: 0, paid, name: opts.name ?? this.newName(model) };
+    const parts = isServerModel(model) ? (opts.parts ?? START_PARTS.web) : null;
+    const device: Device = { id, model, slot, u, parts, roles: [], hv: false, bgp: false, k8s: false, down: false, failedUntil: 0, paid, name: opts.name ?? this.newName(model) };
     this.devices.set(id, device);
     this.version++;
     return device;
@@ -183,6 +199,14 @@ export class Facility {
     if (!d) return;
     d.hv = on;
     if (on) d.roles = [];
+    this.version++;
+  }
+
+  /** サーバのパーツを替える */
+  setParts(id: number, parts: ServerParts): void {
+    const d = this.devices.get(id);
+    if (!d || !d.parts) return;
+    d.parts = parts;
     this.version++;
   }
 
@@ -239,12 +263,12 @@ export class Facility {
     const d = this.devices.get(host);
     if (!d || MODEL_BY_ID[d.model].category !== 'server') return 'VM を載せられるのはサーバだけです';
     if (!d.hv) return `${d.name} はハイパーバイザになっていません`;
-    const m = MODEL_BY_ID[d.model];
+    const m = specOf(d);
     const used = this.hostUsage(host, ignore);
     const s = VIRT.sizes[size];
-    const memFree = m.memGB! - VIRT.hostMemGB - used.memGB;
+    const memFree = m.memGB - VIRT.hostMemGB - used.memGB;
     if (s.memGB > memFree) return `${d.name} のメモリが足りません(空き ${Math.max(0, memFree)}GB)`;
-    const vcpuMax = m.cores! * VIRT.vcpuOvercommit;
+    const vcpuMax = m.cores * VIRT.vcpuOvercommit;
     if (used.vcpu + s.vcpu > vcpuMax) return `${d.name} の vCPU が足りません(上限 ${vcpuMax})`;
     return null;
   }
@@ -308,7 +332,7 @@ export class Facility {
 
   portDef(ref: PortRef): PortDef | undefined {
     const d = this.devices.get(ref.device);
-    return d ? portsOf(d.model)[ref.port] : undefined;
+    return d ? portsOf(d)[ref.port] : undefined;
   }
 
   cableAt(ref: PortRef): Cable | undefined {
@@ -377,7 +401,7 @@ export class Facility {
     const d = this.devices.get(ref.device);
     const p = this.portDef(ref);
     if (!d || !p) return '?';
-    const groups = MODEL_BY_ID[d.model].ports.length;
+    const groups = specOf(d).ports.length;
     return groups > 1 ? `${d.name} ${p.label} ${p.number}` : `${d.name} ポート ${p.number}`;
   }
 }

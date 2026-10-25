@@ -3,12 +3,25 @@
  * ボタンを含む部分は選択や構成が変わったときだけ組み直し、数値の部分だけを定期的に更新する
  * (ボタンを作り直すとタップを取りこぼすため)。
  */
-import { BUYABLE_MODELS, MODEL_BY_ID, portsOf, type ModelDef } from '../sim/catalog';
+import {
+  BUYABLE_MODELS,
+  CHASSIS,
+  DRIVES,
+  MODEL_BY_ID,
+  NICS,
+  PRESETS,
+  PRESET_BY_ID,
+  isServerModel,
+  partsSummary,
+  portsOf,
+  specOf,
+  type ModelDef,
+} from '../sim/catalog';
 import { CAMPAIGN, K8S, RACK, SERVICES, VIRT } from '../sim/config';
 import type { Device, Vm } from '../sim/facility';
 import { nodeName, type NodeLoad } from '../sim/flow';
 import { SELL_REFUND_RATE, UPKEEP } from '../sim/pricing';
-import type { Simulation } from '../sim/simulation';
+import type { PartChange, Simulation } from '../sim/simulation';
 import {
   ROLE_IDS,
   SERVICE_IDS,
@@ -19,6 +32,7 @@ import {
   type PortRef,
   type RoleId,
   type RoleKey,
+  type ServerParts,
   type ServiceId,
   type VmSize,
 } from '../sim/types';
@@ -125,13 +139,45 @@ function section(title: string, body: string): string {
   return body ? `<section class="info-sec"><h4>${title}</h4>${body}</section>` : '';
 }
 
-function specOf(m: ModelDef): string {
-  const ports = m.ports.map((g) => `${g.label}×${g.count}`).join(' + ');
-  if (m.category === 'server') return `${m.cores} コア(×${m.coreSpeed})・${m.memGB}GB・${m.diskIops} IOPS・${ports}`;
+/** 性能の 1 行(サーバは構成から) */
+function specText(m: ModelDef, parts?: ServerParts | null): string {
+  const sp = specOf({ model: m.id, parts });
+  const ports = sp.ports.map((g) => `${g.label}×${g.count}`).join(' + ');
+  if (m.category === 'server') return `${sp.cores} コア・${sp.memGB}GB・${compact(sp.diskIops)} IOPS・${ports}`;
   if (m.category === 'switch') return `${ports}・処理 ${m.fabricGbps} Gbps`;
   if (m.category === 'storage') return `${m.diskIops!.toLocaleString('en-US')} IOPS・${ports}`;
   return ports;
 }
+
+/** パーツの変更を data 属性に書く形 */
+function encodeChange(c: PartChange): string {
+  switch (c.kind) {
+    case 'cpu':
+    case 'mem':
+      return `${c.kind}:${c.dir}`;
+    case 'drive-add':
+      return `add:${c.type}`;
+    case 'drive-remove':
+      return 'remove';
+    case 'backplane':
+      return `bp:${c.to}`;
+    case 'nic':
+      return `nic:${c.to}`;
+  }
+}
+
+function decodeChange(s: string): PartChange | null {
+  const [k, v] = s.split(':');
+  if (k === 'cpu' || k === 'mem') return { kind: k, dir: v === '1' ? 1 : -1 };
+  if (k === 'add' && (v === 'hdd' || v === 'ssd' || v === 'nvme')) return { kind: 'drive-add', type: v };
+  if (k === 'remove') return { kind: 'drive-remove' };
+  if (k === 'bp' && (v === 'sff' || v === 'lff')) return { kind: 'backplane', to: v };
+  if (k === 'nic' && (v === 'none' || v === 'sfp10')) return { kind: 'nic', to: v };
+  return null;
+}
+
+/** パーツを替えるボタンの値段の表示(マイナスなら戻ってくる) */
+const costText = (cost: number) => (cost >= 0 ? money(cost) : `+${money(-cost)} 戻る`);
 
 interface Content {
   key: string;
@@ -190,9 +236,10 @@ export class InfoPanel {
   private refreshButtons(sim: Simulation): void {
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('button[data-act="buy"]')) {
       const model = b.dataset.model as ModelId;
+      const parts = b.dataset.preset ? PRESET_BY_ID[b.dataset.preset].parts : undefined;
       const err =
-        sim.canBuyModel(model) ?? sim.placeError(model, Number(b.dataset.slot), Number(b.dataset.u));
-      const price = sim.devicePrice(model);
+        sim.canBuyModel(model, parts) ?? sim.placeError(model, Number(b.dataset.slot), Number(b.dataset.u), undefined, parts);
+      const price = sim.devicePrice(model, parts);
       b.disabled = !!err || sim.money < price;
       b.title = err ?? (sim.money < price ? '資金が足りません' : '');
       const note = b.closest('.cat-item')?.querySelector<HTMLElement>('.cat-note');
@@ -207,6 +254,15 @@ export class InfoPanel {
       b.title = err ?? '';
       b.textContent = `キャンペーンを打つ(${money(sim.campaignPrice())})`;
     }
+    for (const b of this.root.querySelectorAll<HTMLButtonElement>('button[data-act="part"]')) {
+      const change = decodeChange(b.dataset.change ?? '');
+      if (!change) continue;
+      const info = sim.partChangeInfo(Number(b.dataset.id), change);
+      b.disabled = !!info.error;
+      b.title = info.error ?? '';
+      const cost = b.querySelector<HTMLElement>('.cost');
+      if (cost) cost.textContent = info.parts ? costText(info.cost) : '';
+    }
   }
 
   private act(data: DOMStringMap): void {
@@ -217,7 +273,7 @@ export class InfoPanel {
         this.actions.select(null);
         return;
       case 'buy':
-        r = sim.buyDevice(data.model as ModelId, Number(data.slot), Number(data.u));
+        r = sim.buyDevice(data.model as ModelId, Number(data.slot), Number(data.u), data.preset);
         if (r.ok && r.id !== undefined) this.actions.select({ kind: 'device', id: r.id });
         break;
       case 'rent':
@@ -268,6 +324,11 @@ export class InfoPanel {
       case 'campaign':
         r = sim.startCampaign();
         break;
+      case 'part': {
+        const change = decodeChange(data.change ?? '');
+        if (change) r = sim.changeParts(Number(data.id), change);
+        break;
+      }
       case 'k8s':
         r = sim.setK8sWorker({ device: Number(data.id) }, data.on === '1');
         break;
@@ -354,6 +415,7 @@ export class InfoPanel {
           : ''
       }</div>`;
     }
+    if (d.parts && isServerModel(d.model)) fixed += this.partsSection(sim, d);
     if (m.category === 'server' && !d.hv && sim.unlocks.has('bgp')) {
       fixed += section(
         'BGP',
@@ -369,8 +431,9 @@ export class InfoPanel {
 
     const place: [string, string][] = [
       ['場所', `ラック ${d.slot + 1} / ${d.u}${m.u > 1 ? `〜${d.u + m.u - 1}` : ''}U`],
-      ['スペック', specOf(m)],
-      ['電力', `${m.powerW} W`],
+      ['スペック', specText(m, d.parts)],
+      ...(d.parts ? ([['構成', partsSummary(d.parts)]] as [string, string][]) : []),
+      ['電力', `${specOf(d).powerW} W`],
     ];
     const failed = d.failedUntil > sim.time;
     place.unshift([
@@ -392,10 +455,11 @@ export class InfoPanel {
         const use = f.hostUsage(d.id);
         loadRows.push(['CPU(VM の合計)', load(l.cpu)]);
         loadRows.push(['ローカルディスク', load(l.io)]);
-        loadRows.push(['割り当て', `vCPU ${use.vcpu} / ${m.cores! * VIRT.vcpuOvercommit}・メモリ ${use.memGB} / ${m.memGB! - VIRT.hostMemGB} GB`]);
+        const sp = specOf(d);
+        loadRows.push(['割り当て', `vCPU ${use.vcpu} / ${sp.cores * VIRT.vcpuOvercommit}・メモリ ${use.memGB} / ${sp.memGB - VIRT.hostMemGB} GB`]);
       } else if (m.category === 'server') {
         loadRows.push(...nodeRows(sim, d.roles, sim.flow.nodeLoads.get(d.id), 'CPU'));
-        if (d.k8s) loadRows.push(...podRows(sim, d.id, m.cores!, m.memGB!));
+        if (d.k8s) loadRows.push(...podRows(sim, d.id, specOf(d).cores, specOf(d).memGB));
       } else if (m.category === 'storage') {
         loadRows.push(['IOPS', load(l.io)]);
       } else if (m.category === 'switch') {
@@ -404,7 +468,7 @@ export class InfoPanel {
       loadRows.push(['通信量', gbps(l.gbps)]);
     }
 
-    const ports = portsOf(d.model);
+    const ports = portsOf(d);
     const links: [string, string][] = [];
     ports.forEach((p, i) => {
       const c = f.cableAt({ device: d.id, port: i });
@@ -427,6 +491,47 @@ export class InfoPanel {
         section('負荷', rows(loadRows)) +
         section('ポート', rows([...portSummary, ...links.slice(0, 16)]) + (links.length > 16 ? `<div class="muted small">ほか ${links.length - 16} 本</div>` : '')),
     };
+  }
+
+  /** サーバの構成: ワンクリックでパーツを替えるボタン */
+  private partsSection(sim: Simulation, d: Device): string {
+    const p = d.parts!;
+    const model = d.model as 'srv-1u' | 'srv-2u';
+    const button = (change: PartChange, label: string) => {
+      const info = sim.partChangeInfo(d.id, change);
+      return `<button type="button" class="part" data-act="part" data-id="${d.id}" data-change="${encodeChange(change)}" ${info.error ? `disabled title="${info.error}"` : ''}>${label}<span class="cost">${info.parts ? costText(info.cost) : ''}</span></button>`;
+    };
+    /** 1 段上げる / 下げるボタン(行き先を書く。端なら出さない) */
+    const step = (kind: 'cpu' | 'mem', dir: 1 | -1, text: (x: ServerParts) => string) => {
+      const info = sim.partChangeInfo(d.id, { kind, dir });
+      return info.parts ? button({ kind, dir }, `${dir > 0 ? '▲' : '▼'} ${text(info.parts)} `) : '';
+    };
+    const line = (label: string, value: string, buttons: string) =>
+      `<div class="part-row"><div class="part-head"><span>${label}</span><b>${value}</b></div><div class="role-buttons">${buttons}</div></div>`;
+    const drivesHere = (Object.values(DRIVES) as (typeof DRIVES)[keyof typeof DRIVES][]).filter((t) => t.bay === p.backplane);
+    const bays = CHASSIS[model].bays[p.backplane];
+    const counts = drivesHere.map((t) => [t, p.drives.filter((x) => x === t.id).length] as const).filter(([, n]) => n);
+    const driveText = `${counts.map(([t, n]) => `${t.name}×${n}`).join(' + ') || 'なし'}(${p.drives.length} / ${bays} 本)`;
+    let html =
+      line('CPU', `${p.cpu} コア`, step('cpu', -1, (x) => `${x.cpu} コア`) + step('cpu', 1, (x) => `${x.cpu} コア`)) +
+      line('メモリ', `${p.memGB} GB`, step('mem', -1, (x) => `${x.memGB}GB`) + step('mem', 1, (x) => `${x.memGB}GB`)) +
+      line(
+        p.backplane === 'lff' ? '前面(3.5 インチ)' : '前面(2.5 インチ)',
+        driveText,
+        drivesHere.map((t) => button({ kind: 'drive-add', type: t.id }, `+ ${t.name}×2 `)).join('') +
+          button({ kind: 'drive-remove' }, '− 2 本 '),
+      );
+    if (CHASSIS[model].bays.lff && CHASSIS[model].bays.sff) {
+      const to = p.backplane === 'lff' ? 'sff' : 'lff';
+      html += `<div class="role-buttons">${button({ kind: 'backplane', to }, to === 'sff' ? '前面を 2.5 インチ 24 本に替える(SSD×2 から) ' : '前面を 3.5 インチ 12 本に替える(HDD×2 から) ')}</div>`;
+    }
+    const nicTo = p.nic === 'none' ? 'sfp10' : 'none';
+    html += line('増設 NIC', NICS[p.nic].name, button({ kind: 'nic', to: nicTo }, nicTo === 'none' ? 'NIC を外す ' : '10G NIC を付ける '));
+    const rear = CHASSIS[model].rearSsd ? `背面に OS 用の SSD ${CHASSIS[model].rearSsd} 本(ミラー)。` : '';
+    return section(
+      '構成',
+      `<div class="desc small">ドライブは 2 本ずつのミラー。${rear}外したパーツは半額で下取り。</div>${html}`,
+    );
   }
 
   private vmContent(sim: Simulation, vm: Vm, base: string): Content {
@@ -496,18 +601,28 @@ export class InfoPanel {
   }
 
   private unitContent(sim: Simulation, slot: number, u: number, base: string): Content {
-    const items = BUYABLE_MODELS.map((m) => {
-      const locked = sim.canBuyModel(m.id);
+    // サーバは構成(プリセット)ごと、それ以外は機種ごとに並べる
+    const item = (m: ModelDef, title: string, desc: string, preset?: string) => {
+      const parts = preset ? PRESET_BY_ID[preset].parts : undefined;
+      const locked = sim.canBuyModel(m.id, parts);
       return `
         <div class="cat-item ${locked ? 'locked' : ''}">
           <div class="cat-main">
-            <div class="cat-title">${m.name}<span class="inv-tag">${m.u}U・${m.powerW}W</span></div>
-            <div class="cat-spec">${specOf(m)}</div>
+            <div class="cat-title">${title}<span class="inv-tag">${m.u}U・${specOf({ model: m.id, parts }).powerW}W</span></div>
+            <div class="cat-spec">${specText(m, parts)}</div>
+            ${desc ? `<div class="cat-spec muted">${desc}</div>` : ''}
             <div class="cat-note"></div>
           </div>
-          <button type="button" class="buy" data-act="buy" data-model="${m.id}" data-slot="${slot}" data-u="${u}">${money(sim.devicePrice(m.id))}</button>
+          <button type="button" class="buy" data-act="buy" data-model="${m.id}" ${preset ? `data-preset="${preset}"` : ''} data-slot="${slot}" data-u="${u}">${money(sim.devicePrice(m.id, parts))}</button>
         </div>`;
-    }).join('');
+    };
+    const items = [
+      ...PRESETS.map((p) => {
+        const drives = partsSummary(p.parts).split('・').filter((x) => /×/.test(x)).join('・');
+        return item(MODEL_BY_ID[p.model], p.name, `${drives}(ミラー)。${p.description}`, p.id);
+      }),
+      ...BUYABLE_MODELS.filter((m) => !isServerModel(m.id)).map((m) => item(m, m.name, '')),
+    ].join('');
     const power = sim.facility.powerUsed(slot);
     return {
       key: `unit${slot}:${u}@${base}`,

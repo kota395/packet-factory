@@ -1,5 +1,5 @@
 import { Application, Container, Graphics, Text, type FederatedPointerEvent } from 'pixi.js';
-import { MODEL_BY_ID, portsOf } from '../sim/catalog';
+import { DRIVES, MODEL_BY_ID, portsOf } from '../sim/catalog';
 import { RACK, ROW } from '../sim/config';
 import type { Device } from '../sim/facility';
 import type { Simulation } from '../sim/simulation';
@@ -475,7 +475,10 @@ export class RowRenderer {
           .fill({ color: m.color, alpha: 0.22 })
           .stroke({ width: 1.5, color: m.color });
         this.label(d.name, r.x + 8, r.y + r.h / 2, 11, COLORS.text, 0, true, true);
-        this.label(d.hv ? `${m.short} HV` : m.short, r.x + 56, r.y + r.h / 2, 10, d.hv ? 0x95d5b2 : COLORS.muted, 0, true);
+        // サーバはデータを置くドライブの種類も(例: 2U HDD)
+        const kind = d.parts?.drives.length ? DRIVES[d.parts.drives[d.parts.drives.length - 1]].name : d.parts ? 'SSD' : '';
+        const short = d.hv ? `${m.short} HV` : kind ? `${m.short} ${kind}` : m.short;
+        this.label(short, r.x + 56, r.y + r.h / 2, 10, d.hv ? 0x95d5b2 : COLORS.muted, 0, true);
         if (d.hv) {
           // VM はサービスごとの台数だけ出す(例: VM 5 台 web×3・db・cache)
           const vms = f.vmsOn(d.id);
@@ -505,7 +508,7 @@ export class RowRenderer {
           .fill(COLORS.back)
           .stroke({ width: 1, color: m.color, alpha: 0.7 });
         this.label(d.name, r.x + 6, r.y + r.h / 2, 10, COLORS.text, 0, true, true);
-        const ports = portsOf(d.model);
+        const ports = portsOf(d);
         portCenters(d).forEach((c, i) => {
           const used = !!f.cableAt({ device: d.id, port: i });
           const sfp = ports[i].media === 'sfp';

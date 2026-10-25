@@ -1,4 +1,4 @@
-import { MODEL_BY_ID, portsOf } from './catalog';
+import { MODEL_BY_ID, PRESET_BY_ID, START_PARTS, isServerModel, partsError, portsOf } from './catalog';
 import { OFFLINE, RACK, ROW } from './config';
 import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades } from './economy';
 import { Simulation } from './simulation';
@@ -11,6 +11,7 @@ import {
   type ModelId,
   type RoleId,
   type RoleKey,
+  type ServerParts,
   type ServiceId,
   type UnlockId,
   type UpgradeId,
@@ -19,11 +20,11 @@ import {
 
 /**
  * セーブデータ。構成(ラック・機器・ケーブル)・お金・ユーザー数・投資状況を残す。
- * v4 = 複数のサービスの版(役割は「blog:web」のようにサービスつき)。
- * v3(ブログだけの版)は読み込むときに役割をブログのものとして移す。それより前(ノード図の版)は読み込めない
+ * v5 = サーバがシャーシとパーツの構成になった版。
+ * v4(複数のサービス、サーバは機種固定)・v3(ブログだけ)は読み込むときに移す。それより前(ノード図の版)は読み込めない
  */
 export interface SaveData {
-  v: 4;
+  v: 5;
   savedAt: number;
   money: number;
   /** サービスごとのユーザー数 */
@@ -38,8 +39,8 @@ export interface SaveData {
   upgrades: Record<UpgradeId, number>;
   /** 借りているラックの位置 */
   racks: number[];
-  /** [ID, 機種, ラック, U, 役割, 購入額, 名前, ハイパーバイザか, BGP を使うか, メンテナンス中か, Kubernetes のワーカーか] */
-  devices: [number, ModelId, number, number, RoleKey[], number, string, boolean, boolean, boolean, boolean][];
+  /** [ID, 機種, ラック, U, 役割, 購入額, 名前, ハイパーバイザか, BGP を使うか, メンテナンス中か, Kubernetes のワーカーか, サーバの構成] */
+  devices: [number, ModelId, number, number, RoleKey[], number, string, boolean, boolean, boolean, boolean, ServerParts | null][];
   /** [ID, 名前, ホスト, 大きさ, 役割, ディスク, Kubernetes のワーカーか] */
   vms: [number, string, number, VmSize, RoleKey[], DiskKind, boolean][];
   /** Kubernetes の Deployment と、その時点の Pod の数 */
@@ -48,17 +49,20 @@ export interface SaveData {
   cables: [number, number, number, number, number, number][];
 }
 
-/** 新しいゲーム: ラック 1 本に、回線終端・スイッチ・web と db を同居させたサーバ 1 台 */
+/** 新しいゲーム: ラック 1 本に、回線終端・スイッチ・リクエストを受ける 1U サーバ・db 用の 2U サーバ(HDD) */
 export function newGame(): Simulation {
   const sim = new Simulation();
   const f = sim.facility;
   f.rent(0);
   const isp = f.place('handoff', 0, RACK.units, 0);
   const sw = f.place('sw-24', 0, RACK.units - 2, 0);
-  const srv = f.place('srv-1u-e', 0, RACK.units - 4, 0);
-  f.setRoles(srv.id, ['blog:web', 'blog:db']);
+  const web = f.place('srv-1u', 0, RACK.units - 4, 0, { parts: START_PARTS.web });
+  const db = f.place('srv-2u', 0, RACK.units - 7, 0, { parts: START_PARTS.db });
+  f.setRoles(web.id, ['blog:web']);
+  f.setRoles(db.id, ['blog:db']);
   f.connect({ device: isp.id, port: 0 }, { device: sw.id, port: 0 }, 0);
-  f.connect({ device: sw.id, port: 1 }, { device: srv.id, port: 0 }, 0);
+  f.connect({ device: sw.id, port: 1 }, { device: web.id, port: 0 }, 0);
+  f.connect({ device: sw.id, port: 2 }, { device: db.id, port: 0 }, 0);
   sim.refreshFlow();
   return sim;
 }
@@ -66,7 +70,7 @@ export function newGame(): Simulation {
 export function createSave(sim: Simulation, now = Date.now()): SaveData {
   const f = sim.facility;
   return {
-    v: 4,
+    v: 5,
     savedAt: now,
     money: sim.money,
     users: { ...sim.serviceUsers },
@@ -77,7 +81,7 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     disabled: [...sim.disabledFeatures],
     upgrades: { ...sim.upgrades },
     racks: [...f.racks.keys()],
-    devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name, d.hv, d.bgp, d.down, d.k8s]),
+    devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name, d.hv, d.bgp, d.down, d.k8s, d.parts]),
     vms: [...f.vms.values()].map((v) => [v.id, v.name, v.host, v.size, [...v.roles], v.disk, v.k8s]),
     deployments: [...sim.deployments],
     cables: [...f.cables.values()].map((c) => [c.id, c.a.device, c.a.port, c.b.device, c.b.port, c.paid]),
@@ -96,10 +100,10 @@ export function loadSave(save: SaveData): Simulation {
   sim.campaign = { until: sim.time + save.campaign[0], cooldownUntil: sim.time + save.campaign[1] };
   const f = sim.facility;
   for (const slot of save.racks) f.rent(slot);
-  for (const [id, model, slot, u, roles, paid, name, hv, bgp, down, k8s] of save.devices) {
+  for (const [id, model, slot, u, roles, paid, name, hv, bgp, down, k8s, parts] of save.devices) {
     // 壊れた配置(重なり・ラック外)は読み飛ばす。電力は昔の上限で置いたものもそのまま戻す
-    if (f.placeError(model, slot, u, Infinity) !== null) continue;
-    const d = f.place(model, slot, u, paid, { id, name });
+    if (f.placeError(model, slot, u, Infinity, undefined, parts) !== null) continue;
+    const d = f.place(model, slot, u, paid, { id, name, parts: parts ?? undefined });
     if (hv) f.setHv(d.id, true);
     if (bgp) f.setBgp(d.id, true);
     if (down) f.setDown(d.id, true);
@@ -156,7 +160,7 @@ export function parseSave(data: unknown): SaveData | null {
   const isNum = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
   const isInt = (n: unknown): n is number => Number.isInteger(n);
 
-  if (d.v !== 3 && d.v !== 4) return null;
+  if (d.v !== 3 && d.v !== 4 && d.v !== 5) return null;
   if (!isNum(d.savedAt) || !isNum(d.money)) return null;
   // ユーザー数: v3 はブログだけの数値
   const users: Partial<Record<ServiceId, number>> = {};
@@ -211,12 +215,34 @@ export function parseSave(data: unknown): SaveData | null {
       ? roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId)).map((r) => roleKey('blog', r))
       : roles.filter(isRoleKey);
   for (const item of d.devices as unknown[]) {
-    // 古いセーブは 7 要素(仮想化の前)・8 要素(BGP の前)・10 要素(Kubernetes の前)
-    if (!Array.isArray(item) || ![7, 8, 10, 11].includes(item.length)) return null;
-    const [id, model, slot, u, roles, paid, name, hv, bgp, down, k8s] = item;
-    if (!isInt(id) || id < 0 || typeof model !== 'string' || !(model in MODEL_BY_ID)) return null;
+    // 古いセーブは 7 要素(仮想化の前)・8 要素(BGP の前)・10 要素(Kubernetes の前)・11 要素(パーツの前)
+    if (!Array.isArray(item) || ![7, 8, 10, 11, 12].includes(item.length)) return null;
+    const [id, rawModel, slot, u, roles, paid, name, hv, bgp, down, k8s, rawParts] = item;
+    if (!isInt(id) || id < 0 || typeof rawModel !== 'string') return null;
+    // 機種固定だったころのサーバは、近い構成のシャーシに移す
+    const legacy = LEGACY_SERVERS[rawModel];
+    const model = legacy ? legacy.model : rawModel;
+    if (!(model in MODEL_BY_ID)) return null;
     if (!isInt(slot) || !isInt(u) || !Array.isArray(roles) || !isNum(paid) || typeof name !== 'string') return null;
-    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true, bgp === true, down === true, k8s === true]);
+    let parts: ServerParts | null = null;
+    if (isServerModel(model as ModelId)) {
+      parts = legacy?.parts ?? parseParts(rawParts) ?? null;
+      if (!parts || partsError(model as 'srv-1u' | 'srv-2u', parts)) parts = model === 'srv-1u' ? START_PARTS.web : START_PARTS.db;
+    }
+    devices.push([
+      id,
+      model as ModelId,
+      slot,
+      u,
+      okRoles(roles),
+      paid,
+      name.slice(0, 32),
+      hv === true,
+      bgp === true,
+      down === true,
+      k8s === true,
+      parts,
+    ]);
   }
 
   const vms: SaveData['vms'] = [];
@@ -241,14 +267,14 @@ export function parseSave(data: unknown): SaveData | null {
     const [id, da, pa, db, pb, paid] = item as number[];
     const ok = (dev: number, port: number) => {
       const dv = devices.find((x) => x[0] === dev);
-      return dv !== undefined && isInt(port) && port >= 0 && port < portsOf(dv[1]).length;
+      return dv !== undefined && isInt(port) && port >= 0 && port < portsOf({ model: dv[1], parts: dv[11] }).length;
     };
     if (!ok(da, pa) || !ok(db, pb)) return null;
     cables.push([id, da, pa, db, pb, paid]);
   }
 
   return {
-    v: 4,
+    v: 5,
     savedAt: d.savedAt,
     money: d.money,
     users,
@@ -264,4 +290,23 @@ export function parseSave(data: unknown): SaveData | null {
     cables,
     deployments,
   };
+}
+
+/** 機種固定だったころ(v4 まで)のサーバと、移す先の構成。ポートの並び(1GbE×2、仮想化ホストは 10G×2 も)は同じ */
+export const LEGACY_SERVERS: Record<string, { model: 'srv-1u' | 'srv-2u'; parts: ServerParts }> = {
+  'srv-1u-e': { model: 'srv-1u', parts: PRESET_BY_ID['1u-small'].parts },
+  'srv-1u-d': { model: 'srv-1u', parts: PRESET_BY_ID['1u-web'].parts },
+  'srv-2u-db': { model: 'srv-2u', parts: { cpu: 8, memGB: 64, backplane: 'sff', drives: ['ssd', 'ssd'], nic: 'none' } },
+  'srv-2u-hv': { model: 'srv-2u', parts: { cpu: 24, memGB: 256, backplane: 'sff', drives: ['ssd', 'ssd'], nic: 'sfp10' } },
+};
+
+function parseParts(x: unknown): ServerParts | null {
+  if (!x || typeof x !== 'object') return null;
+  const p = x as Record<string, unknown>;
+  if (typeof p.cpu !== 'number' || typeof p.memGB !== 'number') return null;
+  if (p.backplane !== 'sff' && p.backplane !== 'lff') return null;
+  if (p.nic !== 'none' && p.nic !== 'sfp10') return null;
+  if (!Array.isArray(p.drives) || p.drives.length > 64) return null;
+  if (!p.drives.every((t) => t === 'hdd' || t === 'ssd' || t === 'nvme')) return null;
+  return { cpu: p.cpu, memGB: p.memGB, backplane: p.backplane, drives: [...p.drives], nic: p.nic };
 }

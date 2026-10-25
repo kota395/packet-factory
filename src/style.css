@@ -1087,3 +1087,33 @@ button.primary {
     min-height: 40px;
   }
 }
+
+/* サーバの構成(パーツ) */
+.part-row + .part-row {
+  margin-top: 8px;
+}
+
+.part-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.part-head b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+button.part {
+  min-height: 32px;
+  font-size: 12px;
+}
+
+button.part .cost {
+  margin-left: 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+}

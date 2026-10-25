@@ -1,13 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { MODEL_BY_ID } from '../src/sim/catalog';
+import { MODEL_BY_ID, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
 import { BLOG_FEATURES, CAMPAIGN, K8S, RACK, SERVICES, WORK } from '../src/sim/config';
-import { createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
+import { LEGACY_SERVERS, createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
 import { forecastSeries, logistic, secondsUntil } from '../src/sim/forecast';
-import { MODEL_PRICES, PRICE_SCALE, START_MONEY, UNLOCK_PRICES, cablePrice } from '../src/sim/pricing';
-import type { ModelId, RoleKey, ServiceId, UnlockId } from '../src/sim/types';
+import {
+  CHASSIS_PRICES,
+  CPU_PRICES,
+  DRIVE_PRICES,
+  MEMORY_PRICE_PER_GB,
+  MODEL_PRICES,
+  PRICE_SCALE,
+  START_MONEY,
+  UNLOCK_PRICES,
+  cablePrice,
+  serverPrice,
+} from '../src/sim/pricing';
+import type { RoleKey, ServiceId, UnlockId } from '../src/sim/types';
 
 const constant = (pv: number) => () => pv;
+
+/** 機種固定だったころのサーバ名で、同じくらいの構成のサーバを買う */
+type Legacy = 'srv-1u-e' | 'srv-1u-d' | 'srv-2u-db' | 'srv-2u-hv';
+const buy = (s: Simulation, legacy: Legacy, slot: number, u: number) => {
+  const l = LEGACY_SERVERS[legacy];
+  // 10G NIC などの解放はテストでは済ませておく
+  for (const id of partsRequires(l.parts)) s.unlocks.add(id);
+  return s.buyDevice(l.model, slot, u, l.parts);
+};
 const RICH = 1_000_000;
 
 /** 回線終端と ToR スイッチだけのラック 1 本 */
@@ -27,8 +47,8 @@ function base(opts: { pv?: number; traffic?: Partial<Record<ServiceId, number>>;
   expect(s.connect({ device: isp.id, port: 0 }, { device: sw, port: 0 }).ok).toBe(true);
   let nextPort = 1;
   /** サーバを買って役割を付け、ToR につなぐ */
-  const server = (model: ModelId, u: number, roles: RoleKey[], slot = 0, toSw = sw) => {
-    const r = s.buyDevice(model, slot, u);
+  const server = (model: Legacy, u: number, roles: RoleKey[], slot = 0, toSw = sw) => {
+    const r = buy(s, model, slot, u);
     expect(r.ok, r.message).toBe(true);
     for (const role of roles) expect(s.toggleRole(r.id!, role).ok).toBe(true);
     if (toSw === sw) expect(s.connect({ device: r.id!, port: 0 }, { device: sw, port: nextPort++ }).ok).toBe(true);
@@ -45,29 +65,31 @@ const run = (s: Simulation, ms = 5000) => {
 describe('物理層', () => {
   it('U が重なる場所やラックの外には置けない', () => {
     const { s } = base();
-    expect(s.buyDevice('srv-1u-e', 0, 40).ok).toBe(false); // スイッチがいる
-    expect(s.buyDevice('srv-2u-db', 0, 42).ok).toBe(false); // 43U にはみ出す
-    expect(s.buyDevice('srv-1u-e', 1, 10).ok).toBe(false); // 借りていないラック
-    expect(s.buyDevice('srv-2u-db', 0, 10).ok).toBe(true);
-    expect(s.buyDevice('srv-1u-e', 0, 11).ok).toBe(false); // 2U の上側
+    expect(buy(s, 'srv-1u-e', 0, 40).ok).toBe(false); // スイッチがいる
+    expect(buy(s, 'srv-2u-db', 0, 42).ok).toBe(false); // 43U にはみ出す
+    expect(buy(s, 'srv-1u-e', 1, 10).ok).toBe(false); // 借りていないラック
+    expect(buy(s, 'srv-2u-db', 0, 10).ok).toBe(true);
+    expect(buy(s, 'srv-1u-e', 0, 11).ok).toBe(false); // 2U の上側
   });
 
   it('ラックの電力の上限を超えては置けない', () => {
     const s = new Simulation({ startMoney: RICH });
     s.facility.rent(0);
-    // 2000W に 450W の 2U を 4 台(1800W)までは置ける
-    for (let i = 0; i < 4; i++) expect(s.buyDevice('srv-2u-db', 0, 1 + i * 2).ok).toBe(true);
-    const r = s.buyDevice('srv-2u-db', 0, 20);
+    // 2000W に収まる台数までは置ける
+    const w = specOf({ model: 'srv-2u', parts: PRESET_BY_ID['2u-ssd'].parts }).powerW;
+    const fits = Math.floor(RACK.powerLevelsW[0] / w);
+    for (let i = 0; i < fits; i++) expect(s.buyServer('2u-ssd', 0, 1 + i * 2).ok).toBe(true);
+    const r = s.buyServer('2u-ssd', 0, 1 + fits * 2);
     expect(r.ok).toBe(false);
     expect(r.message).toContain('電力');
     // 電力契約を上げれば置ける
     expect(s.buyUpgrade('rackPower').ok).toBe(true);
-    expect(s.buyDevice('srv-2u-db', 0, 20).ok).toBe(true);
+    expect(s.buyServer('2u-ssd', 0, 1 + fits * 2).ok).toBe(true);
   });
 
   it('ポートには 1 本だけ。同じラック内は銅線、SFP が絡むと光ファイバで、ラック間は長くて高い', () => {
     const { s, f, sw } = base({ unlocks: ['tenGig', 'agg'] });
-    const a = s.buyDevice('srv-1u-e', 0, 30).id!;
+    const a = buy(s, 'srv-1u-e', 0, 30).id!;
     expect(s.connect({ device: a, port: 0 }, { device: sw, port: 0 }).ok).toBe(false); // 回線が使用中
     const near = s.cableQuote({ device: a, port: 0 }, { device: sw, port: 5 });
     expect(near.fiber).toBe(false);
@@ -86,7 +108,7 @@ describe('物理層', () => {
     const before = s.money;
     const r = s.sellDevice(id);
     expect(r.ok).toBe(true);
-    expect(s.money).toBe(before + Math.floor((MODEL_PRICES['srv-1u-e'].first * PRICE_SCALE) / 2));
+    expect(s.money).toBe(before + Math.floor(serverPrice('srv-1u', LEGACY_SERVERS['srv-1u-e'].parts) / 2));
     expect([...f.cables.values()].some((c) => c.a.device === id || c.b.device === id)).toBe(false);
   });
 
@@ -122,19 +144,50 @@ describe('流量モデル', () => {
     expect(flow.problems.join()).toContain(s2.facility.devices.get(lonely)!.name);
   });
 
-  it('エントリー機の db はディスク IO で先に詰まり、メモリの多い DB 向け機種に移すと捌ける', () => {
-    const pv = 80;
-    const { s, server } = base({ pv });
-    const small = server('srv-1u-e', 30, ['blog:web', 'blog:db']);
+  it('HDD の db はディスク IO で先に詰まり、パーツを替える(SSD・メモリ)と捌ける', () => {
+    const { s } = base({ pv: 150 });
+    const web = s.buyDevice('srv-1u', 0, 30, START_PARTS.web).id!;
+    const db = s.buyDevice('srv-2u', 0, 20, START_PARTS.db).id!;
+    s.toggleRole(web, 'blog:web');
+    s.toggleRole(db, 'blog:db');
+    const sw = [...s.facility.devices.values()].find((d) => d.model === 'sw-24')!.id;
+    s.connect({ device: web, port: 0 }, { device: sw, port: 1 });
+    s.connect({ device: db, port: 0 }, { device: sw, port: 2 });
     let flow = run(s);
-    expect(flow.devices.get(small)!.io).toBeGreaterThan(1);
+    expect(flow.devices.get(db)!.io).toBeGreaterThan(1);
     expect(flow.bottleneck!.label).toContain('ディスク IO');
     expect(flow.success).toBeLessThan(0.9);
-    const big = server('srv-2u-db', 20, ['blog:db']);
-    s.toggleRole(small, 'blog:db');
+    // HDD を足すと IO は増えるが、2 本で 75 IOPS ずつ
+    const iops0 = specOf(s.facility.devices.get(db)!).diskIops;
+    expect(s.changeParts(db, { kind: 'drive-add', type: 'hdd' }).ok).toBe(true);
+    expect(specOf(s.facility.devices.get(db)!).diskIops).toBe(iops0 * 2);
+    // SSD は 2.5 インチのベイなので、前面を替えてから
+    expect(s.changeParts(db, { kind: 'drive-add', type: 'ssd' }).ok).toBe(false);
+    // 前面を 2.5 インチに替えると、HDD は下取りに出て SSD 2 本が入る
+    expect(s.changeParts(db, { kind: 'backplane', to: 'sff' }).ok).toBe(true);
+    expect(s.facility.devices.get(db)!.parts!.drives).toEqual(['ssd', 'ssd']);
+    // データ用のミラー 1 組は外せない
+    expect(s.changeParts(db, { kind: 'drive-remove' }).ok).toBe(false);
+    expect(s.changeParts(db, { kind: 'mem', dir: 1 }).ok).toBe(true);
     flow = run(s);
-    expect(flow.devices.get(big)!.io).toBeLessThan(0.5);
+    expect(flow.devices.get(db)!.io).toBeLessThan(0.5);
     expect(flow.success).toBeGreaterThan(0.99);
+  });
+
+  it('パーツの強化はラックの電力と解放の範囲で、NVMe は解放してから', () => {
+    const { s } = base();
+    const id = s.buyServer('1u-small', 0, 30).id!;
+    expect(s.changeParts(id, { kind: 'drive-add', type: 'nvme' }).ok).toBe(false);
+    s.unlock('nvme');
+    expect(s.changeParts(id, { kind: 'drive-add', type: 'nvme' }).ok).toBe(true);
+    // CPU を上げ続けると最後は「これより上はない」
+    let r = s.changeParts(id, { kind: 'cpu', dir: 1 });
+    while (r.ok) r = s.changeParts(id, { kind: 'cpu', dir: 1 });
+    expect(r.message).toContain('上の CPU');
+    expect(s.facility.devices.get(id)!.parts!.cpu).toBe(64);
+    // 1U の最後の 2 本(OS)は外せない
+    expect(s.changeParts(id, { kind: 'drive-remove' }).ok).toBe(true);
+    expect(s.changeParts(id, { kind: 'drive-remove' }).ok).toBe(false);
   });
 
   it('LB がないとインターネットから届くのは web 1 台だけ。LB を置くと並べた web に分散する', () => {
@@ -196,8 +249,8 @@ describe('流量モデル', () => {
   it('サーバはスイッチの代わりに通信を中継しない', () => {
     const { s, isp, sw } = base();
     // 回線 → スイッチ → サーバ A → サーバ B と数珠つなぎにしても B には届かない
-    const a = s.buyDevice('srv-1u-e', 0, 30).id!;
-    const b = s.buyDevice('srv-1u-e', 0, 31).id!;
+    const a = buy(s, 'srv-1u-e', 0, 30).id!;
+    const b = buy(s, 'srv-1u-e', 0, 31).id!;
     s.toggleRole(b, 'blog:web');
     s.toggleRole(b, 'blog:db');
     s.connect({ device: a, port: 0 }, { device: sw, port: 1 });
@@ -348,7 +401,7 @@ describe('BGP による冗長化', () => {
     s.connect({ device: isp, port: 0 }, { device: core, port: 0 });
     s.connect({ device: core, port: 1 }, { device: t1, port: 0 });
     s.connect({ device: core, port: 2 }, { device: t2, port: 0 });
-    const srv = s.buyDevice('srv-2u-db', 0, 20).id!;
+    const srv = buy(s, 'srv-2u-db', 0, 20).id!;
     s.toggleRole(srv, 'blog:web');
     s.toggleRole(srv, 'blog:db');
     s.connect({ device: srv, port: 0 }, { device: t1, port: 1 });
@@ -400,12 +453,15 @@ describe('BGP による冗長化', () => {
 });
 
 describe('メトリクスと需要予測', () => {
-  it('キャパシティは今の構成で捌けるページビュー/秒(最初はエントリー機のディスク IO で約 50)', () => {
+  it('キャパシティは今の構成で捌けるページビュー/秒(最初は db の HDD のディスク IO で決まる)', () => {
     const s = newGame();
     const cap = s.estimateCapacity();
-    // 150 IOPS ÷(3 回の読み込みがすべてディスクへ)= 50 PV/秒
-    expect(cap).toBeGreaterThan(45);
-    expect(cap).toBeLessThan(55);
+    // HDD 2 本(ミラー)の IOPS ÷(3 回の読み込みのうちメモリに乗らない分)
+    const db = [...s.facility.devices.values()].find((d) => d.model === 'srv-2u')!;
+    const miss = s.flow.nodeLoads.get(db.id)!.miss['blog:db']!;
+    const expected = specOf(db).diskIops / (3 * miss);
+    expect(cap).toBeGreaterThan(expected * 0.95);
+    expect(cap).toBeLessThan(expected * 1.05);
     // 見積もりのあとも、今の流量の計算は元のまま
     expect(s.flow.pv).toBeCloseTo(s.trafficAt(s.time), 6);
   });
@@ -428,7 +484,7 @@ describe('メトリクスと需要予測', () => {
     const h = s.metrics.history;
     expect(h.t.length).toBe(10);
     expect(h.capacity.at(-1)).toBeGreaterThan(0);
-    const io = [...s.metrics.resources.values()].find((r) => r.label === 'srv01 ディスク');
+    const io = [...s.metrics.resources.values()].find((r) => r.label === 'srv02 ディスク');
     expect(io?.rho.length).toBe(10);
     // 市場規模(1,500 人 = 15 PV/秒)ではキャパシティ(約 50)に届かない。広告で市場を広げると届く
     expect(s.secondsToSaturation()).toBeNull();
@@ -520,6 +576,25 @@ describe('複数のサービス', () => {
     expect(s.capacityPv).toBeGreaterThan(20);
   });
 
+  it('機種固定だったころ(v4)のサーバは、近い構成のシャーシに移して読み込む', () => {
+    const v5 = createSave(newGame(), 1000);
+    const v4 = {
+      ...v5,
+      v: 4,
+      devices: v5.devices.map((d) => {
+        const old = d.slice(0, 11);
+        if (d[1] === 'srv-1u') old[1] = 'srv-1u-e';
+        if (d[1] === 'srv-2u') old[1] = 'srv-2u-hv';
+        return old;
+      }),
+    };
+    const parsed = parseSave(v4)!;
+    expect(parsed.devices.map((d) => d[1])).toEqual(['handoff', 'sw-24', 'srv-1u', 'srv-2u']);
+    expect(parsed.devices[2][11]).toEqual(PRESET_BY_ID['1u-small'].parts);
+    expect(parsed.devices[3][11]!.nic).toBe('sfp10');
+    expect(loadSave(parsed).flow.services.blog!.success).toBe(1);
+  });
+
   it('v3(ブログだけの版)のセーブは、役割をブログのものとして読み込む', () => {
     const v4 = createSave(newGame(), 1000);
     const v3 = {
@@ -529,9 +604,9 @@ describe('複数のサービス', () => {
       devices: v4.devices.map((d) => [...d.slice(0, 4), d[4].map((r) => r.split(':')[1]), ...d.slice(5)]),
     };
     const parsed = parseSave(v3)!;
-    expect(parsed.v).toBe(4);
+    expect(parsed.v).toBe(5);
     expect(parsed.users.blog).toBe(500);
-    expect(parsed.devices.find((d) => d[4].length)![4]).toEqual(['blog:web', 'blog:db']);
+    expect(parsed.devices.flatMap((d) => d[4])).toEqual(['blog:web', 'blog:db']);
     expect(loadSave(parsed).flow.services.blog!.success).toBe(1);
   });
 });
@@ -625,8 +700,16 @@ describe('経済', () => {
     const s = new Simulation({ startMoney: RICH });
     s.facility.rent(0);
     const before = s.money;
-    s.buyDevice('srv-1u-d', 0, 1);
-    expect(before - s.money).toBe(MODEL_PRICES['srv-1u-d'].first * PRICE_SCALE);
+    s.buyDevice('sw-48', 0, 1);
+    expect(s.money).toBe(before); // 10G 機器を解放していない
+    s.buyDevice('sw-24', 0, 1);
+    expect(before - s.money).toBe(MODEL_PRICES['sw-24'].first * PRICE_SCALE);
+    const b2 = s.money;
+    s.buyServer('1u-web', 0, 2);
+    const p = PRESET_BY_ID['1u-web'].parts;
+    expect(b2 - s.money).toBe(
+      (CHASSIS_PRICES['srv-1u'] + CPU_PRICES[p.cpu] + p.memGB * MEMORY_PRICE_PER_GB + 2 * DRIVE_PRICES.ssd) * PRICE_SCALE,
+    );
     const m = s.money;
     s.unlock('lb');
     expect(m - s.money).toBe(UNLOCK_PRICES.lb * PRICE_SCALE);
@@ -688,9 +771,10 @@ describe('セーブ', () => {
   });
 
   it('機種のデータが揃っている', () => {
+    for (const p of PRESETS) expect(partsError(p.model, p.parts), p.id).toBeNull();
     for (const m of Object.values(MODEL_BY_ID)) {
       expect(m.u).toBeGreaterThan(0);
-      if (m.category === 'server') expect(m.cores && m.memGB && m.diskIops && m.coreSpeed).toBeTruthy();
+      if (m.category === 'server') expect(isServerModel(m.id)).toBe(true);
       if (m.category === 'switch') expect(m.fabricGbps).toBeGreaterThan(0);
     }
   });

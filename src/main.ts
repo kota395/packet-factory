@@ -1,6 +1,5 @@
 import './style.css';
 import { RowRenderer, type Face } from './render/row';
-import { MODEL_BY_ID } from './sim/catalog';
 import { OFFLINE } from './sim/config';
 import {
   createSave,
@@ -344,12 +343,12 @@ function showSaveMenu(): void {
 }
 
 function showWelcome(): void {
-  const srv = MODEL_BY_ID['srv-1u-e'];
   showModal(`
     <h2>packet-factory</h2>
     <p class="note">コロケーションの 1 ラックから、ブログサービスのインフラを育てましょう。</p>
     <ul class="howto">
-      <li>ラックには回線終端・スイッチ・サーバ 1 台(${srv.short}、web と db を同居)が入っています</li>
+      <li>ラックには回線終端・スイッチ・リクエストを受ける 1U サーバ(web)・db 用の 2U サーバ(HDD)が入っています</li>
+      <li>サーバは詳細から CPU・メモリ・ドライブをワンクリックで強化できます</li>
       <li>ユーザーが増えるとページビューが増え、捌けた分だけ収入になります。溢れるとエラーになり、ユーザーが離れます</li>
       <li><b>前面</b>: 空いている U をタップして機器を買って設置。サーバには役割(web / db など)を割り当てる</li>
       <li><b>背面</b>: ポートから別のポートへドラッグして配線。ケーブルの色は使用率</li>

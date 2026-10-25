@@ -1,4 +1,15 @@
-import { MODEL_BY_ID } from './catalog';
+import {
+  CPU_OPTIONS,
+  DRIVES,
+  MEMORY_OPTIONS,
+  MODEL_BY_ID,
+  PRESET_BY_ID,
+  isServerModel,
+  partsError,
+  partsRequires,
+  portsOf,
+  specOf,
+} from './catalog';
 import {
   BLOG_FEATURES,
   CAMPAIGN,
@@ -29,8 +40,16 @@ import { Metrics, type Snapshot } from './metrics';
 import {
   RACK_PRICE,
   SELL_REFUND_RATE,
+  PART_REFUND_RATE,
+  PRICE_SCALE,
   START_MONEY,
   UPKEEP,
+  BACKPLANE_PRICE,
+  cpuPrice,
+  drivePrice,
+  memoryPrice,
+  nicPrice,
+  serverPrice,
   cablePrice,
   campaignPrice,
   growingPrice,
@@ -39,11 +58,15 @@ import {
 import {
   SERVICE_IDS,
   splitRole,
+  type Backplane,
   type DiskKind,
+  type DriveType,
   type ModelId,
+  type NicId,
   type PortRef,
   type RoleId,
   type RoleKey,
+  type ServerParts,
   type ServiceId,
   type UnlockId,
   type UpgradeId,
@@ -72,6 +95,15 @@ export interface SimOptions {
 
 /** 役割を割り当てるのに必要な解放(web と db は最初から使える。search・media・worker はそれを使うサービスを始めれば使える) */
 const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = { lb: 'lb', cache: 'cache', replica: 'replication' };
+
+/** サーバのパーツの替え方(ワンクリックの強化・変更) */
+export type PartChange =
+  | { kind: 'cpu'; dir: 1 | -1 }
+  | { kind: 'mem'; dir: 1 | -1 }
+  | { kind: 'drive-add'; type: DriveType }
+  | { kind: 'drive-remove' }
+  | { kind: 'backplane'; to: Backplane }
+  | { kind: 'nic'; to: NicId };
 
 /** キャンペーンの状態(シミュレーション時刻 ms) */
 export interface CampaignState {
@@ -195,7 +227,7 @@ export class Simulation {
     const racks = this.facility.racks.size * UPKEEP.rackByPowerLevel[this.upgrades.rackPower];
     const uplink = UPKEEP.uplinkByLevel[this.upgrades.uplink];
     let watts = 0;
-    for (const d of this.facility.devices.values()) watts += MODEL_BY_ID[d.model].powerW;
+    for (const d of this.facility.devices.values()) watts += specOf(d).powerW;
     return { racks, uplink, power: (watts / 1000) * UPKEEP.perKw };
   }
 
@@ -279,7 +311,9 @@ export class Simulation {
     return growingPrice(RACK_PRICE, Math.max(0, this.facility.racks.size - 1));
   }
 
-  devicePrice(model: ModelId): number {
+  /** 機器の価格。サーバは構成(パーツ)ごと */
+  devicePrice(model: ModelId, parts?: ServerParts): number {
+    if (isServerModel(model)) return serverPrice(model, parts ?? this.defaultParts(model));
     let owned = 0;
     for (const d of this.facility.devices.values()) if (d.model === model) owned++;
     return modelPrice(model, owned);
@@ -309,26 +343,159 @@ export class Simulation {
     return { ok: true, message: `ラック ${slot + 1} を借りました` };
   }
 
-  canBuyModel(model: ModelId): string | null {
+  /** プリセットを指定せずにサーバを買ったときの構成 */
+  private defaultParts(model: 'srv-1u' | 'srv-2u'): ServerParts {
+    return PRESET_BY_ID[model === 'srv-1u' ? '1u-web' : '2u-hdd'].parts;
+  }
+
+  canBuyModel(model: ModelId, parts?: ServerParts): string | null {
     const m = MODEL_BY_ID[model];
     if (m.category === 'handoff') return '回線終端は買えません';
     if (m.requires && !this.unlocks.has(m.requires)) return `投資の「${UNLOCK_BY_ID[m.requires].name}」が必要です`;
+    if (parts) return this.partsUnlockError(parts);
     return null;
   }
 
-  placeError(model: ModelId, slot: number, u: number, ignore?: number): string | null {
-    return this.facility.placeError(model, slot, u, this.rackPowerW, ignore);
+  private partsUnlockError(parts: ServerParts): string | null {
+    for (const u of partsRequires(parts)) if (!this.unlocks.has(u)) return `投資の「${UNLOCK_BY_ID[u].name}」が必要です`;
+    return null;
   }
 
-  buyDevice(model: ModelId, slot: number, u: number): ActionResult {
-    const err = this.canBuyModel(model) ?? this.placeError(model, slot, u);
+  placeError(model: ModelId, slot: number, u: number, ignore?: number, parts?: ServerParts): string | null {
+    const p = isServerModel(model) ? (parts ?? (ignore !== undefined ? undefined : this.defaultParts(model))) : null;
+    return this.facility.placeError(model, slot, u, this.rackPowerW, ignore, p);
+  }
+
+  /** 機器を買って置く。サーバは構成(プリセット ID かパーツ)を指定できる */
+  buyDevice(model: ModelId, slot: number, u: number, config?: string | ServerParts): ActionResult {
+    let parts: ServerParts | undefined;
+    if (isServerModel(model)) {
+      const preset = typeof config === 'string' ? PRESET_BY_ID[config] : undefined;
+      if (typeof config === 'string' && (!preset || preset.model !== model)) return { ok: false, message: 'その構成はありません' };
+      parts = preset?.parts ?? (config as ServerParts | undefined) ?? this.defaultParts(model);
+      const perr = partsError(model, parts);
+      if (perr) return { ok: false, message: perr };
+    }
+    const err = this.canBuyModel(model, parts) ?? this.placeError(model, slot, u, undefined, parts);
     if (err) return { ok: false, message: err };
-    const price = this.devicePrice(model);
+    const price = this.devicePrice(model, parts);
     if (this.money < price) return { ok: false, message: `資金が足りません($${price} 必要)` };
     this.money -= price;
-    const d = this.facility.place(model, slot, u, price);
+    const d = this.facility.place(model, slot, u, price, { parts });
     this.refreshFlow();
     return { ok: true, id: d.id, message: `${d.name}(${MODEL_BY_ID[model].name})を設置しました` };
+  }
+
+  /** プリセットでサーバを買う */
+  buyServer(preset: string, slot: number, u: number): ActionResult {
+    const p = PRESET_BY_ID[preset];
+    if (!p) return { ok: false, message: 'その構成はありません' };
+    return this.buyDevice(p.model, slot, u, preset);
+  }
+
+  // ---------------------------------------------------------------- サーバのパーツ
+
+  /** パーツを替えたあとの構成と、かかるお金(新しいパーツの価格 − 外したパーツの下取り。マイナスなら戻ってくる) */
+  partChangeInfo(id: number, change: PartChange): { parts: ServerParts | null; cost: number; error: string | null } {
+    const d = this.facility.devices.get(id);
+    if (!d || !d.parts || !isServerModel(d.model)) return { parts: null, cost: 0, error: 'サーバではありません' };
+    const p = d.parts;
+    let next: ServerParts;
+    let cost = 0;
+    const refund = (v: number) => Math.floor(v * PART_REFUND_RATE);
+    const bpPrice = Math.round(BACKPLANE_PRICE * PRICE_SCALE);
+    const step = <T>(list: readonly T[], cur: T, dir: number): T | null => {
+      const i = list.indexOf(cur) + dir;
+      return i >= 0 && i < list.length ? list[i] : null;
+    };
+    switch (change.kind) {
+      case 'cpu': {
+        const cores = step(
+          CPU_OPTIONS.map((o) => o.cores),
+          p.cpu,
+          change.dir,
+        );
+        if (cores === null) return { parts: null, cost: 0, error: change.dir > 0 ? 'これより上の CPU はありません' : 'これより下の CPU はありません' };
+        next = { ...p, cpu: cores };
+        cost = cpuPrice(cores) - refund(cpuPrice(p.cpu));
+        break;
+      }
+      case 'mem': {
+        const gb = step(MEMORY_OPTIONS, p.memGB, change.dir);
+        if (gb === null) return { parts: null, cost: 0, error: change.dir > 0 ? 'これ以上は載りません' : 'これより減らせません' };
+        next = { ...p, memGB: gb };
+        cost = memoryPrice(gb) - refund(memoryPrice(p.memGB));
+        break;
+      }
+      case 'drive-add': {
+        if (DRIVES[change.type].bay !== p.backplane) {
+          return { parts: null, cost: 0, error: p.backplane === 'lff' ? '3.5 インチのベイには HDD だけ' : '2.5 インチのベイには SSD・NVMe だけ' };
+        }
+        next = { ...p, drives: [...p.drives, change.type, change.type] };
+        cost = drivePrice(change.type) * 2;
+        break;
+      }
+      case 'drive-remove': {
+        if (p.drives.length < 2) return { parts: null, cost: 0, error: 'ドライブがありません' };
+        const removed = p.drives.slice(-2);
+        next = { ...p, drives: p.drives.slice(0, -2) };
+        cost = -removed.reduce((s, t) => s + refund(drivePrice(t)), 0);
+        break;
+      }
+      case 'backplane': {
+        if (change.to === p.backplane) return { parts: null, cost: 0, error: 'すでにその構成です' };
+        // バックプレーンを替えると、入っていたドライブは外れる(下取り)。データ用に一番安いドライブを 2 本入れる
+        const first: DriveType = change.to === 'lff' ? 'hdd' : 'ssd';
+        next = { ...p, backplane: change.to, drives: [first, first] };
+        cost = bpPrice + drivePrice(first) * 2 - p.drives.reduce((s, t) => s + refund(drivePrice(t)), 0);
+        break;
+      }
+      case 'nic': {
+        if (change.to === p.nic) return { parts: null, cost: 0, error: 'すでにその NIC です' };
+        next = { ...p, nic: change.to };
+        cost = nicPrice(change.to) - refund(nicPrice(p.nic));
+        // 外す NIC のポートにケーブルが挿さっていたら外せない
+        const before = portsOf(d).length;
+        const after = portsOf({ model: d.model, parts: next }).length;
+        for (let i = after; i < before; i++) {
+          if (this.facility.cableAt({ device: id, port: i })) return { parts: null, cost: 0, error: '外す NIC にケーブルが挿さっています' };
+        }
+        break;
+      }
+    }
+    const error =
+      partsError(d.model, next) ??
+      this.partsUnlockError(next) ??
+      this.partsFitError(d, next) ??
+      (cost > 0 && this.money < cost ? `資金が足りません($${cost} 必要)` : null);
+    return { parts: next, cost, error };
+  }
+
+  /** 替えたあとの構成で、ラックの電力・載っている VM が収まるか */
+  private partsFitError(d: Device, next: ServerParts): string | null {
+    const watts = this.facility.powerUsed(d.slot, d.id) + specOf({ model: d.model, parts: next }).powerW;
+    if (watts > this.rackPowerW) return `電力が足りません(${watts}W / 上限 ${this.rackPowerW}W)`;
+    if (d.hv) {
+      const used = this.facility.hostUsage(d.id);
+      const s = specOf({ model: d.model, parts: next });
+      if (used.memGB > s.memGB - VIRT.hostMemGB) return '載っている VM のメモリが収まりません';
+      if (used.vcpu > s.cores * VIRT.vcpuOvercommit) return '載っている VM の vCPU が収まりません';
+    }
+    return null;
+  }
+
+  /** パーツを替える(ワンクリックの強化) */
+  changeParts(id: number, change: PartChange): ActionResult {
+    const info = this.partChangeInfo(id, change);
+    if (info.error || !info.parts) return { ok: false, message: info.error ?? '替えられません' };
+    const d = this.facility.devices.get(id)!;
+    this.money -= info.cost;
+    this.facility.setParts(id, info.parts);
+    d.paid = serverPrice(d.model as 'srv-1u' | 'srv-2u', info.parts);
+    this.schedule();
+    this.refreshFlow();
+    const money = info.cost >= 0 ? `-$${info.cost}` : `+$${-info.cost}`;
+    return { ok: true, message: `${d.name} の構成を替えました(${money})` };
   }
 
   moveDevice(id: number, slot: number, u: number): ActionResult {
@@ -349,7 +516,9 @@ export class Simulation {
     if (MODEL_BY_ID[d.model].category === 'handoff') return { ok: false, message: '回線終端は撤去できません' };
     const vms = this.facility.vmsOn(id);
     if (vms.length) return { ok: false, message: `${d.name} には VM が ${vms.length} 台載っています。先に移すか消してください` };
-    const refund = Math.floor(d.paid * SELL_REFUND_RATE);
+    // サーバは今の構成の価格で引き取る
+    const value = d.parts && isServerModel(d.model) ? serverPrice(d.model, d.parts) : d.paid;
+    const refund = Math.floor(value * SELL_REFUND_RATE);
     const cables = this.facility.remove(id);
     this.money += refund;
     this.refreshFlow();
@@ -533,8 +702,8 @@ export class Simulation {
     const out: { node: number; vcpu: number; memGB: number }[] = [];
     for (const d of [...this.facility.devices.values()].sort((a, b) => a.id - b.id)) {
       if (!d.k8s || d.hv || down.has(d.id)) continue;
-      const m = MODEL_BY_ID[d.model];
-      out.push({ node: d.id, vcpu: m.cores!, memGB: m.memGB! - K8S.systemMemGB });
+      const m = specOf(d);
+      out.push({ node: d.id, vcpu: m.cores, memGB: m.memGB - K8S.systemMemGB });
     }
     for (const v of [...this.facility.vms.values()].sort((a, b) => a.id - b.id)) {
       if (!v.k8s || v.downUntil > this.time || down.has(v.host)) continue;

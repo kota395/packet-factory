@@ -2,7 +2,7 @@
  * 列の立面図の座標(ワールド座標)。描画と当たり判定の両方で使う。
  * ラックは左から slot 0, 1, … と並び、U は下が 1。
  */
-import { MODEL_BY_ID } from '../sim/catalog';
+import { MODEL_BY_ID, specOf } from '../sim/catalog';
 import { RACK, ROW } from '../sim/config';
 import type { Cable, Device, Facility } from '../sim/facility';
 import type { PortRef } from '../sim/types';
@@ -73,11 +73,11 @@ export function unitAt(y: number): number | null {
  * 機器の背面のポートの中心。グループ(1G と 10G SFP+ など)の間は少し空け、
  * 収まる段数で左から右へ並べる
  */
-export function portCenters(d: Pick<Device, 'model' | 'slot' | 'u'>): Point[] {
+export function portCenters(d: Pick<Device, 'model' | 'slot' | 'u' | 'parts'>): Point[] {
   const r = deviceRect(d);
   const pitch = PORT + PORT_GAP;
   const rows = Math.max(1, Math.floor((r.h - 2) / pitch));
-  const groups = MODEL_BY_ID[d.model].ports;
+  const groups = specOf(d).ports;
   const out: Point[] = [];
   let col = 0;
   let i = 0;

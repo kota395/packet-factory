@@ -10,7 +10,7 @@
  * 役割を動かす単位(ノード)は物理サーバか VM。VM はホストの CPU を分け合い、通信はホストの NIC から出入りする。
  * VM のディスクは、ホストのローカルディスクか共有ストレージ(ネットワーク越しの IO)に置く。
  */
-import { MODEL_BY_ID, portsOf } from './catalog';
+import { MODEL_BY_ID, portsOf, specOf } from './catalog';
 import { K8S, MAX_QUEUE_RHO, NET, P99_FACTOR, REPLICATION, ROLE_MEM_GB, SERVICES, VIRT, WORK, type Workload } from './config';
 import type { Facility } from './facility';
 import { ROLE_IDS, roleKey, splitRole, type DiskKind, type RoleId, type RoleKey, type ServiceId } from './types';
@@ -181,7 +181,7 @@ function graphOf(facility: Facility, input: FlowInput): Graph {
   const links: LinkLoad[] = [];
   const speedOf = (device: number, port: number) => {
     const d = facility.devices.get(device)!;
-    const p = portsOf(d.model)[port];
+    const p = portsOf(d)[port];
     return MODEL_BY_ID[d.model].category === 'handoff' ? input.uplinkGbps : p.speedGbps;
   };
   for (const c of facility.cables.values()) {
@@ -367,14 +367,14 @@ export function computeNodes(
     .sort((a, b) => a.id - b.id);
   for (const d of servers) {
     if (d.hv || down.has(d.id)) continue;
-    const m = MODEL_BY_ID[d.model];
+    const m = specOf(d);
     nodes.push({
       id: d.id,
       name: d.name,
       host: d.id,
-      cores: m.cores!,
-      coreSpeed: m.coreSpeed!,
-      memGB: m.memGB!,
+      cores: m.cores,
+      coreSpeed: m.coreSpeed,
+      memGB: m.memGB,
       roles: d.roles,
       vm: false,
       disk: 'local',
@@ -389,7 +389,7 @@ export function computeNodes(
       name: v.name,
       host: host.id,
       cores: size.vcpu,
-      coreSpeed: MODEL_BY_ID[host.model].coreSpeed!,
+      coreSpeed: specOf(host).coreSpeed,
       memGB: size.memGB,
       roles: v.roles,
       vm: true,
@@ -500,8 +500,8 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     const parent = n.parent !== undefined ? nodes.get(n.parent)! : null;
     if (parent) loads.get(parent.id)!.cpu += (perSec * cpuMs) / (parent.coreSpeed * parent.cores * 1000);
     const virtual = n.vm || !!parent?.vm;
-    const host = MODEL_BY_ID[facility.devices.get(n.host)!.model];
-    devices.get(n.host)!.cpu += (perSec * cpuMs * (virtual ? VIRT.cpuOverhead : 1)) / (host.coreSpeed! * host.cores! * 1000);
+    const host = specOf(facility.devices.get(n.host)!);
+    devices.get(n.host)!.cpu += (perSec * cpuMs * (virtual ? VIRT.cpuOverhead : 1)) / (host.coreSpeed * host.cores * 1000);
   };
   /** ノードの CPU の使用率(Pod ならワーカー、VM ならホストも含めて一番高いもの) */
   const cpuRho = (id: number) => {
@@ -530,9 +530,9 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     const l = loads.get(id)!;
     l.ioOps += ops;
     if (n.disk === 'local') {
-      devices.get(n.host)!.io += ops / MODEL_BY_ID[facility.devices.get(n.host)!.model].diskIops!;
+      devices.get(n.host)!.io += ops / specOf(facility.devices.get(n.host)!).diskIops;
     } else if (l.storage != null) {
-      devices.get(l.storage)!.io += ops / MODEL_BY_ID[facility.devices.get(l.storage)!.model].diskIops!;
+      devices.get(l.storage)!.io += ops / specOf(facility.devices.get(l.storage)!).diskIops;
       const gb = ops * VIRT.storageIoKB * GB_PER_KB * 0.5;
       sendDev(n.host, l.storage, gb, gb);
     }
