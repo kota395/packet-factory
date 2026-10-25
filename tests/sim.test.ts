@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MODEL_BY_ID, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
+import { MODEL_BY_ID, portsOf, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
 import { BLOG_FEATURES, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, WORK } from '../src/sim/config';
 import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
@@ -56,7 +56,14 @@ function base(opts: { pv?: number; traffic?: Partial<Record<ServiceId, number>>;
     if (toSw === sw) expect(s.connect({ device: r.id!, port: 0 }, { device: sw, port: nextPort++ }).ok).toBe(true);
     return r.id!;
   };
-  return { s, f, isp: isp.id, sw, server };
+  /** LB アプライアンスを買って ToR につなぐ */
+  const lb = (u: number) => {
+    const r = s.buyDevice('lb-1u', 0, u);
+    expect(r.ok, r.message).toBe(true);
+    expect(s.connect({ device: r.id!, port: 0 }, { device: sw, port: nextPort++ }).ok).toBe(true);
+    return r.id!;
+  };
+  return { s, f, isp: isp.id, sw, server, lb };
 }
 
 const run = (s: Simulation, ms = 5000) => {
@@ -193,17 +200,51 @@ describe('流量モデル', () => {
   });
 
   it('LB がないとインターネットから届くのは web 1 台だけ。LB を置くと並べた web に分散する', () => {
-    const { s, server } = base({ pv: 150, unlocks: ['lb'] });
+    const { s, server, lb } = base({ pv: 150, unlocks: ['lb'] });
     server('srv-2u-db', 20, ['blog:db']);
     const w1 = server('srv-1u-e', 30, ['blog:web']);
     const w2 = server('srv-1u-e', 31, ['blog:web']);
     let flow = run(s);
     expect(flow.nodeLoads.get(w2)!.work['blog:web'] ?? 0).toBe(0);
     expect(flow.problems.join()).toContain('LB');
-    server('srv-1u-e', 32, ['blog:lb']);
+    const l1 = lb(32);
     flow = run(s);
+    expect(flow.services.blog!.entries).toEqual([l1]);
     expect(flow.nodeLoads.get(w1)!.work['blog:web']).toBeCloseTo(75, 0);
     expect(flow.nodeLoads.get(w2)!.work['blog:web']).toBeCloseTo(75, 0);
+    // アプライアンスの使用率 = 振り分けたリクエスト ÷ 処理能力
+    expect(flow.devices.get(l1)!.cpu).toBeCloseTo(150 / MODEL_BY_ID['lb-1u'].lbRps!, 6);
+    // サーバに役割「lb」を付けるのは SLB を解放してから
+    const srv = server('srv-1u-e', 28, []);
+    expect(s.toggleRole(srv, 'blog:lb').ok).toBe(false);
+    s.unlock('slb');
+    expect(s.toggleRole(srv, 'blog:lb').ok).toBe(true);
+    expect(run(s).services.blog!.entries).toEqual([l1, srv]);
+  });
+
+  it('LB を 2 台にして HA ポートで直結すると、片方が止まってももう片方が引き継ぐ', () => {
+    const { s, server, lb } = base({ pv: 100, unlocks: ['lb'] });
+    server('srv-2u-db', 20, ['blog:web', 'blog:db']);
+    const l1 = lb(32);
+    const l2 = lb(31);
+    // HA でつないでいない 2 台は別々の VIP。片方を止めると、そこに来た半分が失敗する
+    expect(run(s, 1000).services.blog!.entries).toEqual([l1, l2]);
+    s.setMaintenance(l1, true);
+    expect(run(s, 1000).success).toBeCloseTo(0.5, 6);
+    s.setMaintenance(l1, false);
+    const ha = portsOf(s.facility.devices.get(l1)!).findIndex((p) => p.label === 'HA');
+    expect(s.connect({ device: l1, port: ha }, { device: l2, port: ha }).ok).toBe(true);
+    // ペアはアクティブの 1 台だけが受ける
+    let flow = run(s, 1000);
+    expect(flow.services.blog!.entries).toEqual([l1]);
+    expect(flow.success).toBe(1);
+    s.setMaintenance(l1, true);
+    flow = run(s, 1000);
+    expect(flow.services.blog!.entries).toEqual([l2]);
+    expect(flow.success).toBe(1);
+    expect(flow.problems.join()).toContain('引き継いで');
+    s.setMaintenance(l2, true);
+    expect(run(s, 1000).success).toBe(0);
   });
 
   it('memcached があると db に行く読み込みが減る', () => {
@@ -640,8 +681,8 @@ describe('Kubernetes', () => {
   });
 
   it('Pod はワーカーに分散して置かれ、負荷に合わせて自動で増える', () => {
-    const { s, server, w1, w2 } = cluster(300, ['lb']);
-    server('srv-1u-d', 30, ['blog:lb']);
+    const { s, lb, w1, w2 } = cluster(300, ['lb']);
+    lb(30);
     s.toggleDeployment('blog:web');
     expect(new Set(s.pods.map((p) => p.worker))).toEqual(new Set([w1, w2]));
     const before = run(s, 1000);
@@ -670,8 +711,8 @@ describe('Kubernetes', () => {
   });
 
   it('ワーカーが止まると、Pod は残りのワーカーに置き直される', () => {
-    const { s, server, w1, w2 } = cluster(100, ['lb']);
-    server('srv-1u-d', 30, ['blog:lb']);
+    const { s, lb, w1, w2 } = cluster(100, ['lb']);
+    lb(30);
     s.toggleDeployment('blog:web');
     run(s, 20_000);
     s.setMaintenance(w1, true);
@@ -833,7 +874,7 @@ describe('経済', () => {
 
 describe('セーブ', () => {
   it('保存 → 文字列化 → 復元で同じ構成になる', () => {
-    const { s, server } = base({ unlocks: ['lb'] });
+    const { s, server } = base({ unlocks: ['lb', 'slb'] });
     server('srv-2u-db', 20, ['blog:db']);
     server('srv-1u-e', 30, ['blog:web', 'blog:lb']);
     s.step(2000);

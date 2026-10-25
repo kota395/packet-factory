@@ -96,7 +96,7 @@ export interface SimOptions {
 }
 
 /** 役割を割り当てるのに必要な解放(web と db は最初から使える。search・media・worker はそれを使うサービスを始めれば使える) */
-const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = { lb: 'lb', cache: 'cache', replica: 'replication' };
+const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = { lb: 'slb', cache: 'cache', replica: 'replication' };
 
 /** サーバのパーツの替え方(ワンクリックの強化・変更) */
 export type PartChange =
@@ -1118,6 +1118,7 @@ export class Simulation {
         add(`cpu:${d.id}`, `${d.name} CPU`, l.cpu);
         add(`io:${d.id}`, `${d.name} ディスク`, l.io);
       } else if (cat === 'storage') add(`io:${d.id}`, `${d.name} IOPS`, l.io);
+      else if (cat === 'lb') add(`lb:${d.id}`, `${d.name} 処理`, l.cpu);
       else if (cat === 'switch') add(`fab:${d.id}`, `${d.name} 処理`, l.fabric);
     }
     for (const n of flow.nodes.values()) if (n.vm) add(`vm:${n.id}`, `${n.name} vCPU`, flow.nodeLoads.get(n.id)!.cpu);

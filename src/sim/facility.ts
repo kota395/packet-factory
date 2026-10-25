@@ -70,6 +70,7 @@ function namePrefix(model: ModelId): string {
   if (m.category === 'handoff') return 'isp';
   if (model === 'agg-10g') return 'agg';
   if (m.category === 'storage') return 'nas';
+  if (m.category === 'lb') return 'lb';
   return m.category === 'switch' ? 'sw' : 'srv';
 }
 

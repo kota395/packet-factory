@@ -80,6 +80,8 @@ export interface ComputeNode {
   readonly pods?: number;
   /** BGP で外へ広報している(LB なしでインターネットから直接受けられる) */
   readonly advertised?: boolean;
+  /** LB アプライアンスなら、1 秒あたりに振り分けられるリクエスト数 */
+  readonly lbRps?: number;
 }
 
 export interface NodeLoad {
@@ -188,6 +190,8 @@ function graphOf(facility: Facility, input: FlowInput): Graph {
   };
   for (const c of facility.cables.values()) {
     if (input.down.has(c.a.device) || input.down.has(c.b.device)) continue;
+    // HA ポートのケーブルは LB 同士の死活監視だけで、データは流れない
+    if (isHaPort(facility, c.a) || isHaPort(facility, c.b)) continue;
     const [a, b] = c.a.device < c.b.device ? [c.a, c.b] : [c.b, c.a];
     const speed = Math.min(speedOf(a.device, a.port), speedOf(b.device, b.port));
     let link = adj.get(a.device)?.get(b.device);
@@ -205,6 +209,35 @@ function graphOf(facility: Facility, input: FlowInput): Graph {
   const graph: Graph = { key, adj, links, routes: new Map() };
   cachedGraph = { facility, graph };
   return graph;
+}
+
+/** LB アプライアンスの HA ポートか */
+export function isHaPort(facility: Facility, ref: { device: number; port: number }): boolean {
+  const d = facility.devices.get(ref.device);
+  return !!d && MODEL_BY_ID[d.model].category === 'lb' && portsOf(d)[ref.port]?.label === 'HA';
+}
+
+/**
+ * LB アプライアンスのまとまり。HA ポート同士を直結した 2 台はペア(アクティブ/スタンバイ)、それ以外は 1 台ずつ。
+ * アクティブは若い番号の、動いている方
+ */
+export function lbGroups(facility: Facility, down: ReadonlySet<number>): { members: number[]; active: number | null }[] {
+  const lbs = [...facility.devices.values()].filter((d) => MODEL_BY_ID[d.model].category === 'lb').sort((a, b) => a.id - b.id);
+  const peer = new Map<number, number>();
+  for (const c of facility.cables.values()) {
+    if (!isHaPort(facility, c.a) || !isHaPort(facility, c.b) || c.a.device === c.b.device) continue;
+    peer.set(c.a.device, c.b.device);
+    peer.set(c.b.device, c.a.device);
+  }
+  const seen = new Set<number>();
+  const groups: { members: number[]; active: number | null }[] = [];
+  for (const d of lbs) {
+    if (seen.has(d.id)) continue;
+    const members = [d.id, ...(peer.has(d.id) ? [peer.get(d.id)!] : [])].sort((a, b) => a - b);
+    for (const m of members) seen.add(m);
+    groups.push({ members, active: members.find((m) => !down.has(m)) ?? null });
+  }
+  return groups;
 }
 
 function resetGraph(g: Graph): Graph {
@@ -291,6 +324,8 @@ function routeOf(facility: Facility, g: Graph, input: FlowInput, src: number, ds
     const cat = MODEL_BY_ID[d.model].category;
     const live = [...(g.adj.get(id)?.keys() ?? [])];
     if (cat === 'switch' || cat === 'handoff') return live;
+    // LB アプライアンスは BGP を解放していれば、つないだリンクすべてを使う
+    if (cat === 'lb' && input.bgp) return live;
     if (input.bgp && (d.bgp || d.hv)) return live;
     const hop = staticHop(facility, id, other);
     return hop !== null && live.includes(hop) ? [hop] : [];
@@ -397,6 +432,12 @@ export function computeNodes(
       vm: true,
       disk: v.disk,
     });
+  }
+  // LB アプライアンス(動いているもの)。処理能力を 1 コアとして、1 リクエストの重さを lbRps から決める
+  for (const d of [...facility.devices.values()].sort((a, b) => a.id - b.id)) {
+    const m = MODEL_BY_ID[d.model];
+    if (m.category !== 'lb' || down.has(d.id)) continue;
+    nodes.push({ id: d.id, name: d.name, host: d.id, cores: 1, coreSpeed: 1, memGB: 0, roles: [], vm: false, disk: 'local', lbRps: m.lbRps });
   }
   // Pod: ワーカーが動いていれば、ワーカーのノードの上に置く
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -567,6 +608,21 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     return miss;
   };
 
+  // ---- LB アプライアンス: HA ペアはアクティブの 1 台だけが受ける
+  const groups = lbGroups(facility, input.down);
+  const activeLbs = groups.filter((gr) => gr.active !== null && nodes.has(gr.active)).map((gr) => gr.active!);
+  const deadLbs = groups.filter((gr) => gr.active === null).length;
+  for (const gr of groups) {
+    const names = gr.members.map(name).join('・');
+    if (gr.active === null) problems.push(`LB(${names})が止まっていて、そこに来たリクエストが失敗しています`);
+    else if (gr.members.length > 1 && gr.active !== gr.members[0]) problems.push(`${name(gr.members[0])} が止まり、HA で ${name(gr.active)} が引き継いでいます`);
+  }
+  /** LB で 1 リクエストを振り分ける重さ(アプライアンスは処理能力から) */
+  const lbMs = (id: number) => {
+    const rps = nodes.get(id)?.lbRps;
+    return rps ? 1000 / rps : WORK.lbCpuMs;
+  };
+
   // ---------------------------------------------------------------- サービスごとに負荷を積む
 
   const planService = (svc: ServiceLoad) => {
@@ -600,10 +656,14 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
             { primary: inst.db[1], read: DB_SPLIT.functionalReadShare, write: 1, data: DB_SPLIT.functionalReadShare, replicas: [] },
           ]
         : inst.db.map((id) => ({ primary: id, read: 1 / inst.db.length, write: 1 / inst.db.length, data: 1 / inst.db.length, replicas: [] }));
-    const useLb = inst.lb.length > 0;
+    // LB: アプライアンス(HA ペアならアクティブの 1 台)と、SLB の役割を付けたノード。
+    // すべて止まっている LB(ペアの両方が止まっているなど)にも DNS でリクエストが来て、その分は失敗する
+    const lbNodes = [...activeLbs, ...inst.lb];
+    const useLb = lbNodes.length + deadLbs > 0;
+    const lbShare = useLb ? lbNodes.length / (lbNodes.length + deadLbs) : 1;
     // LB がなければ、BGP で広報している Pod(MetalLB)がそれぞれ受ける。それもなければ web 1 台だけ
     const advertised = inst.web.filter((n) => nodes.get(n)!.advertised);
-    const entries = useLb ? inst.lb : advertised.length ? advertised : inst.web.slice(0, 1);
+    const entries = useLb ? lbNodes : advertised.length ? advertised : inst.web.slice(0, 1);
     if (!useLb && inst.web.length > entries.length) {
       sp.push(
         advertised.length
@@ -647,8 +707,8 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
 
     // ---- 入口: ページと投稿
     const uploads = W.upload ? pv * W.upload.perPv : 0;
-    const perEntry = entries.length ? pv / entries.length : 0;
-    const upPerEntry = entries.length ? uploads / entries.length : 0;
+    const perEntry = entries.length ? (pv * lbShare) / entries.length : 0;
+    const upPerEntry = entries.length ? (uploads * lbShare) / entries.length : 0;
     const upKB = W.upload?.kb ?? 0;
     for (const e of entries) {
       fromNet(e, (perEntry * WORK.requestKB + upPerEntry * upKB) * GB_PER_KB, perEntry * W.pageKB * GB_PER_KB);
@@ -657,7 +717,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     const upOf = new Map<number, number>();
     if (useLb) {
       for (const e of entries) {
-        addWork(e, lbKey, perEntry + upPerEntry, WORK.lbCpuMs);
+        addWork(e, lbKey, perEntry + upPerEntry, lbMs(e));
         for (const w of webs) {
           const p = perEntry / webs.length;
           const u = upPerEntry / webs.length;
@@ -790,11 +850,11 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     if (W.media) {
       const fetches = pv * W.media.perPv;
       const fetchOn = new Map<number, number>();
-      const perE = mediaEntries.length ? fetches / mediaEntries.length : 0;
+      const perE = mediaEntries.length ? (fetches * lbShare) / mediaEntries.length : 0;
       for (const e of mediaEntries) {
         fromNet(e, perE * WORK.requestKB * GB_PER_KB, perE * W.media.kb * GB_PER_KB);
         if (useLb) {
-          addWork(e, lbKey, perE, WORK.lbCpuMs);
+          addWork(e, lbKey, perE, lbMs(e));
           for (const m of media) {
             const n = perE / media.length;
             send(e, m, n * WORK.requestKB * GB_PER_KB, n * W.media.kb * GB_PER_KB);
@@ -890,7 +950,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
             ms += (pMs + wMs) / webs.length;
           }
           ok *= nodeOk(e);
-          ms += cpuMs(e, WORK.lbCpuMs);
+          ms += cpuMs(e, lbMs(e));
         } else {
           [ok, ms] = webPart(e);
         }
@@ -913,7 +973,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
           let ms: number;
           if (useLb) {
             ok = avg(media.map((m) => along(path(e, m))[0] * fetchOk(m))) * nodeOk(e);
-            ms = avg(media.map((m) => along(path(e, m))[1] + fetchMs(m))) + cpuMs(e, WORK.lbCpuMs);
+            ms = avg(media.map((m) => along(path(e, m))[1] + fetchMs(m))) + cpuMs(e, lbMs(e));
           } else {
             ok = fetchOk(e);
             ms = fetchMs(e);
@@ -943,7 +1003,11 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
         }
         success *= 1 - Math.min(1, W.upload.perPv) * (1 - upOk);
       }
-      return { success: entries.length ? Math.max(0, Math.min(1, success)) : pv > 0 ? 0 : 1, latencyMs: NET.internetRttMs + latency };
+      // 止まっている LB に来た分は失敗
+      return {
+        success: entries.length ? Math.max(0, Math.min(1, success * lbShare)) : pv > 0 ? 0 : 1,
+        latencyMs: NET.internetRttMs + latency,
+      };
     };
 
     // ---- 届かない所の警告
@@ -1071,7 +1135,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   for (const d of facility.devices.values()) {
     const l = devices.get(d.id)!;
     const storage = MODEL_BY_ID[d.model].category === 'storage';
-    consider(`${d.name} の CPU`, l.cpu);
+    consider(MODEL_BY_ID[d.model].category === 'lb' ? `${d.name} の処理能力` : `${d.name} の CPU`, l.cpu);
     consider(storage ? `${d.name} の IOPS` : `${d.name} のディスク IO`, l.io);
     consider(`${d.name} の処理能力`, l.fabric);
   }

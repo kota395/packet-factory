@@ -31,6 +31,8 @@ export interface ModelDef {
   readonly diskIops?: number;
   /** スイッチ: 全ポート合計で捌ける量(Gbps) */
   readonly fabricGbps?: number;
+  /** LB アプライアンス: 1 秒あたりに振り分けられるリクエスト数 */
+  readonly lbRps?: number;
   /** 買えるようになるのに必要な解放 */
   readonly requires?: UnlockId;
   /** 前面の色 */
@@ -100,6 +102,20 @@ export const MODELS: readonly ModelDef[] = [
     diskIops: 40_000,
     requires: 'storage',
     color: 0xc77dff,
+  },
+  {
+    id: 'lb-1u',
+    category: 'lb',
+    name: 'ロードバランサ(アプライアンス)',
+    short: 'LB',
+    description:
+      'L4/L7 のロードバランサ専用機。サービスごとの VIP でリクエストを受けて、後ろの web(や media)に振り分ける。2 台の HA ポート同士をケーブルで直結すると、アクティブ/スタンバイで冗長化される(片方が止まっても、もう片方が引き継ぐ)。',
+    u: 1,
+    powerW: 120,
+    ports: [rj45(4), { count: 1, speedGbps: 1, media: 'rj45', label: 'HA' }],
+    lbRps: 20_000,
+    requires: 'lb',
+    color: 0xffb703,
   },
   {
     id: 'sw-24',
@@ -352,7 +368,9 @@ export function specOf(d: { readonly model: ModelId; readonly parts?: ServerPart
   if (!isServerModel(d.model) || !d.parts) {
     let f = fixedSpec.get(d.model);
     if (!f) {
-      f = { cores: 0, coreSpeed: CORE_SPEED, memGB: 0, diskIops: m.diskIops ?? 0, powerW: m.powerW, ports: m.ports };
+      // LB アプライアンスは「処理能力 1」として扱う(1 リクエストの重さを lbRps から決める)
+      const cores = m.category === 'lb' ? 1 : 0;
+      f = { cores, coreSpeed: CORE_SPEED, memGB: 0, diskIops: m.diskIops ?? 0, powerW: m.powerW, ports: m.ports };
       fixedSpec.set(d.model, f);
     }
     return f;

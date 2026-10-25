@@ -281,6 +281,10 @@ export function parseSave(data: unknown): SaveData | null {
     vms.push([id, name.slice(0, 32), host, size, okRoles(roles), disk, k8s === true]);
   }
 
+  // LB がアプライアンスになる前のセーブ: サーバに付けていた lb の役割は、SLB を解放した扱いでそのまま使えるようにする
+  const usesSlb = [...devices.map((x) => x[4]), ...vms.map((x) => x[4])].some((roles) => roles.some((k) => k.endsWith(':lb')));
+  if (usesSlb && !unlocks.includes('slb')) unlocks.push('slb');
+
   const deployments: SaveData['deployments'] = [];
   for (const item of (Array.isArray(d.deployments) ? d.deployments : []) as unknown[]) {
     if (!Array.isArray(item) || item.length !== 2 || !isRoleKey(item[0]) || !isInt(item[1]) || item[1] < 0) return null;

@@ -34,7 +34,7 @@ export type VmSize = 's' | 'm' | 'l';
 export type DiskKind = 'local' | 'shared';
 
 /** 機器の分類 */
-export type Category = 'server' | 'switch' | 'handoff' | 'storage';
+export type Category = 'server' | 'switch' | 'handoff' | 'storage' | 'lb';
 
 /** 機種 */
 export type ModelId =
@@ -42,6 +42,7 @@ export type ModelId =
   | 'srv-1u'
   | 'srv-2u'
   | 'nas-2u'
+  | 'lb-1u'
   | 'sw-24'
   | 'sw-48'
   | 'agg-10g';
@@ -58,6 +59,7 @@ export type UnlockId =
   | 'video'
   | 'cache'
   | 'lb'
+  | 'slb'
   | 'replication'
   | 'virtualization'
   | 'kubernetes'

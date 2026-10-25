@@ -53,6 +53,21 @@ it(`balance bot (${MINUTES} min)`, () => {
     }
     return null;
   };
+  /** LB アプライアンスを買って ToR につなぐ */
+  const buyLb = (): boolean => {
+    if (s.money < s.devicePrice('lb-1u') + 30) return false;
+    for (const slot of [...f.racks.keys()]) {
+      const tor = devices((d) => isSwitch(d.model)).find((d) => (d as { slot: number }).slot === slot && freePort(d.id) !== null);
+      const u = findU('lb-1u', slot);
+      if (u === null || !tor) continue;
+      const r = s.buyDevice('lb-1u', slot, u);
+      if (!r.ok) continue;
+      s.connect({ device: r.id!, port: 0 }, freePort(tor.id)!);
+      event('LB アプライアンス設置');
+      return true;
+    }
+    return false;
+  };
   const tryUnlock = (id: UnlockId) => {
     if (s.unlocks.has(id) || s.money < unlockCost(id)) return false;
     const ok = s.unlock(id).ok;
@@ -144,8 +159,8 @@ it(`balance bot (${MINUTES} min)`, () => {
         // web が詰まっている: LB の後ろに web を足す
         if (dev.roles.includes('blog:web') || dev.roles.includes('blog:lb')) {
           if (!s.unlocks.has('lb')) return tryUnlock('lb');
-          if (!flow.services.blog!.instances.lb.length) return buyServer('1u-small', ['blog:lb']) !== null;
-          if (dev.roles.includes('blog:lb')) return buyServer('1u-web', ['blog:lb']) !== null;
+          // LB アプライアンスを 1 台置く(あれば web を足す)
+          if (![...f.devices.values()].some((d) => d.model === 'lb-1u')) return buyLb();
           const id = buyServer('1u-web', ['blog:web']);
           return id !== null || powerOrRack('1u-web');
         }
@@ -161,7 +176,7 @@ it(`balance bot (${MINUTES} min)`, () => {
         }
         const server = [x, y].find((d) => MODEL_BY_ID[d.model].category === 'server');
         if (server && server.roles.length) {
-          const role = server.roles.includes('blog:lb') ? 'blog:lb' : server.roles[0];
+          const role = server.roles[0];
           return buyServer('1u-web', [role]) !== null || powerOrRack('1u-web');
         }
       }

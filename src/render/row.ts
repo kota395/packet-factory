@@ -1,5 +1,6 @@
 import { Application, Container, Graphics, Text, type FederatedPointerEvent } from 'pixi.js';
 import { DRIVES, MODEL_BY_ID, portsOf } from '../sim/catalog';
+import { lbGroups } from '../sim/flow';
 import { RACK, ROW } from '../sim/config';
 import type { Device } from '../sim/facility';
 import type { Simulation } from '../sim/simulation';
@@ -494,6 +495,12 @@ export class RowRenderer {
           const t = this.label(text, r.x + 108, r.y + r.h / 2, 10, 0xb7e4c7, 0, false, true);
           const maxW = r.w - 108 - 64;
           if (t.width > maxW) t.scale.set(maxW / t.width);
+        } else if (m.category === 'lb') {
+          // LB: HA の状態
+          const gr = lbGroups(f, sim.downDevices).find((x) => x.members.includes(d.id));
+          const stopped = sim.downDevices.has(d.id);
+          const text = stopped ? '停止中' : !gr || gr.members.length < 2 ? 'HA なし' : gr.active === d.id ? 'HA アクティブ' : 'HA スタンバイ';
+          this.label(text, r.x + 108, r.y + r.h / 2, 10, gr && gr.members.length > 1 ? 0xffd166 : COLORS.muted, 0, false, true);
         } else if (d.k8s) {
           // Kubernetes のワーカー: 置かれた Pod を役割ごとに
           const parts = sim.pods.filter((p) => p.worker === d.id).map((p) => `${rolesText([p.role])}×${p.count}`);
@@ -590,7 +597,9 @@ export class RowRenderer {
               ? [load.fabric]
               : m.category === 'storage'
                 ? [load.io]
-                : [];
+                : m.category === 'lb'
+                  ? [load.cpu]
+                  : [];
         const w = 46;
         const h = 4;
         bars.forEach((v, i) => {

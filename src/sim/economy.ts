@@ -74,8 +74,16 @@ export const UNLOCKS: readonly UnlockDef[] = [
   },
   {
     id: 'lb',
-    name: 'ロードバランサ(LVS)',
-    description: '役割「lb」を割り当てられる。LB がないとインターネットから届くのは web 1 台だけ。',
+    name: 'ロードバランサ(アプライアンス)',
+    description:
+      'LB の専用機を買えるようになる(前面の空き U から)。スイッチにつなぐと、すべてのサービスのリクエストを受けて web に振り分ける。LB がないとインターネットから届くのは web 1 台だけ。2 台を HA ポートで直結すると冗長化できる。',
+  },
+  {
+    id: 'slb',
+    name: 'ソフトウェア LB(LVS)',
+    description:
+      'サーバや VM に役割「lb」を付けて LB にできる。専用機より安いサーバで、台数を増やして横に広げられる。',
+    requires: 'lb',
     role: 'lb',
   },
   {
@@ -216,7 +224,7 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 2,
     name: '役割の分離',
-    summary: 'db と web を別のサーバに分け、LB の後ろに web を並べる。',
+    summary: 'LB アプライアンスを置き、その後ろに web を並べる。LB を 2 台にして HA ポートで直結すれば、片方が止まっても続く。',
     unlocks: ['lb'],
   },
   {
@@ -267,7 +275,7 @@ export const STAGES: readonly StageDef[] = [
     name: 'コンテナ',
     summary:
       'Kubernetes のワーカーに Pod を自動で置き、負荷に合わせて数を増減する。ワーカーが止まっても Pod は別のワーカーに置き直される。BGP があれば LB なしで受けられる。',
-    unlocks: ['kubernetes'],
+    unlocks: ['kubernetes', 'slb'],
   },
   {
     id: 11,
@@ -311,7 +319,7 @@ export const LINES: readonly LineDef[] = [
     id: 'software',
     name: 'ソフトウェア',
     summary: 'サーバに割り当てられる役割を増やす。',
-    unlocks: ['lb', 'cache', 'replication', 'partition', 'sharding', 'virtualization', 'kubernetes'],
+    unlocks: ['lb', 'cache', 'replication', 'slb', 'partition', 'sharding', 'virtualization', 'kubernetes'],
     upgrades: [],
   },
   {

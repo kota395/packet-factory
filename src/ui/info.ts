@@ -19,7 +19,7 @@ import {
 } from '../sim/catalog';
 import { CAMPAIGN, K8S, RACK, SERVICES, VIRT } from '../sim/config';
 import type { Device, Vm } from '../sim/facility';
-import { nodeName, type NodeLoad } from '../sim/flow';
+import { lbGroups, nodeName, type NodeLoad } from '../sim/flow';
 import { SELL_REFUND_RATE, UPKEEP } from '../sim/pricing';
 import type { PartChange, Simulation } from '../sim/simulation';
 import {
@@ -146,6 +146,7 @@ function specText(m: ModelDef, parts?: ServerParts | null): string {
   if (m.category === 'server') return `${sp.cores} コア・${sp.memGB}GB・${compact(sp.diskIops)} IOPS・${ports}`;
   if (m.category === 'switch') return `${ports}・処理 ${m.fabricGbps} Gbps`;
   if (m.category === 'storage') return `${m.diskIops!.toLocaleString('en-US')} IOPS・${ports}`;
+  if (m.category === 'lb') return `${ports}・振り分け ${compact(m.lbRps!)} リクエスト/秒`;
   return ports;
 }
 
@@ -448,6 +449,16 @@ export class InfoPanel {
       place.push(['BGP', sim.usesBgp(d.id) ? (d.hv ? '使う(ハイパーバイザは自動)' : '使う(ECMP)') : '使わない(一番若いポートの 1 本だけ)']);
     }
     if (m.category === 'handoff') place.push(['回線契約', gbps(sim.uplinkGbps)]);
+    if (m.category === 'lb') {
+      const gr = lbGroups(f, sim.downDevices).find((x) => x.members.includes(d.id));
+      const peer = gr?.members.find((x) => x !== d.id);
+      place.push([
+        '冗長化(HA)',
+        peer === undefined
+          ? '<span class="muted">なし(HA ポートを別の LB の HA ポートと直結すると冗長化)</span>'
+          : `${f.devices.get(peer)?.name} とペア・${gr!.active === d.id ? '<span class="ok">アクティブ</span>' : gr!.active === null ? '<span class="bad">両方停止</span>' : 'スタンバイ'}`,
+      ]);
+    }
 
     const loadRows: [string, string][] = [];
     if (l) {
@@ -464,6 +475,8 @@ export class InfoPanel {
         loadRows.push(['IOPS', load(l.io)]);
       } else if (m.category === 'switch') {
         loadRows.push(['処理能力', load(l.fabric)]);
+      } else if (m.category === 'lb') {
+        loadRows.push(['処理能力', load(l.cpu)]);
       }
       loadRows.push(['通信量', gbps(l.gbps)]);
     }
@@ -755,7 +768,13 @@ export class InfoPanel {
     const inst = sf?.instances;
     const count = (role: RoleId) => inst?.[role].length ?? 0;
     const chain: string[] = [`回線 ${gbps(sim.uplinkGbps)}`];
-    if (count('lb')) chain.push(`lb ×${count('lb')}`);
+    // LB: アプライアンス(HA ペアはアクティブの 1 台)と SLB
+    const lbEntries = (sf?.entries ?? []).filter((n) => {
+      const dev = f.devices.get(n);
+      return n > 0 && dev && MODEL_BY_ID[dev.model].category === 'lb';
+    }).length;
+    if (lbEntries) chain.push(`LB ×${lbEntries}`);
+    if (count('lb')) chain.push(`SLB ×${count('lb')}`);
     chain.push(`web ×${count('web')}`);
     if (count('cache')) chain.push(`cache ×${count('cache')}`);
     if (W.search) chain.push(count('search') ? `search ×${count('search')}` : 'search(db が肩代わり)');
