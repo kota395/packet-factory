@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, portsOf, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
-import { BLOG_FEATURES, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, WORK } from '../src/sim/config';
+import { BLOG_FEATURES, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
 import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
 import { forecastSeries, logistic, secondsUntil } from '../src/sim/forecast';
@@ -799,6 +799,47 @@ describe('DB の分割・回線の多重化・CDN', () => {
     const img = BLOG_FEATURES.imageKB;
     expect(Math.max(after.ab, after.ba) / outBefore).toBeCloseTo((page + img * (1 - CDN.hitRate)) / (page + img), 1);
     expect(s.upkeep.cdn).toBeCloseTo((100 * img * CDN.hitRate * CDN_PRICE_PER_GB) / 1e6, 6);
+  });
+});
+
+describe('クラスタ(コンピュートの資源としてまとめて扱う)', () => {
+  it('配線済みで役割のないサーバだけがホストやワーカーに加えられる', () => {
+    const { s, server } = base({ unlocks: ['virtualization', 'kubernetes'] });
+    const wired = server('srv-2u-hv', 20, []);
+    server('srv-2u-hv', 16, [], 0, -1); // 配線していない
+    server('srv-1u-e', 30, ['blog:web']); // 役割がある
+    expect(s.spareServers.map((d) => d.id)).toEqual([wired]);
+    s.setHv(wired, true);
+    expect(s.spareServers).toEqual([]);
+  });
+
+  it('ホストを選ばずに作った VM は、メモリの空きが多いホストに順に置かれる', () => {
+    const { s, server } = base({ pv: 20, unlocks: ['virtualization', 'kubernetes'] });
+    server('srv-2u-db', 30, ['blog:db']);
+    const h1 = server('srv-2u-hv', 20, []);
+    const h2 = server('srv-2u-hv', 16, []);
+    s.setHv(h1, true);
+    s.setHv(h2, true);
+    const a = s.createVmAuto('l', { roles: ['blog:web'] });
+    const b = s.createVmAuto('l', { roles: ['blog:web'] });
+    expect(a.ok && b.ok).toBe(true);
+    expect(new Set([s.facility.vms.get(a.id!)!.host, s.facility.vms.get(b.id!)!.host])).toEqual(new Set([h1, h2]));
+    expect(s.facility.vms.get(a.id!)!.roles).toEqual(['blog:web']);
+    expect(s.hvCapacity.hosts).toBe(2);
+    expect(s.hvCapacity.memGB).toBe(2 * VIRT.sizes.l.memGB);
+    expect(run(s, 1000).success).toBe(1);
+    // 載らなくなるまで作れる
+    let made = 0;
+    while (s.createVmAuto('l').ok) made++;
+    expect(s.createVmAuto('l').message).toContain('ホストがありません');
+    expect(made).toBeGreaterThan(0);
+    // ワーカーにする VM も作れ、Pod が置かれる
+    s.toggleDeployment('blog:web');
+    for (const v of [...s.facility.vms.values()].filter((x) => !x.roles.length)) s.deleteVm(v.id);
+    const w = s.createVmAuto('m', { k8s: true });
+    expect(w.ok).toBe(true);
+    expect(s.k8sCapacity.workers).toBe(1);
+    expect(s.pods.some((p) => p.worker === -w.id!)).toBe(true);
   });
 });
 

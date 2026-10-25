@@ -1078,9 +1078,11 @@ button.primary {
 
 /* 狭い画面ではツールバーのボタンを詰める */
 @media (max-width: 600px) {
+  /* ボタンの数(クラスタは解放してから出る)に合わせて 1 行に並べる */
   #toolbar {
-    grid-auto-flow: row;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 4px;
   }
 
   #toolbar button {
@@ -1207,4 +1209,150 @@ button.part .cost {
   #tutorial h3 {
     font-size: 14px;
   }
+}
+
+#toolbar button[hidden] {
+  display: none;
+}
+
+/* ---- 下から出るシート(クラスタ) ------------------------------------ */
+
+.sheet {
+  position: absolute;
+  left: 50%;
+  width: min(100%, 620px);
+  transform: translateX(-50%);
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  max-height: min(80%, 640px);
+  background: rgba(18, 26, 35, 0.98);
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.sheet[hidden] {
+  display: none;
+}
+
+.sheet > header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 6px;
+}
+
+.sheet h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.sheet-note {
+  flex: 1;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sheet-close {
+  min-width: 36px;
+}
+
+.sheet-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sheet-tabs button {
+  flex: 1;
+  min-height: 36px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.sheet-tabs button.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.sheet-body {
+  overflow-y: auto;
+  padding: 8px 12px 12px;
+}
+
+.cl-summary {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.cl-summary b {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.cl-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.cl-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cl-form select {
+  min-height: 34px;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.cl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+
+.cl-row:first-of-type {
+  border-top: none;
+}
+
+.cl-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.cl-load {
+  font-family: var(--mono);
+  font-size: 12px;
+  min-width: 36px;
+  text-align: right;
+}
+
+.cl-row button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
 }

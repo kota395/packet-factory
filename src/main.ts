@@ -17,6 +17,7 @@ import { Dashboard } from './ui/dashboard';
 import { compact, duration, money, rate } from './ui/format';
 import { InfoPanel, type Selection } from './ui/info';
 import { InvestPanel } from './ui/invest';
+import { ClusterPanel } from './ui/cluster';
 import { Tutorial } from './ui/tutorial';
 import type { ViewState } from './render/row';
 
@@ -73,6 +74,14 @@ const invest = new InvestPanel(
     }
   },
 );
+const cluster = new ClusterPanel(el('cluster'), () => state.sim, {
+  toast,
+  select: (t) => select(t),
+  changed: () => {
+    saveGame();
+    updateHud();
+  },
+});
 const info = new InfoPanel(ui.info, () => state.sim, {
   toast,
   select: (t) => select(t),
@@ -154,6 +163,7 @@ window.addEventListener('pagehide', saveGame);
 function select(t: Selection | null): void {
   state.selected = t;
   if (t && invest.isOpen) invest.toggle(false);
+  if (t && cluster.isOpen) cluster.toggle(false);
   info.update(t);
   updateToolbar();
   refreshTutorial();
@@ -175,13 +185,14 @@ function startTutorial(resume = false): void {
 
 // ------------------------------------------------------------------ ツールバー
 
-type ToolId = Face | 'service' | 'invest';
+type ToolId = Face | 'service' | 'cluster' | 'invest';
 
 function buildToolbar(): void {
   const items: { id: ToolId; html: string }[] = [
     { id: 'front', html: '<span>前面</span><small>設置・移動</small>' },
     { id: 'back', html: '<span>背面</span><small>配線</small>' },
     { id: 'service', html: '<span>サービス</span><small>流れ・負荷</small>' },
+    { id: 'cluster', html: '<span>クラスタ</span><small>VM・k8s</small>' },
     { id: 'invest', html: '投資<span class="badge" hidden></span>' },
   ];
   ui.toolbar.innerHTML = '';
@@ -197,14 +208,21 @@ function buildToolbar(): void {
 }
 
 function onTool(id: ToolId): void {
-  if (id === 'invest') {
+  if (id === 'cluster') {
+    invest.toggle(false);
+    cluster.toggle();
+    if (cluster.isOpen) select(null);
+  } else if (id === 'invest') {
+    cluster.toggle(false);
     invest.toggle();
     if (invest.isOpen) select(null);
   } else if (id === 'service') {
     invest.toggle(false);
+    cluster.toggle(false);
     select(state.selected?.kind === 'service' ? null : { kind: 'service' });
   } else {
     invest.toggle(false);
+    cluster.toggle(false);
     setFace(id);
   }
   updateToolbar();
@@ -225,8 +243,16 @@ function updateToolbar(): void {
   for (const b of ui.toolbar.querySelectorAll<HTMLButtonElement>('button')) {
     const t = b.dataset.tool as ToolId;
     const active =
-      t === 'invest' ? invest.isOpen : t === 'service' ? state.selected?.kind === 'service' : t === state.face;
+      t === 'invest'
+        ? invest.isOpen
+        : t === 'cluster'
+          ? cluster.isOpen
+          : t === 'service'
+            ? state.selected?.kind === 'service'
+            : t === state.face;
     b.classList.toggle('active', active);
+    // クラスタは仮想化か Kubernetes を解放してから
+    if (t === 'cluster') b.hidden = !cluster.available(state.sim);
   }
   const badge = ui.toolbar.querySelector<HTMLElement>('.badge');
   if (badge) badge.hidden = !invest.anyAffordable(state.sim);
@@ -289,6 +315,7 @@ function updateHud(): void {
 
   dashboard.update();
   invest.update();
+  cluster.update();
   // 選んでいた機器が売却などで消えたら閉じる
   const sel = state.selected;
   if (sel?.kind === 'device' && !sim.facility.devices.has(sel.id)) state.selected = null;

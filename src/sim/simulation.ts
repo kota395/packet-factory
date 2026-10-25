@@ -593,7 +593,8 @@ export class Simulation {
     return this.roleUnlockError(role);
   }
 
-  private roleUnlockError(key: RoleKey): string | null {
+  /** その役割を今使えない理由(サービスを始めていない・解放していない) */
+  roleUnlockError(key: RoleKey): string | null {
     const [service, role] = splitRole(key);
     if (!SERVICES[service].roles.includes(role)) return `${SERVICES[service].name}には役割「${role}」はありません`;
     if (!this.isServiceActive(service)) return `投資の「${UNLOCK_BY_ID[service as UnlockId].name}」が必要です`;
@@ -732,6 +733,17 @@ export class Simulation {
     };
   }
 
+  /** Kubernetes 全体: ワーカーの数、Pod に使える vCPU、置いた Pod と待っている Pod */
+  get k8sCapacity(): { workers: number; vcpu: number; pods: number; pending: number } {
+    const w = this.k8sWorkers();
+    return {
+      workers: w.length,
+      vcpu: w.reduce((s, x) => s + x.vcpu, 0),
+      pods: this.pods.reduce((s, p) => s + p.count, 0),
+      pending: [...this.podsPending.values()].reduce((s, n) => s + n, 0),
+    };
+  }
+
   /** ワーカー(動いているもの)と、Pod に使える CPU・メモリ */
   private k8sWorkers(): { node: number; vcpu: number; memGB: number }[] {
     const down = this.downDevices;
@@ -828,6 +840,76 @@ export class Simulation {
     return { ok: true, message: `${d.name} を${on ? 'ハイパーバイザにしました' : '物理サーバに戻しました'}${note}` };
   }
 
+  // ---------------------------------------------------------------- クラスタ(コンピュートの資源としてまとめて扱う)
+
+  /** サーバがスイッチにつながっているか(配線が済んでいるか) */
+  isWired(id: number): boolean {
+    const f = this.facility;
+    return f.cablesOf(id).some((c) => {
+      const other = f.devices.get(c.a.device === id ? c.b.device : c.a.device);
+      return !!other && MODEL_BY_ID[other.model].category === 'switch';
+    });
+  }
+
+  /** ハイパーバイザかワーカーに加えられる空きサーバ(配線済みで、役割もなく、ほかの用途にしていない) */
+  get spareServers(): Device[] {
+    return [...this.facility.devices.values()]
+      .filter((d) => MODEL_BY_ID[d.model].category === 'server' && !d.hv && !d.k8s && !d.roles.length && this.isWired(d.id))
+      .sort((a, b) => a.id - b.id);
+  }
+
+  /** ハイパーバイザ全体の割り当て(vCPU とメモリ) */
+  get hvCapacity(): { hosts: number; vcpu: number; vcpuMax: number; memGB: number; memMax: number } {
+    let hosts = 0;
+    let vcpu = 0;
+    let vcpuMax = 0;
+    let memGB = 0;
+    let memMax = 0;
+    for (const d of this.facility.devices.values()) {
+      if (!d.hv) continue;
+      const sp = specOf(d);
+      const use = this.facility.hostUsage(d.id);
+      hosts++;
+      vcpu += use.vcpu;
+      vcpuMax += sp.cores * VIRT.vcpuOvercommit;
+      memGB += use.memGB;
+      memMax += sp.memGB - VIRT.hostMemGB;
+    }
+    return { hosts, vcpu, vcpuMax, memGB, memMax };
+  }
+
+  /** VM を置くホストを選ぶ: 載せられるホストのうち、メモリの空きが一番多いもの(止まっているホストは除く) */
+  pickHost(size: VmSize): number | null {
+    const down = this.downDevices;
+    let best: { id: number; free: number } | null = null;
+    for (const d of this.facility.devices.values()) {
+      if (!d.hv || down.has(d.id) || this.facility.vmPlaceError(d.id, size)) continue;
+      const free = specOf(d).memGB - this.facility.hostUsage(d.id).memGB;
+      if (!best || free > best.free) best = { id: d.id, free };
+    }
+    return best?.id ?? null;
+  }
+
+  /**
+   * ホストを選ばずに VM を作る(クラスタの画面から)。役割・ディスク・Kubernetes のワーカーにするかも一緒に決められる
+   */
+  createVmAuto(size: VmSize, opts: { roles?: RoleKey[]; disk?: DiskKind; k8s?: boolean } = {}): ActionResult {
+    if (!this.unlocks.has('virtualization')) return { ok: false, message: `投資の「${UNLOCK_BY_ID.virtualization.name}」が必要です` };
+    const host = this.pickHost(size);
+    if (host === null) return { ok: false, message: `${VIRT.sizes[size].label} の VM を載せられるホストがありません(ホストを増やすか、小さくする)` };
+    for (const r of opts.roles ?? []) {
+      const err = this.roleUnlockError(r);
+      if (err) return { ok: false, message: err };
+    }
+    if (opts.disk === 'shared' && !this.unlocks.has('storage')) return { ok: false, message: `投資の「${UNLOCK_BY_ID.storage.name}」が必要です` };
+    if (opts.k8s && !this.unlocks.has('kubernetes')) return { ok: false, message: `投資の「${UNLOCK_BY_ID.kubernetes.name}」が必要です` };
+    const vm = this.facility.createVm(host, size, { roles: opts.k8s ? [] : opts.roles, disk: opts.disk, k8s: opts.k8s });
+    if (opts.k8s) this.schedule();
+    this.refreshFlow();
+    const where = this.facility.devices.get(host)!.name;
+    return { ok: true, id: vm.id, message: `${vm.name}(${VIRT.sizes[size].label})を ${where} に作りました${opts.k8s ? '(Kubernetes のワーカー)' : ''}` };
+  }
+
   createVm(host: number, size: VmSize): ActionResult {
     const err = this.facility.vmPlaceError(host, size);
     if (err) return { ok: false, message: err };
@@ -840,6 +922,7 @@ export class Simulation {
     const vm = this.facility.vms.get(id);
     if (!vm) return { ok: false, message: 'VM が見つかりません' };
     this.facility.removeVm(id);
+    if (vm.k8s) this.schedule();
     this.refreshFlow();
     return { ok: true, message: `${vm.name} を消しました` };
   }
