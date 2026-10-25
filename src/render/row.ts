@@ -149,6 +149,15 @@ export class RowRenderer {
     stage.on('globalpointermove', (e) => this.handleMove(e));
     stage.on('pointerup', (e) => this.handleUp(e));
     stage.on('pointerupoutside', (e) => this.handleUp(e));
+    // OS に横取りされた指(pointercancel)は、離したのと同じように片付ける
+    this.app.canvas.addEventListener('pointercancel', (e) => {
+      this.pointers.delete(e.pointerId);
+      if (this.pointers.size === 0) this.gesture = null;
+      else if (this.gesture?.kind === 'pinch') {
+        const rest = [...this.pointers.values()][0];
+        this.gesture = { kind: 'pan', lastX: rest.x, lastY: rest.y };
+      }
+    });
     this.app.canvas.addEventListener(
       'wheel',
       (e) => {
@@ -316,9 +325,12 @@ export class RowRenderer {
     const g = this.gesture;
     if (!g) return;
     if (g.kind === 'pinch') {
+      // 指が 2 本そろっている間だけ拡大・縮小する(1 本離した直後に距離 0 で計算すると、一気に最小まで縮んでしまう)
+      if (this.pointers.size < 2) return;
       const next = this.pinch();
-      if (next.kind !== 'pinch' || g.dist <= 0) return;
-      this.zoomAt(next.mid, next.dist / g.dist);
+      if (next.kind !== 'pinch' || g.dist <= 0 || next.dist <= 0) return;
+      // 1 回の動きで極端に変わらないよう抑える(取りこぼしたイベントで飛ばないように)
+      this.zoomAt(next.mid, clamp(next.dist / g.dist, 0.5, 2));
       this.world.position.set(this.world.x + next.mid.x - g.mid.x, this.world.y + next.mid.y - g.mid.y);
       this.clampPan();
       this.gesture = next;
@@ -347,7 +359,9 @@ export class RowRenderer {
     this.pointers.delete(e.pointerId);
     const g = this.gesture;
     if (g?.kind === 'pinch') {
-      if (this.pointers.size === 0) this.gesture = null;
+      // 1 本残っていれば、その指でそのまま動かせるようにする
+      const rest = [...this.pointers.values()][0];
+      this.gesture = rest ? { kind: 'pan', lastX: rest.x, lastY: rest.y } : null;
       return;
     }
     this.gesture = null;

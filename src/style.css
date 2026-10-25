@@ -30,7 +30,8 @@ body {
   font-family: var(--font);
   font-size: 14px;
   -webkit-text-size-adjust: 100%;
-  touch-action: manipulation;
+  /* ページ全体のピンチ拡大はさせない(ラックの拡大・縮小と取り合う)。スクロールはできる */
+  touch-action: pan-x pan-y;
   overscroll-behavior: none;
 }
 

@@ -18,6 +18,11 @@ import { compact, duration, money, rate } from './ui/format';
 import { InfoPanel, type Selection } from './ui/info';
 import { InvestPanel } from './ui/invest';
 
+// iOS Safari は touch-action を無視してページごとピンチ拡大することがあるので止める(ラックの拡大・縮小はキャンバスで行う)
+for (const type of ['gesturestart', 'gesturechange']) {
+  document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+}
+
 /** v3 = ラックと配線の版。ノード図の版(v2)のセーブは引き継がない */
 const SAVE_KEY = 'packet-factory:save:v3';
 const AUTOSAVE_MS = 5000;
