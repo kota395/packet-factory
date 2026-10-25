@@ -1,6 +1,7 @@
 import { MODEL_BY_ID, PRESET_BY_ID, START_PARTS, isServerModel, partsError, portsOf } from './catalog';
 import { OFFLINE, RACK, ROW } from './config';
 import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades } from './economy';
+import { PART_REFUND_RATE, cablePrice, memoryPrice, serverPrice } from './pricing';
 import { Simulation } from './simulation';
 import {
   ROLE_IDS,
@@ -65,6 +66,31 @@ export function newGame(): Simulation {
   f.connect({ device: sw.id, port: 2 }, { device: db.id, port: 0 }, 0);
   sim.refreshFlow();
   return sim;
+}
+
+/** チュートリアルの始まり: 回線終端とスイッチだけ(つないである)。チュートリアルで買う分のお金を足しておく */
+export function tutorialGame(): Simulation {
+  const sim = new Simulation();
+  const f = sim.facility;
+  f.rent(0);
+  const isp = f.place('handoff', 0, RACK.units, 0);
+  const sw = f.place('sw-24', 0, RACK.units - 2, 0);
+  f.connect({ device: isp.id, port: 0 }, { device: sw.id, port: 0 }, 0);
+  sim.money += tutorialGrant();
+  sim.refreshFlow();
+  return sim;
+}
+
+/** チュートリアルで使うお金: サーバ 2 台、db のメモリ 1 段、ケーブル 2 本(ラック内の長め) */
+export function tutorialGrant(): number {
+  const db = PRESET_BY_ID['2u-hdd-small'].parts;
+  return (
+    serverPrice('srv-1u', PRESET_BY_ID['1u-small'].parts) +
+    serverPrice('srv-2u', db) +
+    memoryPrice(START_PARTS.db.memGB) -
+    Math.floor(memoryPrice(db.memGB) * PART_REFUND_RATE) +
+    2 * cablePrice(false, 3)
+  );
 }
 
 export function createSave(sim: Simulation, now = Date.now()): SaveData {

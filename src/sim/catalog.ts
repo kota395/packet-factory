@@ -260,6 +260,13 @@ export const PRESETS: readonly PresetDef[] = [
     parts: { cpu: 32, memGB: 64, backplane: 'sff', drives: drives('ssd', 2), nic: 'none' },
   },
   {
+    id: '2u-hdd-small',
+    model: 'srv-2u',
+    name: '2U HDD 小型',
+    description: 'HDD 2 本の安い構成。あとから HDD を足したり SSD に替えたりできる。',
+    parts: { cpu: 4, memGB: 8, backplane: 'lff', drives: drives('hdd', 2), nic: 'none' },
+  },
+  {
     id: '2u-hdd',
     model: 'srv-2u',
     name: '2U HDD',
@@ -291,10 +298,13 @@ export const PRESETS: readonly PresetDef[] = [
 
 export const PRESET_BY_ID = Object.fromEntries(PRESETS.map((p) => [p.id, p])) as Record<string, PresetDef>;
 
-/** 最初から入っているサーバの構成: リクエストを受ける 1U と、db 用の 2U(HDD) */
+/**
+ * 最初から入っているサーバの構成: リクエストを受ける 1U と、db 用の 2U(HDD)。
+ * チュートリアルでは「1U 小型」と「2U HDD 小型」を買い、db のメモリを 1 段上げるので、終わるとこれと同じになる
+ */
 export const START_PARTS = {
   web: { cpu: 4, memGB: 8, backplane: 'sff', drives: drives('ssd', 2), nic: 'none' } as ServerParts,
-  db: { cpu: 4, memGB: 8, backplane: 'lff', drives: drives('hdd', 2), nic: 'none' } as ServerParts,
+  db: { cpu: 4, memGB: 16, backplane: 'lff', drives: drives('hdd', 2), nic: 'none' } as ServerParts,
 };
 
 /** 構成で使う解放(NVMe・10G NIC) */

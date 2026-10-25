@@ -43,6 +43,8 @@ export type Target =
 export interface ViewState {
   face: Face;
   selected: Target | null;
+  /** チュートリアルで目立たせる機器と U(点滅する枠) */
+  highlight?: { devices?: number[]; units?: { slot: number; u: number }[] } | null;
 }
 
 const COLORS = {
@@ -630,6 +632,21 @@ export class RowRenderer {
     const f = sim.facility;
     const sel = view.selected;
     const stroke = { width: Math.max(2, 2 / this.zoom), color: COLORS.select };
+
+    // チュートリアルの目印: ゆっくり点滅する太い枠
+    const hl = view.highlight;
+    if (hl) {
+      const alpha = 0.45 + 0.45 * Math.sin(performance.now() / 260);
+      const glow = { width: Math.max(3, 4 / this.zoom), color: 0xffd166, alpha };
+      for (const id of hl.devices ?? []) {
+        const d = f.devices.get(id);
+        if (d) g.rect(...rectArgs(deviceRect(d))).stroke(glow);
+      }
+      for (const u of hl.units ?? []) {
+        const r = rackRect(u.slot);
+        g.rect(r.x + RAIL, unitTop(u.u), RACK_W, U_H).stroke(glow);
+      }
+    }
 
     if (sel?.kind === 'device') {
       const d = f.devices.get(sel.id);

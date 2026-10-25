@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
 import { BLOG_FEATURES, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, WORK } from '../src/sim/config';
-import { LEGACY_SERVERS, createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
+import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
 import { forecastSeries, logistic, secondsUntil } from '../src/sim/forecast';
 import {
@@ -147,7 +147,7 @@ describe('流量モデル', () => {
   });
 
   it('HDD の db はディスク IO で先に詰まり、パーツを替える(SSD・メモリ)と捌ける', () => {
-    const { s } = base({ pv: 150 });
+    const { s } = base({ pv: 250 });
     const web = s.buyDevice('srv-1u', 0, 30, START_PARTS.web).id!;
     const db = s.buyDevice('srv-2u', 0, 20, START_PARTS.db).id!;
     s.toggleRole(web, 'blog:web');
@@ -488,9 +488,9 @@ describe('メトリクスと需要予測', () => {
     expect(h.capacity.at(-1)).toBeGreaterThan(0);
     const io = [...s.metrics.resources.values()].find((r) => r.label === 'srv02 ディスク');
     expect(io?.rho.length).toBe(10);
-    // 市場規模(1,500 人 = 15 PV/秒)ではキャパシティ(約 50)に届かない。広告で市場を広げると届く
+    // 市場規模(1,500 人 = 15 PV/秒)ではキャパシティに届かない。広告で市場を広げると届く
     expect(s.secondsToSaturation()).toBeNull();
-    s.upgrades.marketing = 4;
+    s.upgrades.marketing = 8;
     expect(s.secondsToSaturation()).toBeGreaterThan(0);
   });
 });
@@ -758,6 +758,29 @@ describe('DB の分割・回線の多重化・CDN', () => {
     const img = BLOG_FEATURES.imageKB;
     expect(Math.max(after.ab, after.ba) / outBefore).toBeCloseTo((page + img * (1 - CDN.hitRate)) / (page + img), 1);
     expect(s.upkeep.cdn).toBeCloseTo((100 * img * CDN.hitRate * CDN_PRICE_PER_GB) / 1e6, 6);
+  });
+});
+
+describe('チュートリアル', () => {
+  it('チュートリアルで作る構成は、スキップしたときの最初の構成と同じになる', () => {
+    const s = tutorialGame();
+    const f = s.facility;
+    const sw = [...f.devices.values()].find((d) => d.model === 'sw-24')!.id;
+    const web = s.buyServer('1u-small', 0, 38).id!;
+    expect(s.toggleRole(web, 'blog:web').ok).toBe(true);
+    const db = s.buyServer('2u-hdd-small', 0, 35).id!;
+    expect(s.toggleRole(db, 'blog:db').ok).toBe(true);
+    expect(s.changeParts(db, { kind: 'mem', dir: 1 }).ok).toBe(true);
+    expect(s.connect({ device: web, port: 0 }, { device: sw, port: 1 }).ok).toBe(true);
+    expect(s.connect({ device: db, port: 0 }, { device: sw, port: 2 }).ok).toBe(true);
+    const skip = newGame();
+    const servers = (x: Simulation) =>
+      [...x.facility.devices.values()].filter((d) => d.parts).map((d) => [d.model, d.parts, d.roles]);
+    expect(servers(s)).toEqual(servers(skip));
+    // チュートリアルで渡したお金は、使い切るとほぼ最初の資金に戻る
+    expect(s.money).toBeGreaterThanOrEqual(START_MONEY);
+    expect(s.money).toBeLessThan(START_MONEY + 10);
+    expect(run(s, 1000).success).toBe(1);
   });
 });
 

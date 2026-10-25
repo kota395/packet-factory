@@ -9,6 +9,7 @@ import {
   newGame,
   offlineEarnings,
   parseSave,
+  tutorialGame,
   type SaveData,
 } from './sim/save';
 import type { Simulation } from './sim/simulation';
@@ -16,6 +17,8 @@ import { Dashboard } from './ui/dashboard';
 import { compact, duration, money, rate } from './ui/format';
 import { InfoPanel, type Selection } from './ui/info';
 import { InvestPanel } from './ui/invest';
+import { Tutorial } from './ui/tutorial';
+import type { ViewState } from './render/row';
 
 // iOS Safari は touch-action を無視してページごとピンチ拡大することがあるので止める(ラックの拡大・縮小はキャンバスで行う)
 for (const type of ['gesturestart', 'gesturechange']) {
@@ -51,6 +54,8 @@ const state = {
   selected: null as Selection | null,
   speed: 1,
   lastChurnWarn: 0,
+  /** チュートリアルで光らせる機器・U */
+  highlight: null as ViewState['highlight'],
 };
 
 const renderer = new RowRenderer();
@@ -77,6 +82,19 @@ const info = new InfoPanel(ui.info, () => state.sim, {
   },
 });
 
+const tutorial = new Tutorial(ui.board, (skipped) => {
+  // スキップしたら、チュートリアルで作るものが最初からある状態にする
+  if (skipped) {
+    switchTo(newGame());
+    toast('サーバと配線が済んだ状態から始めます');
+  }
+  state.highlight = null;
+  select(null);
+  setFace('front');
+  setSpeed(1);
+  saveGame();
+});
+
 // ------------------------------------------------------------------ 起動
 
 buildToolbar();
@@ -100,6 +118,7 @@ bindControls();
 const restored = restoreGame();
 setFace('front');
 setSpeed(1);
+if (restored && Tutorial.pending()) startTutorial(true);
 updateHud();
 if (!restored) showWelcome();
 
@@ -107,9 +126,10 @@ let hudTimer = 0;
 let saveTimer = 0;
 renderer.app.ticker.add((ticker) => {
   const sim = state.sim;
-  if (state.speed > 0) sim.step(Math.min(ticker.deltaMS, 100) * state.speed);
+  // チュートリアルの間は時間を止めておく
+  if (state.speed > 0 && !tutorial.active) sim.step(Math.min(ticker.deltaMS, 100) * state.speed);
   const sel = state.selected;
-  renderer.draw(sim, { face: state.face, selected: sel && sel.kind !== 'service' ? sel : null });
+  renderer.draw(sim, { face: state.face, selected: sel && sel.kind !== 'service' ? sel : null, highlight: state.highlight });
 
   hudTimer += ticker.deltaMS;
   if (hudTimer >= 250) {
@@ -136,6 +156,21 @@ function select(t: Selection | null): void {
   if (t && invest.isOpen) invest.toggle(false);
   info.update(t);
   updateToolbar();
+  refreshTutorial();
+}
+
+function refreshTutorial(): void {
+  state.highlight = tutorial.update({ sim: state.sim, selected: state.selected, face: state.face });
+}
+
+/** チュートリアルを始める(resume なら前回の続きから) */
+function startTutorial(resume = false): void {
+  if (!resume) switchTo(tutorialGame());
+  tutorial.start(resume);
+  setFace('front');
+  setSpeed(0);
+  saveGame();
+  refreshTutorial();
 }
 
 // ------------------------------------------------------------------ ツールバー
@@ -177,10 +212,13 @@ function onTool(id: ToolId): void {
 
 function setFace(face: Face): void {
   state.face = face;
+  // チュートリアルの配線では、詳細パネルがポートを隠さないよう閉じておく
+  if (tutorial.active && face === 'back' && state.selected?.kind === 'device') state.selected = null;
   // 面が変わると、ポートやケーブルの選択は意味がなくなる
   if (state.selected && (state.selected.kind === 'port' || state.selected.kind === 'cable') && face === 'front') select(null);
   updateHint();
   updateToolbar();
+  refreshTutorial();
 }
 
 function updateToolbar(): void {
@@ -258,6 +296,7 @@ function updateHud(): void {
   if (sel?.kind === 'vm' && !sim.facility.vms.has(sel.id)) state.selected = null;
   info.update(state.selected);
   updateToolbar();
+  refreshTutorial();
 }
 
 // ------------------------------------------------------------------ セーブ
@@ -308,6 +347,7 @@ function showSaveMenu(): void {
       <button type="button" id="sv-export">セーブコードをコピー</button>
       <textarea id="sv-code" rows="3" placeholder="ここにセーブコードを貼り付け"></textarea>
       <button type="button" id="sv-import">貼り付けたコードを読み込む</button>
+      <button type="button" id="sv-tutorial">チュートリアルを最初から(進行状況は消えます)</button>
       <button type="button" id="sv-reset" class="danger">最初からやり直す</button>
     </div>
     <div class="actions"><button type="button" data-close>閉じる</button></div>`);
@@ -334,6 +374,11 @@ function showSaveMenu(): void {
     closeModal();
     toast('セーブを読み込みました');
   });
+  el('sv-tutorial').addEventListener('click', () => {
+    if (!confirm('進行状況を消して、チュートリアルを最初からやりますか?')) return;
+    closeModal();
+    startTutorial();
+  });
   el('sv-reset').addEventListener('click', () => {
     if (!confirm('すべての進行状況を消して最初からやり直しますか?')) return;
     switchTo(newGame());
@@ -345,17 +390,23 @@ function showSaveMenu(): void {
 function showWelcome(): void {
   showModal(`
     <h2>packet-factory</h2>
-    <p class="note">コロケーションの 1 ラックから、ブログサービスのインフラを育てましょう。</p>
+    <p class="note">コロケーションの 1 ラックから、ブログサービスのインフラを育てるゲームです。サーバを置き、役割を付け、配線し、詰まった所に手を打って、増えていくユーザーを捌きます。</p>
     <ul class="howto">
-      <li>ラックには回線終端・スイッチ・リクエストを受ける 1U サーバ(web)・db 用の 2U サーバ(HDD)が入っています</li>
-      <li>サーバは詳細から CPU・メモリ・ドライブをワンクリックで強化できます</li>
-      <li>ユーザーが増えるとページビューが増え、捌けた分だけ収入になります。溢れるとエラーになり、ユーザーが離れます</li>
-      <li><b>前面</b>: 空いている U をタップして機器を買って設置。サーバには役割(web / db など)を割り当てる</li>
-      <li><b>背面</b>: ポートから別のポートへドラッグして配線。ケーブルの色は使用率</li>
-      <li>ラックには電力の上限があります。サーバのスペックは上げられないので、上位機種を買って役割を移します</li>
-      <li><b>サービス</b>ボタンで、流れと一番詰まっている所を確認できます</li>
+      <li><b>チュートリアル</b>: サーバを 2 台置いて、役割を付け、強化して、配線するまでを実際に操作しながら覚えます(数分)</li>
+      <li><b>スキップ</b>: チュートリアルで作るもの(web と db のサーバ、配線)が最初からある状態で始めます</li>
     </ul>
-    <div class="actions"><button type="button" class="primary" data-close>はじめる</button></div>`);
+    <div class="actions">
+      <button type="button" id="wel-skip">スキップ</button>
+      <button type="button" class="primary" id="wel-tutorial">チュートリアル</button>
+    </div>`);
+  el('wel-tutorial').addEventListener('click', () => {
+    closeModal();
+    startTutorial();
+  });
+  el('wel-skip').addEventListener('click', () => {
+    closeModal();
+    saveGame();
+  });
 }
 
 // ------------------------------------------------------------------ ユーティリティ
