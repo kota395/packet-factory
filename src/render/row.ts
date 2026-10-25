@@ -181,9 +181,21 @@ export class RowRenderer {
 
   // ---------------------------------------------------------------- カメラ
 
+  /**
+   * カメラで動ける横の範囲。借りているラックと、その隣の空き区画 2 つまで
+   * (20 区画すべてを入れると、縮小したときにラックが点になり、拡大すると空き区画しか見えなくなる)
+   */
+  private get spanX(): { x: number; w: number } {
+    const slots = this.sim ? [...this.sim.facility.racks.keys()] : [];
+    const lo = Math.max(0, Math.min(...slots, 0) - 1);
+    const hi = Math.min(ROW.maxRacks - 1, Math.max(...slots, 0) + 2);
+    const x = rackRect(lo).x - 40;
+    return { x, w: rackRect(hi).x + rackRect(hi).w + 40 - x };
+  }
+
   private get minZoom(): number {
     const { width, height } = this.app.screen;
-    return Math.min(width / (ROW_W_WITH_MARGIN), height / (ROW_H + 80)) * 0.95;
+    return Math.min(width / this.spanX.w, height / (ROW_H + 80)) * 0.95;
   }
 
   /**
@@ -245,7 +257,7 @@ export class RowRenderer {
   /** 列が画面の外へ行きすぎないようにする(端から少しはみ出すのは許す) */
   private clampPan(): void {
     const { width, height } = this.app.screen;
-    const slack = 0.3;
+    const slack = 0.15;
     const fit = (pos: number, min: number, size: number, screen: number) => {
       const s = size * this.zoom;
       const left = pos + min * this.zoom;
@@ -254,7 +266,7 @@ export class RowRenderer {
       return clamp(left, lo, hi) - min * this.zoom;
     };
     this.world.position.set(
-      fit(this.world.x, -40, ROW_W_WITH_MARGIN, width),
+      fit(this.world.x, this.spanX.x, this.spanX.w, width),
       fit(this.world.y, TOP - 120, ROW_H - TOP + 160, height),
     );
   }
