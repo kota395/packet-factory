@@ -29,6 +29,7 @@ for (const type of ['gesturestart', 'gesturechange']) {
 /** v3 = ラックと配線の版。ノード図の版(v2)のセーブは引き継がない */
 const SAVE_KEY = 'packet-factory:save:v3';
 const AUTOSAVE_MS = 5000;
+const SPEED_KEY = 'packet-factory:speed';
 const CHURN_WARN_INTERVAL_MS = 20_000;
 
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -55,6 +56,8 @@ const state = {
   selected: null as Selection | null,
   speed: 1,
   lastChurnWarn: 0,
+  /** 市場規模に届いたことを知らせたか */
+  cappedNotified: false,
   /** チュートリアルで光らせる機器・U */
   highlight: null as ViewState['highlight'],
 };
@@ -126,7 +129,7 @@ el('btn-fit').addEventListener('click', () => renderer.fit());
 bindControls();
 const restored = restoreGame();
 setFace('front');
-setSpeed(1);
+setSpeed(savedSpeed());
 if (restored && Tutorial.pending()) startTutorial(true);
 updateHud();
 if (!restored) showWelcome();
@@ -285,8 +288,27 @@ function bindControls(): void {
   });
 }
 
+/** 前回の速度(読み直しても 1 倍に戻らないように) */
+function savedSpeed(): number {
+  try {
+    const v = Number(localStorage.getItem(SPEED_KEY));
+    // 一時停止のまま読み直すと「増えない」ように見えるので、止めていたときは 1 倍で始める
+    return [1, 2, 4].includes(v) ? v : 1;
+  } catch {
+    return 1;
+  }
+}
+
 function setSpeed(speed: number): void {
   state.speed = speed;
+  // チュートリアル中に止めたのは覚えない
+  if (!tutorial.active) {
+    try {
+      localStorage.setItem(SPEED_KEY, String(speed));
+    } catch {
+      // 覚えておけない環境では毎回 1 倍
+    }
+  }
   for (const b of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
     b.classList.toggle('active', Number(b.dataset.speed) === speed);
   }
@@ -301,6 +323,15 @@ function updateHud(): void {
   ui.income.textContent = rate(income);
   ui.income.className = `v ${income < 0 ? 'bad' : 'ok'}`;
   ui.users.textContent = `${compact(sim.users)} / ${compact(sim.marketSize)}`;
+  // 市場規模(潜在ユーザー数)に届くと、それ以上は増えない。広告で広げる
+  const capped = sim.users >= sim.marketSize * 0.97;
+  ui.users.className = `v ${capped ? 'warn' : ''}`;
+  ui.users.title = capped ? '市場規模に届いていて、これ以上は増えません。投資の「広告」で市場を広げると、また増えます' : '';
+  if (capped && !state.cappedNotified) {
+    state.cappedNotified = true;
+    toast('ユーザーが市場規模に届きました。投資の「広告」で市場を広げると、また増えます');
+  }
+  if (!capped && sim.users < sim.marketSize * 0.9) state.cappedNotified = false;
   ui.pv.textContent = compact(r.pv, 1);
   ui.err.textContent = `${(r.errorRate * 100).toFixed(1)}%`;
   ui.err.className = `v ${r.errorRate > 0.05 ? 'bad' : r.errorRate > 0.01 ? 'warn' : ''}`;
