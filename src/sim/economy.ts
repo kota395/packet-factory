@@ -73,6 +73,19 @@ export const UNLOCKS: readonly UnlockDef[] = [
     service: 'video',
   },
   {
+    id: 'hadoop',
+    name: '分析基盤(Hadoop)',
+    description:
+      'すべてのサービスのアクセスログを集めて分析し、広告のターゲティングやおすすめに使う。役割「hadoop」(分析基盤)を付けたサーバにログが集まり、ディスク IO と CPU を使う。処理しきれた割合に応じて、すべてのサービスの単価が上がる。',
+  },
+  {
+    id: 'ml',
+    name: '機械学習',
+    description:
+      'Hadoop に集めたログで学習して、広告とおすすめをさらに当てる。役割「ml」(分析基盤)を付けたサーバの GPU で学習する(GPU がないと CPU で、ずっと遅い)。',
+    requires: 'hadoop',
+  },
+  {
     id: 'lb',
     name: 'ロードバランサ(アプライアンス)',
     description:
@@ -154,6 +167,12 @@ export const UNLOCKS: readonly UnlockDef[] = [
     name: 'CDN',
     description:
       'ブログの画像と、写真・動画の配信の多くを CDN が配る(オリジンの回線・サーバを通らない)。配った量に応じて従量課金がかかる。',
+  },
+  {
+    id: 'gpu',
+    name: 'GPU サーバ',
+    description:
+      'サーバに GPU を載せられるようになる(1U は 2 枚、2U は 4 枚まで)。動画のエンコードと機械学習を、CPU よりずっと速く・少ない電力で処理する。',
   },
   {
     id: 'nvme',
@@ -289,6 +308,13 @@ export const STAGES: readonly StageDef[] = [
     summary: '回線 1 本(10G)が上限。回線を増やして BGP で分け、画像・動画は CDN から配ってオリジンの帯域を減らす。',
     unlocks: ['multihoming', 'cdn'],
   },
+  {
+    id: 13,
+    name: '分析基盤',
+    summary:
+      'ログを Hadoop に集めて分析し、広告とショッピングの単価を上げる。機械学習は GPU で。動画のエンコードも GPU に任せると速い。',
+    unlocks: ['hadoop', 'ml', 'gpu'],
+  },
 ];
 
 /** 投資メニューのタブ */
@@ -305,7 +331,7 @@ export const LINES: readonly LineDef[] = [
     id: 'business',
     name: '事業',
     summary: 'ユーザーを集めて単価を上げ、新しいサービスを始める。新機能は単価が上がるぶん、インフラの負荷も増える。',
-    unlocks: ['images', 'comments', 'shop', 'photo', 'video'],
+    unlocks: ['images', 'comments', 'shop', 'photo', 'video', 'hadoop', 'ml'],
     upgrades: ['marketing', 'monetize'],
   },
   {
@@ -326,7 +352,7 @@ export const LINES: readonly LineDef[] = [
     id: 'hardware',
     name: '機器',
     summary: '買える機器とパーツを増やす。サーバは前面の空き U から買い、パーツは詳細で替える。',
-    unlocks: ['tenGig', 'agg', 'nvme', 'storage', 'bgp'],
+    unlocks: ['tenGig', 'agg', 'nvme', 'gpu', 'storage', 'bgp'],
     upgrades: [],
   },
 ];

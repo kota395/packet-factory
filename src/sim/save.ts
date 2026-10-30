@@ -338,5 +338,6 @@ function parseParts(x: unknown): ServerParts | null {
   if (p.nic !== 'none' && p.nic !== 'sfp10') return null;
   if (!Array.isArray(p.drives) || p.drives.length > 64) return null;
   if (!p.drives.every((t) => t === 'hdd' || t === 'ssd' || t === 'nvme')) return null;
-  return { cpu: p.cpu, memGB: p.memGB, backplane: p.backplane, drives: [...p.drives], nic: p.nic };
+  const gpus = typeof p.gpus === 'number' && Number.isInteger(p.gpus) && p.gpus > 0 ? p.gpus : 0;
+  return { cpu: p.cpu, memGB: p.memGB, backplane: p.backplane, drives: [...p.drives], nic: p.nic, ...(gpus ? { gpus } : {}) };
 }

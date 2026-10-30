@@ -9,7 +9,7 @@
  *  - 投資の効果と段階 …… economy.ts
  * 設計は docs/design.md。変えたら `npm run balance` で進行の速さを確認する。
  */
-import type { RoleId, ServiceId } from './types';
+import type { RoleId, Scope, ServiceId } from './types';
 
 // ---- 列とラック -------------------------------------------------------
 export const ROW = {
@@ -110,6 +110,8 @@ export interface Workload {
     readonly kb: number;
     /** 加工(サムネイル生成・エンコード)の CPU 時間(ms) */
     readonly workerCpuMs: number;
+    /** GPU で加工できるなら、その GPU 時間(ms)。worker のサーバに GPU があれば GPU で処理する */
+    readonly workerGpuMs?: number;
     /** 保存する大きさ(KB)と、保存のディスク IO 数 */
     readonly storedKB: number;
     readonly storeIo: number;
@@ -180,10 +182,14 @@ export const SERVICES: Readonly<Record<ServiceId, ServiceDef>> = {
       dbWrites: 0.01,
       // 1 ページビュー = 数秒ぶんの動画の取得
       media: { perPv: 1, kb: 6000, cpuMs: 0.5, io: 24, missPerGB: 1.5 },
-      upload: { perPv: 0.002, kb: 200_000, workerCpuMs: 60_000, storedKB: 300_000, storeIo: 1200 },
+      // エンコードは GPU があれば GPU で(1 本 600ms。CPU 1 コアだと 60 秒)
+      upload: { perPv: 0.002, kb: 200_000, workerCpuMs: 60_000, workerGpuMs: 600, storedKB: 300_000, storeIo: 1200 },
     },
   },
 };
+
+/** 役割の持ち主の名前(サービス名か「分析基盤」) */
+export const scopeName = (s: Scope): string => (s === 'data' ? '分析基盤' : SERVICES[s].name);
 
 /** ブログの機能(投資)で増える仕事量 */
 export const BLOG_FEATURES = {
@@ -215,7 +221,36 @@ export const ROLE_MEM_GB: Readonly<Record<RoleId, number>> = {
   search: 1,
   media: 0.5,
   worker: 1,
+  hadoop: 4,
+  ml: 4,
 };
+
+/**
+ * GPU。サーバのパーツとして載せる(1 枚 = GPU の処理能力 1)。
+ * 動画のエンコードと機械学習は、GPU があれば GPU で処理する(CPU よりずっと速い)
+ */
+export const GPU = {
+  /** GPU で処理するときも、データの受け渡しなどで CPU を少し使う(GPU の処理時間に対する割合) */
+  cpuShare: 0.05,
+} as const;
+
+/**
+ * 分析基盤。すべてのサービスのアクセスログを Hadoop に集めて処理し、広告のターゲティングやおすすめに使う。
+ * 処理しきれた割合(カバー率)に応じて、すべてのサービスの 1 ページビューあたりの収益が上がる
+ */
+export const ANALYTICS = {
+  /** 1 ページビューあたりのログ(KB) */
+  logKB: 2,
+  /** Hadoop: ログ 1MB を取り込んで保存するディスク IO 数と、集計の CPU 時間(ms) */
+  hadoopIoPerMB: 40,
+  hadoopCpuMsPerMB: 4000,
+  /** 機械学習: ログ 1MB あたりの学習の GPU 時間(ms)。GPU がなければ CPU で gpuMsPerMB × cpuSlowdown */
+  mlGpuMsPerMB: 300,
+  mlCpuSlowdown: 40,
+  /** 収益の上がり方: Hadoop の集計(カバー率 100% で)と、機械学習(Hadoop の上に、カバー率 100% で) */
+  hadoopBoost: 0.15,
+  mlBoost: 0.3,
+} as const;
 
 /**
  * CDN: 画像・動画など変わらないデータを、手前のキャッシュから配ってもらう。

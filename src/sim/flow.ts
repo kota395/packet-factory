@@ -11,7 +11,7 @@
  * VM のディスクは、ホストのローカルディスクか共有ストレージ(ネットワーク越しの IO)に置く。
  */
 import { MODEL_BY_ID, portsOf, specOf } from './catalog';
-import { DB_SPLIT, K8S, MAX_QUEUE_RHO, NET, P99_FACTOR, REPLICATION, ROLE_MEM_GB, SERVICES, VIRT, WORK, type Workload } from './config';
+import { ANALYTICS, DB_SPLIT, GPU, K8S, MAX_QUEUE_RHO, NET, P99_FACTOR, REPLICATION, ROLE_MEM_GB, SERVICES, VIRT, WORK, type Workload } from './config';
 import type { Facility } from './facility';
 import { ROLE_IDS, roleKey, splitRole, type DiskKind, type RoleId, type RoleKey, type ServiceId } from './types';
 
@@ -46,6 +46,8 @@ export interface FlowInput {
   readonly now: number;
   /** BGP を解放しているか */
   readonly bgp: boolean;
+  /** 分析基盤: Hadoop・機械学習を解放しているか */
+  readonly analytics?: { readonly hadoop: boolean; readonly ml: boolean };
   /** db(プライマリ)を分けられるか: 1 台だけ / 機能分割(2 台)/ シャーディング(何台でも) */
   readonly dbSplit?: 'none' | 'functional' | 'shard';
   /** 止まっている機器(メンテナンス・障害) */
@@ -82,6 +84,8 @@ export interface ComputeNode {
   readonly advertised?: boolean;
   /** LB アプライアンスなら、1 秒あたりに振り分けられるリクエスト数 */
   readonly lbRps?: number;
+  /** GPU の枚数(物理サーバだけ) */
+  readonly gpus?: number;
 }
 
 export interface NodeLoad {
@@ -91,6 +95,8 @@ export interface NodeLoad {
   io: number;
   /** このノードが出しているディスク IO(回/秒) */
   ioOps: number;
+  /** GPU の使用率(GPU があるノードだけ) */
+  gpu?: number;
   /** 役割ごとの処理量(/秒) */
   work: Partial<Record<RoleKey, number>>;
   /** 役割ごとの、読み込みがメモリに乗らずディスクに行く割合(db・レプリカ・search・media) */
@@ -104,6 +110,8 @@ export interface DeviceLoad {
   cpu: number;
   io: number;
   fabric: number;
+  /** GPU の使用率(GPU を載せたサーバだけ) */
+  gpu: number;
   /** この機器を通る(出入りする)通信量(Gbps) */
   gbps: number;
 }
@@ -140,6 +148,19 @@ export interface ServiceFlow {
   readonly problems: string[];
 }
 
+/** 分析基盤の結果 */
+export interface AnalyticsFlow {
+  /** 全サービスのログ(MB/秒) */
+  readonly logMBps: number;
+  /** 処理しきれた割合(Hadoop の集計と、機械学習) */
+  readonly coverage: number;
+  readonly mlCoverage: number;
+  /** 1 ページビューあたりの収益の倍率 */
+  readonly boost: number;
+  readonly hadoop: number[];
+  readonly ml: number[];
+}
+
 export interface FlowResult {
   /** すべてのサービスの合計 */
   readonly pv: number;
@@ -148,6 +169,7 @@ export interface FlowResult {
   readonly latencyMs: number;
   readonly p99Ms: number;
   readonly services: Partial<Record<ServiceId, ServiceFlow>>;
+  readonly analytics: AnalyticsFlow;
   readonly devices: Map<number, DeviceLoad>;
   readonly links: LinkLoad[];
   /** ケーブルごとの使用率 */
@@ -415,6 +437,7 @@ export function computeNodes(
       roles: d.roles,
       vm: false,
       disk: 'local',
+      gpus: m.gpus,
     });
   }
   for (const v of [...facility.vms.values()].sort((a, b) => a.id - b.id)) {
@@ -482,7 +505,7 @@ const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.le
 export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   const g = graphOf(facility, input);
   const devices = new Map<number, DeviceLoad>();
-  for (const d of facility.devices.values()) devices.set(d.id, { cpu: 0, io: 0, fabric: 0, gbps: 0 });
+  for (const d of facility.devices.values()) devices.set(d.id, { cpu: 0, io: 0, fabric: 0, gpu: 0, gbps: 0 });
   const problems: string[] = [];
   // ---- ノード
   const nodeList = computeNodes(facility, input.now, input.down, input.pods ?? [], input.bgp);
@@ -504,6 +527,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   /** その役割が今動いているか(サービスが始まっていて、役割が解放済み) */
   const isActive = (k: RoleKey) => {
     const [s, r] = splitRole(k);
+    if (s === 'data') return !!input.analytics?.hadoop && input.roles.has(r);
     return activeServices.has(s) && SERVICES[s].roles.includes(r) && input.roles.has(r);
   };
 
@@ -573,6 +597,17 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     l.work[key] = (l.work[key] ?? 0) + perSec;
     addCpu(id, perSec, cpuMs);
   };
+  /** GPU の仕事を積む(受け渡しの CPU も少し) */
+  const addGpuWork = (id: number, key: RoleKey, perSec: number, gpuMs: number) => {
+    const n = nodes.get(id)!;
+    const l = loads.get(id)!;
+    l.work[key] = (l.work[key] ?? 0) + perSec;
+    const rho = (perSec * gpuMs) / (n.gpus! * 1000);
+    l.gpu = (l.gpu ?? 0) + rho;
+    devices.get(n.host)!.gpu += rho;
+    addCpu(id, perSec, gpuMs * GPU.cpuShare);
+  };
+  const hasGpu = (id: number) => (nodes.get(id)!.gpus ?? 0) > 0;
 
   // 共有ディスクの VM は、届くストレージに IO を出す
   const storages = [...facility.devices.values()].filter((d) => MODEL_BY_ID[d.model].category === 'storage');
@@ -836,7 +871,9 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     const storeOn = new Map<number, number>();
     if (W.upload) {
       for (const [k, jobs] of jobsOn) {
-        addWork(k, workerKey, jobs, W.upload.workerCpuMs);
+        // エンコードなど GPU でできる加工は、GPU があれば GPU で
+        if (W.upload.workerGpuMs && hasGpu(k)) addGpuWork(k, workerKey, jobs, W.upload.workerGpuMs);
+        else addWork(k, workerKey, jobs, W.upload.workerCpuMs);
         const reach = media.filter((m) => path(k, m));
         for (const m of reach) {
           const n = jobs / reach.length;
@@ -1033,10 +1070,40 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
       }
     };
 
-    return { svc, inst, entries, sp, evaluate, warnRoutes };
+    return { svc, inst, entries, webs, sp, evaluate, warnRoutes };
   };
 
   const plans = input.services.map(planService);
+
+  // ---- 分析基盤: 各サービスの web からログを Hadoop に集め、機械学習のノードへ渡す
+  const dataNodes = (role: RoleId) => nodeList.filter((n) => n.roles.includes(roleKey('data', role)) && isActive(roleKey('data', role))).map((n) => n.id);
+  const hadoops = input.analytics?.hadoop ? dataNodes('hadoop') : [];
+  const mls = input.analytics?.ml ? dataNodes('ml') : [];
+  let logMBps = 0;
+  let deliveredMBps = 0;
+  for (const p of plans) {
+    const mb = (p.svc.pv * ANALYTICS.logKB) / 1000;
+    logMBps += mb;
+    if (!hadoops.length) continue;
+    const per = p.webs.length ? mb / p.webs.length : 0;
+    for (const w of p.webs) {
+      const reach = hadoops.filter((h) => path(w, h));
+      for (const h of reach) send(w, h, ((per / reach.length) * 8) / 1000, 0);
+      if (reach.length) deliveredMBps += per;
+    }
+  }
+  const mbPerHadoop = hadoops.length ? deliveredMBps / hadoops.length : 0;
+  for (const h of hadoops) {
+    addWork(h, roleKey('data', 'hadoop'), mbPerHadoop, ANALYTICS.hadoopCpuMsPerMB);
+    addIo(h, mbPerHadoop * ANALYTICS.hadoopIoPerMB);
+  }
+  // 学習は集めたログ全体を使う。Hadoop から学習のノードへ渡す
+  const mbPerMl = mls.length && hadoops.length ? deliveredMBps / mls.length : 0;
+  for (const m of mls) {
+    for (const h of hadoops) if (path(h, m)) send(h, m, ((mbPerMl / hadoops.length) * 8) / 1000, 0);
+    if (hasGpu(m)) addGpuWork(m, roleKey('data', 'ml'), mbPerMl, ANALYTICS.mlGpuMsPerMB);
+    else addWork(m, roleKey('data', 'ml'), mbPerMl, ANALYTICS.mlGpuMsPerMB * ANALYTICS.mlCpuSlowdown);
+  }
 
   // ---- スイッチの処理能力と、ディスクの使用率
   for (const d of facility.devices.values()) {
@@ -1074,7 +1141,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   function nodePass(id: number): number {
     const n = nodes.get(id)!;
     const l = loads.get(id)!;
-    let ok = pass(Math.max(cpuRho(id), l.io));
+    let ok = pass(Math.max(cpuRho(id), l.io, l.gpu ?? 0));
     if (n.disk === 'shared') ok *= l.storage != null ? along(route(n.host, l.storage))[0] : 0;
     return ok;
   }
@@ -1098,6 +1165,22 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   }
 
   // ---- サービスごとの結果
+  // 分析: 届いたログのうち、溢れずに処理できた割合
+  const coverage = logMBps > 0 && hadoops.length ? (deliveredMBps / logMBps) * avg(hadoops.map(nodePass)) : 0;
+  const mlCoverage = coverage > 0 && mls.length ? coverage * avg(mls.map(nodePass)) : 0;
+  const analytics: AnalyticsFlow = {
+    logMBps,
+    coverage,
+    mlCoverage,
+    boost: 1 + ANALYTICS.hadoopBoost * coverage + ANALYTICS.mlBoost * mlCoverage,
+    hadoop: hadoops,
+    ml: mls,
+  };
+  if (input.analytics?.hadoop && !hadoops.length) problems.push('分析基盤: 役割「hadoop」のサーバがありません(ログを集められない)');
+  if (hadoops.length && deliveredMBps < logMBps - 1e-9) problems.push('分析基盤: web から hadoop に届かないログがあります');
+  if (input.analytics?.ml && hadoops.length && !mls.length) problems.push('分析基盤: 役割「ml」のサーバがありません');
+  for (const m of mls) if (!hasGpu(m)) problems.push(`分析基盤: ${name(m)} に GPU がないので、機械学習を CPU で動かしています(遅い)`);
+
   const services: Partial<Record<ServiceId, ServiceFlow>> = {};
   let totalPv = 0;
   let okPv = 0;
@@ -1140,6 +1223,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     consider(`${d.name} の処理能力`, l.fabric);
   }
   for (const n of nodeList) if (n.vm) consider(`${n.name} の vCPU`, loads.get(n.id)!.cpu);
+  for (const d of facility.devices.values()) consider(`${d.name} の GPU`, devices.get(d.id)!.gpu);
   for (const l of g.links) consider(`${name(l.a)} ⇄ ${name(l.b)} の帯域`, linkRho(l));
 
   return {
@@ -1148,6 +1232,7 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     latencyMs: plans.length ? latencyMs : NET.internetRttMs,
     p99Ms: (plans.length ? latencyMs : NET.internetRttMs) * P99_FACTOR,
     services,
+    analytics,
     devices,
     links: g.links,
     cableRho,

@@ -7,7 +7,7 @@
  */
 import { K8S, SERVICES, VIRT } from '../sim/config';
 import type { Simulation } from '../sim/simulation';
-import { roleKey, splitRole, type DiskKind, type RoleKey, type VmSize } from '../sim/types';
+import { DATA_ROLES, roleKey, splitRole, type DiskKind, type RoleKey, type VmSize } from '../sim/types';
 import { rolesText } from './format';
 import type { Selection } from './info';
 
@@ -174,9 +174,10 @@ export class ClusterPanel {
     const vms = [...f.vms.values()].sort((a, b) => a.id - b.id);
 
     // VM を作る: 大きさ・役割・ディスク・台数を選び、置くホストは自動
-    const roleOptions = sim.activeServices
-      .flatMap((s) => SERVICES[s].roles.map((r) => roleKey(s, r)))
-      .filter((k) => sim.roleUnlockError(k) === null);
+    const roleOptions = [
+      ...sim.activeServices.flatMap((s) => SERVICES[s].roles.map((r) => roleKey(s, r))),
+      ...DATA_ROLES.map((r) => roleKey('data', r)),
+    ].filter((k) => sim.roleUnlockError(k) === null);
     const opt = (v: string, label: string, cur: string) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${label}</option>`;
     const form = `
       <div class="cl-form">

@@ -69,6 +69,9 @@ export const DRIVE_PRICES: Readonly<Record<DriveType, number>> = {
   nvme: 400,
 };
 
+/** GPU 1 枚 */
+export const GPU_PRICE = 3000;
+
 export const NIC_PRICES: Readonly<Record<NicId, number>> = {
   none: 0,
   sfp10: 300,
@@ -84,6 +87,7 @@ export const cpuPrice = (cores: number) => Math.round((CPU_PRICES[cores] ?? 0) *
 export const memoryPrice = (gb: number) => Math.round(gb * MEMORY_PRICE_PER_GB * PRICE_SCALE);
 export const drivePrice = (t: DriveType) => Math.round(DRIVE_PRICES[t] * PRICE_SCALE);
 export const nicPrice = (n: NicId) => Math.round(NIC_PRICES[n] * PRICE_SCALE);
+export const gpuPrice = (count: number) => Math.round(count * GPU_PRICE * PRICE_SCALE);
 
 /** サーバの価格(シャーシ + パーツ) */
 export function serverPrice(model: 'srv-1u' | 'srv-2u', p: ServerParts): number {
@@ -92,7 +96,8 @@ export function serverPrice(model: 'srv-1u' | 'srv-2u', p: ServerParts): number 
     cpuPrice(p.cpu) +
     memoryPrice(p.memGB) +
     p.drives.reduce((s, t) => s + drivePrice(t), 0) +
-    nicPrice(p.nic)
+    nicPrice(p.nic) +
+    gpuPrice(p.gpus ?? 0)
   );
 }
 
@@ -135,6 +140,10 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   // 回線と配信
   multihoming: 60_000,
   cdn: 40_000,
+  // 分析基盤
+  gpu: 20_000,
+  hadoop: 50_000,
+  ml: 120_000,
   // 機器
   tenGig: 5000,
   agg: 12_000,

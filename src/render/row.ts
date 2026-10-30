@@ -479,7 +479,13 @@ export class RowRenderer {
           .stroke({ width: 1.5, color: m.color });
         this.label(d.name, r.x + 8, r.y + r.h / 2, 11, COLORS.text, 0, true, true);
         // サーバはデータを置くドライブの種類も(例: 2U HDD)
-        const kind = d.parts?.drives.length ? DRIVES[d.parts.drives[d.parts.drives.length - 1]].name : d.parts ? 'SSD' : '';
+        const kind = d.parts?.gpus
+          ? 'GPU'
+          : d.parts?.drives.length
+            ? DRIVES[d.parts.drives[d.parts.drives.length - 1]].name
+            : d.parts
+              ? 'SSD'
+              : '';
         const short = d.hv ? `${m.short} HV` : kind ? `${m.short} ${kind}` : m.short;
         this.label(short, r.x + 56, r.y + r.h / 2, 10, d.hv ? 0x95d5b2 : COLORS.muted, 0, true);
         if (d.hv) {
@@ -592,7 +598,9 @@ export class RowRenderer {
         const r = deviceRect(d);
         const bars =
           m.category === 'server'
-            ? [load.cpu, load.io]
+            ? load.gpu > 0 || (d.parts?.gpus ?? 0) > 0
+              ? [load.cpu, load.io, load.gpu]
+              : [load.cpu, load.io]
             : m.category === 'switch'
               ? [load.fabric]
               : m.category === 'storage'

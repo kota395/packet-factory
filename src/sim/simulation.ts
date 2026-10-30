@@ -23,6 +23,7 @@ import {
   METRICS,
   SERVICES,
   TICK_MS,
+  scopeName,
   VIRT,
   type Workload,
 } from './config';
@@ -49,6 +50,7 @@ import {
   CDN_PRICE_PER_GB,
   cpuPrice,
   drivePrice,
+  gpuPrice,
   memoryPrice,
   nicPrice,
   serverPrice,
@@ -58,6 +60,7 @@ import {
   modelPrice,
 } from './pricing';
 import {
+  DATA_ROLES,
   SERVICE_IDS,
   splitRole,
   type Backplane,
@@ -68,6 +71,7 @@ import {
   type PortRef,
   type RoleId,
   type RoleKey,
+  type Scope,
   type ServerParts,
   type ServiceId,
   type UnlockId,
@@ -96,7 +100,13 @@ export interface SimOptions {
 }
 
 /** 役割を割り当てるのに必要な解放(web と db は最初から使える。search・media・worker はそれを使うサービスを始めれば使える) */
-const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = { lb: 'slb', cache: 'cache', replica: 'replication' };
+const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = {
+  lb: 'slb',
+  cache: 'cache',
+  replica: 'replication',
+  hadoop: 'hadoop',
+  ml: 'ml',
+};
 
 /** サーバのパーツの替え方(ワンクリックの強化・変更) */
 export type PartChange =
@@ -105,7 +115,8 @@ export type PartChange =
   | { kind: 'drive-add'; type: DriveType }
   | { kind: 'drive-remove' }
   | { kind: 'backplane'; to: Backplane }
-  | { kind: 'nic'; to: NicId };
+  | { kind: 'nic'; to: NicId }
+  | { kind: 'gpu'; dir: 1 | -1 };
 
 /** キャンペーンの状態(シミュレーション時刻 ms) */
 export interface CampaignState {
@@ -168,6 +179,11 @@ export class Simulation {
   // ---------------------------------------------------------------- 経済の参照
 
   /** そのサービスを始めているか(ブログは最初から) */
+  /** 役割の持ち主(サービスか分析基盤)が動いているか */
+  isScopeActive(scope: Scope): boolean {
+    return scope === 'data' ? this.unlocks.has('hadoop') : this.isServiceActive(scope);
+  }
+
   isServiceActive(id: ServiceId): boolean {
     return id === 'blog' || this.unlocks.has(id);
   }
@@ -210,6 +226,8 @@ export class Simulation {
     // 画像投稿・コメントはブログの機能
     if (id === 'blog') for (const u of UNLOCKS) if (u.effect && this.isFeatureActive(u.id)) m *= u.effect.revenue;
     if (id === 'shop' && this.campaignActive) m *= CAMPAIGN.revenueMul;
+    // 分析基盤(広告のターゲティング・おすすめ)
+    m *= this.flow?.analytics.boost ?? 1;
     return SERVICES[id].revenuePerPv * m;
   }
 
@@ -486,6 +504,14 @@ export class Simulation {
         cost = bpPrice + drivePrice(first) * 2 - p.drives.reduce((s, t) => s + refund(drivePrice(t)), 0);
         break;
       }
+      case 'gpu': {
+        const now = p.gpus ?? 0;
+        const n = now + change.dir;
+        if (n < 0) return { parts: null, cost: 0, error: 'GPU は載っていません' };
+        next = { ...p, gpus: n };
+        cost = change.dir > 0 ? gpuPrice(1) : -refund(gpuPrice(1));
+        break;
+      }
       case 'nic': {
         if (change.to === p.nic) return { parts: null, cost: 0, error: 'すでにその NIC です' };
         next = { ...p, nic: change.to };
@@ -595,8 +621,15 @@ export class Simulation {
 
   /** その役割を今使えない理由(サービスを始めていない・解放していない) */
   roleUnlockError(key: RoleKey): string | null {
-    const [service, role] = splitRole(key);
-    if (!SERVICES[service].roles.includes(role)) return `${SERVICES[service].name}には役割「${role}」はありません`;
+    const [scope, role] = splitRole(key);
+    // 分析基盤の役割(hadoop・ml)は、それぞれの解放だけ
+    if (scope === 'data') {
+      if (!DATA_ROLES.includes(role)) return `分析基盤には役割「${role}」はありません`;
+      const unlock = ROLE_UNLOCK[role]!;
+      return this.unlocks.has(unlock) ? null : `投資の「${UNLOCK_BY_ID[unlock].name}」が必要です`;
+    }
+    const service = scope;
+    if (DATA_ROLES.includes(role) || !SERVICES[service].roles.includes(role)) return `${SERVICES[service].name}には役割「${role}」はありません`;
     if (!this.isServiceActive(service)) return `投資の「${UNLOCK_BY_ID[service as UnlockId].name}」が必要です`;
     const unlock = ROLE_UNLOCK[role];
     if (unlock && !this.unlocks.has(unlock)) return `投資の「${UNLOCK_BY_ID[unlock].name}」が必要です`;
@@ -729,7 +762,7 @@ export class Simulation {
     const [s, r] = splitRole(key);
     return {
       ok: true,
-      message: `${SERVICES[s].name}の ${r} を${this.deployments.has(key) ? 'Deployment にしました(Pod は自動で増減します)' : 'Deployment から外しました'}`,
+      message: `${scopeName(s)}の ${r} を${this.deployments.has(key) ? 'Deployment にしました(Pod は自動で増減します)' : 'Deployment から外しました'}`,
     };
   }
 
@@ -1138,12 +1171,13 @@ export class Simulation {
       roles: this.availableRoles,
       now: this.time,
       bgp: this.unlocks.has('bgp'),
+      analytics: { hadoop: this.unlocks.has('hadoop'), ml: this.unlocks.has('ml') },
       dbSplit: this.unlocks.has('sharding') ? 'shard' : this.unlocks.has('partition') ? 'functional' : 'none',
       down: this.downDevices,
     });
     for (const [key, n] of this.podsPending) {
       const [s, r] = splitRole(key);
-      flow.problems.push(`${SERVICES[s].name}の ${r} の Pod が ${n} 個、置き場所がなくて待っています(ワーカーを増やす)`);
+      flow.problems.push(`${scopeName(s)}の ${r} の Pod が ${n} 個、置き場所がなくて待っています(ワーカーを増やす)`);
     }
     if (this.deployments.size && !this.pods.length && !this.podsPending.size) {
       flow.problems.push('Kubernetes のワーカーがありません');
@@ -1200,6 +1234,7 @@ export class Simulation {
       if (cat === 'server') {
         add(`cpu:${d.id}`, `${d.name} CPU`, l.cpu);
         add(`io:${d.id}`, `${d.name} ディスク`, l.io);
+        if (l.gpu > 0) add(`gpu:${d.id}`, `${d.name} GPU`, l.gpu);
       } else if (cat === 'storage') add(`io:${d.id}`, `${d.name} IOPS`, l.io);
       else if (cat === 'lb') add(`lb:${d.id}`, `${d.name} 処理`, l.cpu);
       else if (cat === 'switch') add(`fab:${d.id}`, `${d.name} 処理`, l.fabric);

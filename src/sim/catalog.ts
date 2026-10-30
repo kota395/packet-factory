@@ -226,7 +226,12 @@ export const NICS: Readonly<Record<NicId, NicDef>> = {
   sfp10: { id: 'sfp10', name: '10G SFP+ 2 ポート', ports: [sfp(2, 10)], powerW: 12, requires: 'tenGig' },
 };
 
+/** GPU 1 枚の消費電力(W) */
+export const GPU_POWER_W = 300;
+
 export interface ChassisDef {
+  /** 載せられる GPU の枚数 */
+  readonly gpuSlots: number;
   /** 前面のベイの数(バックプレーンごと。0 なら選べない) */
   readonly bays: Readonly<Record<Backplane, number>>;
   /** 背面の OS 用 SSD(ミラー)の本数。OS だけで、データは前面に置く */
@@ -236,8 +241,8 @@ export interface ChassisDef {
 }
 
 export const CHASSIS: Readonly<Record<'srv-1u' | 'srv-2u', ChassisDef>> = {
-  'srv-1u': { bays: { sff: 10, lff: 0 }, rearSsd: 0, minDrives: 2 },
-  'srv-2u': { bays: { sff: 24, lff: 12 }, rearSsd: 2, minDrives: 2 },
+  'srv-1u': { bays: { sff: 10, lff: 0 }, rearSsd: 0, minDrives: 2, gpuSlots: 2 },
+  'srv-2u': { bays: { sff: 24, lff: 12 }, rearSsd: 2, minDrives: 2, gpuSlots: 4 },
 };
 
 export const isServerModel = (m: ModelId): m is 'srv-1u' | 'srv-2u' => m === 'srv-1u' || m === 'srv-2u';
@@ -304,6 +309,13 @@ export const PRESETS: readonly PresetDef[] = [
     parts: { cpu: 32, memGB: 512, backplane: 'sff', drives: drives('nvme', 8), nic: 'sfp10' },
   },
   {
+    id: '2u-gpu',
+    model: 'srv-2u',
+    name: '2U GPU',
+    description: 'GPU 4 枚。動画のエンコード(worker)や機械学習(ml)に。',
+    parts: { cpu: 32, memGB: 256, backplane: 'sff', drives: drives('ssd', 2), nic: 'sfp10', gpus: 4 },
+  },
+  {
     id: '2u-hv',
     model: 'srv-2u',
     name: '2U 仮想化ホスト',
@@ -328,6 +340,7 @@ export function partsRequires(parts: ServerParts): UnlockId[] {
   const out = new Set<UnlockId>();
   for (const d of parts.drives) if (DRIVES[d].requires) out.add(DRIVES[d].requires!);
   if (NICS[parts.nic].requires) out.add(NICS[parts.nic].requires!);
+  if (parts.gpus) out.add('gpu');
   return [...out];
 }
 
@@ -341,6 +354,9 @@ export function partsError(model: 'srv-1u' | 'srv-2u', parts: ServerParts): stri
   if (parts.drives.length > bays) return `前面のベイは ${bays} 本までです`;
   if (parts.drives.length < c.minDrives) return `ドライブは最低 ${c.minDrives} 本要ります`;
   if (parts.drives.length % 2) return 'ドライブは 2 本ずつ(ミラー)です';
+  const gpus = parts.gpus ?? 0;
+  if (!Number.isInteger(gpus) || gpus < 0) return 'GPU の枚数が正しくありません';
+  if (gpus > c.gpuSlots) return `GPU は ${c.gpuSlots} 枚までです`;
   for (const d of parts.drives) {
     if (DRIVES[d].bay !== parts.backplane) {
       return parts.backplane === 'lff' ? '3.5 インチのベイには HDD だけが入ります' : '2.5 インチのベイには SSD・NVMe だけが入ります';
@@ -357,6 +373,8 @@ export interface Spec {
   readonly diskIops: number;
   readonly powerW: number;
   readonly ports: readonly PortGroupDef[];
+  /** GPU の枚数 */
+  readonly gpus: number;
 }
 
 /** 構成(パーツはまるごと差し替えるので、同じオブジェクトなら同じ性能)ごとの計算結果 */
@@ -370,7 +388,7 @@ export function specOf(d: { readonly model: ModelId; readonly parts?: ServerPart
     if (!f) {
       // LB アプライアンスは「処理能力 1」として扱う(1 リクエストの重さを lbRps から決める)
       const cores = m.category === 'lb' ? 1 : 0;
-      f = { cores, coreSpeed: CORE_SPEED, memGB: 0, diskIops: m.diskIops ?? 0, powerW: m.powerW, ports: m.ports };
+      f = { cores, coreSpeed: CORE_SPEED, memGB: 0, diskIops: m.diskIops ?? 0, powerW: m.powerW, ports: m.ports, gpus: 0 };
       fixedSpec.set(d.model, f);
     }
     return f;
@@ -397,7 +415,8 @@ function serverSpec(model: 'srv-1u' | 'srv-2u', p: ServerParts): Spec {
     memoryPowerW(p.memGB) +
     p.drives.reduce((s, t) => s + DRIVES[t].powerW, 0) +
     c.rearSsd * DRIVES.ssd.powerW +
-    NICS[p.nic].powerW;
+    NICS[p.nic].powerW +
+    (p.gpus ?? 0) * GPU_POWER_W;
   return {
     cores: cpu.cores,
     coreSpeed: CORE_SPEED,
@@ -405,6 +424,7 @@ function serverSpec(model: 'srv-1u' | 'srv-2u', p: ServerParts): Spec {
     diskIops,
     powerW,
     ports: [...m.ports, ...NICS[p.nic].ports],
+    gpus: p.gpus ?? 0,
   };
 }
 
@@ -431,5 +451,5 @@ export function partsSummary(p: ServerParts): string {
   const counts = new Map<DriveType, number>();
   for (const d of p.drives) counts.set(d, (counts.get(d) ?? 0) + 1);
   const dr = [...counts].map(([t, n]) => `${DRIVES[t].name}×${n}`).join('+') || 'ドライブなし';
-  return `${p.cpu}C・${p.memGB}GB・${dr}${p.nic !== 'none' ? '・10G' : ''}`;
+  return `${p.cpu}C・${p.memGB}GB・${dr}${p.nic !== 'none' ? '・10G' : ''}${p.gpus ? `・GPU×${p.gpus}` : ''}`;
 }

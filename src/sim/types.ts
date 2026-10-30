@@ -3,28 +3,39 @@ export type ServiceId = 'blog' | 'shop' | 'photo' | 'video';
 
 export const SERVICE_IDS: readonly ServiceId[] = ['blog', 'shop', 'photo', 'video'];
 
-/** 役割(ソフトウェア)の種類 */
-export type RoleId = 'lb' | 'web' | 'cache' | 'db' | 'replica' | 'search' | 'media' | 'worker';
+/**
+ * 役割の持ち主。サービスのほかに、全サービスのログを集めて分析する「分析基盤(data)」がある
+ */
+export type Scope = ServiceId | 'data';
 
-export const ROLE_IDS: readonly RoleId[] = ['lb', 'web', 'cache', 'db', 'replica', 'search', 'media', 'worker'];
+export const SCOPES: readonly Scope[] = [...SERVICE_IDS, 'data'];
+
+/** 役割(ソフトウェア)の種類。hadoop・ml は分析基盤の役割 */
+export type RoleId = 'lb' | 'web' | 'cache' | 'db' | 'replica' | 'search' | 'media' | 'worker' | 'hadoop' | 'ml';
+
+export const ROLE_IDS: readonly RoleId[] = ['lb', 'web', 'cache', 'db', 'replica', 'search', 'media', 'worker', 'hadoop', 'ml'];
+
+/** 分析基盤の役割 */
+export const DATA_ROLES: readonly RoleId[] = ['hadoop', 'ml'];
 
 /**
- * サーバ・VM に割り当てる役割。サービスごとに付けるので「shop:web」のように書く。
+ * サーバ・VM に割り当てる役割。サービスごとに付けるので「shop:web」のように書く(分析基盤は「data:hadoop」)。
  * 1 台に複数のサービスの役割を相乗りさせても、サービスごとに分けてもよい
  */
-export type RoleKey = `${ServiceId}:${RoleId}`;
+export type RoleKey = `${Scope}:${RoleId}`;
 
-export const roleKey = (service: ServiceId, role: RoleId): RoleKey => `${service}:${role}`;
+export const roleKey = (scope: Scope, role: RoleId): RoleKey => `${scope}:${role}`;
 
-export function splitRole(key: RoleKey): [ServiceId, RoleId] {
+export function splitRole(key: RoleKey): [Scope, RoleId] {
   const [s, r] = key.split(':');
-  return [s as ServiceId, r as RoleId];
+  return [s as Scope, r as RoleId];
 }
 
 export function isRoleKey(x: unknown): x is RoleKey {
   if (typeof x !== 'string') return false;
   const [s, r] = x.split(':');
-  return SERVICE_IDS.includes(s as ServiceId) && ROLE_IDS.includes(r as RoleId);
+  if (s === 'data') return DATA_ROLES.includes(r as RoleId);
+  return SERVICE_IDS.includes(s as ServiceId) && ROLE_IDS.includes(r as RoleId) && !DATA_ROLES.includes(r as RoleId);
 }
 
 /** VM の大きさ */
@@ -71,7 +82,10 @@ export type UnlockId =
   | 'partition'
   | 'sharding'
   | 'multihoming'
-  | 'cdn';
+  | 'cdn'
+  | 'gpu'
+  | 'hadoop'
+  | 'ml';
 
 /** 何度でも(上限まで)買える強化・契約 */
 export type UpgradeId = 'marketing' | 'monetize' | 'uplink' | 'rackPower';
@@ -104,4 +118,6 @@ export interface ServerParts {
   /** 前面のドライブ。2 本ずつミラーにする */
   readonly drives: readonly DriveType[];
   readonly nic: NicId;
+  /** GPU の枚数(0 ならなし) */
+  readonly gpus?: number;
 }

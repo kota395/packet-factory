@@ -17,12 +17,13 @@ import {
   specOf,
   type ModelDef,
 } from '../sim/catalog';
-import { CAMPAIGN, K8S, RACK, SERVICES, VIRT } from '../sim/config';
+import { ANALYTICS, CAMPAIGN, K8S, RACK, SERVICES, VIRT, scopeName } from '../sim/config';
 import type { Device, Vm } from '../sim/facility';
 import { lbGroups, nodeName, type NodeLoad } from '../sim/flow';
 import { SELL_REFUND_RATE, UPKEEP } from '../sim/pricing';
 import type { PartChange, Simulation } from '../sim/simulation';
 import {
+  DATA_ROLES,
   ROLE_IDS,
   SERVICE_IDS,
   roleKey,
@@ -32,8 +33,8 @@ import {
   type PortRef,
   type RoleId,
   type RoleKey,
+  type Scope,
   type ServerParts,
-  type ServiceId,
   type VmSize,
 } from '../sim/types';
 import type { Target } from '../render/row';
@@ -56,6 +57,8 @@ const ROLE_LABEL: Record<RoleId, string> = {
   search: 'search(検索)',
   media: 'media(画像・動画の配信)',
   worker: 'worker(加工)',
+  hadoop: 'hadoop(ログの集計)',
+  ml: 'ml(機械学習)',
 };
 const ROLE_UNIT: Record<RoleId, string> = {
   lb: 'リクエスト/秒',
@@ -66,6 +69,8 @@ const ROLE_UNIT: Record<RoleId, string> = {
   search: '回/秒',
   media: '回/秒',
   worker: '件/秒',
+  hadoop: 'MB/秒',
+  ml: 'MB/秒',
 };
 
 /** ノード(物理サーバか VM)の負荷の行 */
@@ -75,11 +80,12 @@ function nodeRows(sim: Simulation, roles: readonly RoleKey[], l: NodeLoad | unde
   out.push([cpuLabel, load(l.cpu)]);
   const disk = l.storage != null ? `共有(${sim.facility.devices.get(l.storage)?.name})` : l.storage === null ? '共有(届かない)' : 'ローカル';
   out.push(['ディスク', `${disk} ${load(l.io)}(${compact(l.ioOps, 1)} IO/秒)`]);
+  if (l.gpu !== undefined) out.push(['GPU', load(l.gpu)]);
   // 付けた役割と、肩代わりしている仕事(media がないときの web など)
   const keys = [...new Set([...roles, ...(Object.keys(l.work) as RoleKey[])])];
   for (const k of keys) {
     const [s, r] = splitRole(k);
-    if (!sim.isServiceActive(s) || !sim.availableRoles.has(r)) continue;
+    if (!sim.isScopeActive(s) || !sim.availableRoles.has(r)) continue;
     const w = l.work[k] ?? 0;
     const miss = l.miss[k] !== undefined ? `(${pct(l.miss[k]!)} がディスクへ)` : '';
     out.push([
@@ -98,9 +104,12 @@ function roleButtons(
   id: number,
   errorOf: (r: RoleKey) => string | null,
 ): string {
-  return sim.activeServices
-    .map((s) => {
-      const buttons = SERVICES[s].roles
+  // サービスごと、分析基盤を解放していれば分析基盤も
+  const groups: [Scope, readonly RoleId[]][] = sim.activeServices.map((s) => [s, SERVICES[s].roles]);
+  if (sim.isScopeActive('data')) groups.push(['data', DATA_ROLES]);
+  return groups
+    .map(([s, list]) => {
+      const buttons = list
         .map((r) => {
           const k = roleKey(s, r);
           const on = roles.includes(k);
@@ -108,7 +117,7 @@ function roleButtons(
           return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="${act}" data-id="${id}" data-role="${k}" ${err && !on ? `disabled title="${err}"` : ''}>${ROLE_LABEL[r]}</button>`;
         })
         .join('');
-      return `<div class="role-group"><div class="role-svc">${SERVICES[s].name}</div><div class="role-buttons">${buttons}</div></div>`;
+      return `<div class="role-group"><div class="role-svc">${scopeName(s)}</div><div class="role-buttons">${buttons}</div></div>`;
     })
     .join('');
 }
@@ -143,7 +152,7 @@ function section(title: string, body: string): string {
 function specText(m: ModelDef, parts?: ServerParts | null): string {
   const sp = specOf({ model: m.id, parts });
   const ports = sp.ports.map((g) => `${g.label}×${g.count}`).join(' + ');
-  if (m.category === 'server') return `${sp.cores} コア・${sp.memGB}GB・${compact(sp.diskIops)} IOPS・${ports}`;
+  if (m.category === 'server') return `${sp.cores} コア・${sp.memGB}GB・${compact(sp.diskIops)} IOPS${sp.gpus ? `・GPU×${sp.gpus}` : ''}・${ports}`;
   if (m.category === 'switch') return `${ports}・処理 ${m.fabricGbps} Gbps`;
   if (m.category === 'storage') return `${m.diskIops!.toLocaleString('en-US')} IOPS・${ports}`;
   if (m.category === 'lb') return `${ports}・振り分け ${compact(m.lbRps!)} リクエスト/秒`;
@@ -164,12 +173,14 @@ function encodeChange(c: PartChange): string {
       return `bp:${c.to}`;
     case 'nic':
       return `nic:${c.to}`;
+    case 'gpu':
+      return `gpu:${c.dir}`;
   }
 }
 
 function decodeChange(s: string): PartChange | null {
   const [k, v] = s.split(':');
-  if (k === 'cpu' || k === 'mem') return { kind: k, dir: v === '1' ? 1 : -1 };
+  if (k === 'cpu' || k === 'mem' || k === 'gpu') return { kind: k, dir: v === '1' ? 1 : -1 };
   if (k === 'add' && (v === 'hdd' || v === 'ssd' || v === 'nvme')) return { kind: 'drive-add', type: v };
   if (k === 'remove') return { kind: 'drive-remove' };
   if (k === 'bp' && (v === 'sff' || v === 'lff')) return { kind: 'backplane', to: v };
@@ -194,7 +205,7 @@ interface Content {
 export class InfoPanel {
   private shownKey = '';
   /** サービスの詳細で見ているサービス */
-  private serviceTab: ServiceId = 'blog';
+  private serviceTab: Scope = 'blog';
 
   constructor(
     private readonly root: HTMLElement,
@@ -320,7 +331,7 @@ export class InfoPanel {
         r = sim.moveVm(Number(data.id), Number(data.host));
         break;
       case 'svc':
-        this.serviceTab = data.svc as ServiceId;
+        this.serviceTab = data.svc as Scope;
         break;
       case 'campaign':
         r = sim.startCampaign();
@@ -515,7 +526,7 @@ export class InfoPanel {
       return `<button type="button" class="part" data-act="part" data-id="${d.id}" data-change="${encodeChange(change)}" ${info.error ? `disabled title="${info.error}"` : ''}>${label}<span class="cost">${info.parts ? costText(info.cost) : ''}</span></button>`;
     };
     /** 1 段上げる / 下げるボタン(行き先を書く。端なら出さない) */
-    const step = (kind: 'cpu' | 'mem', dir: 1 | -1, text: (x: ServerParts) => string) => {
+    const step = (kind: 'cpu' | 'mem' | 'gpu', dir: 1 | -1, text: (x: ServerParts) => string) => {
       const info = sim.partChangeInfo(d.id, { kind, dir });
       return info.parts ? button({ kind, dir }, `${dir > 0 ? '▲' : '▼'} ${text(info.parts)} `) : '';
     };
@@ -537,6 +548,14 @@ export class InfoPanel {
     if (CHASSIS[model].bays.lff && CHASSIS[model].bays.sff) {
       const to = p.backplane === 'lff' ? 'sff' : 'lff';
       html += `<div class="role-buttons">${button({ kind: 'backplane', to }, to === 'sff' ? '前面を 2.5 インチ 24 本に替える(SSD×2 から) ' : '前面を 3.5 インチ 12 本に替える(HDD×2 から) ')}</div>`;
+    }
+    if (CHASSIS[model].gpuSlots && sim.unlocks.has('gpu')) {
+      const gpus = p.gpus ?? 0;
+      html += line(
+        'GPU',
+        `${gpus} / ${CHASSIS[model].gpuSlots} 枚`,
+        step('gpu', -1, (x) => `${x.gpus ?? 0} 枚`) + step('gpu', 1, (x) => `${x.gpus ?? 0} 枚`),
+      );
     }
     const nicTo = p.nic === 'none' ? 'sfp10' : 'none';
     html += line('増設 NIC', NICS[p.nic].name, button({ kind: 'nic', to: nicTo }, nicTo === 'none' ? 'NIC を外す ' : '10G NIC を付ける '));
@@ -700,25 +719,64 @@ export class InfoPanel {
     };
   }
 
+  /** 分析基盤: ログの量、処理しきれた割合、単価の上がり方、役割ごとのサーバ */
+  private analyticsContent(sim: Simulation, base: string, tabs: string): Content {
+    const a = sim.flow.analytics;
+    const f = sim.facility;
+    const name = (id: number) => sim.flow.nodes.get(id)?.name ?? nodeName(f, id);
+    const nodeRow = (id: number): [string, string] => {
+      const l = sim.flow.nodeLoads.get(id);
+      const gpu = l?.gpu !== undefined ? ` / GPU ${load(l.gpu)}` : '';
+      return [name(id), l ? `CPU ${load(l.cpu)} / IO ${load(l.io)}${gpu}` : '-'];
+    };
+    const cov = (v: number) => `<span class="${v >= 0.99 ? 'ok' : v >= 0.7 ? 'warn' : 'bad'}">${pct(v)}</span>`;
+    const summary: [string, string][] = [
+      ['ログ', `${a.logMBps.toFixed(2)} MB/秒(1 ページビュー ${ANALYTICS.logKB} KB)`],
+      ['集計(Hadoop)', `${cov(a.coverage)} 処理 → 単価 +${Math.round(ANALYTICS.hadoopBoost * a.coverage * 100)}%`],
+    ];
+    if (sim.unlocks.has('ml')) {
+      summary.push(['機械学習', `${cov(a.mlCoverage)} 処理 → 単価 +${Math.round(ANALYTICS.mlBoost * a.mlCoverage * 100)}%`]);
+    }
+    summary.push(['すべてのサービスの単価', `<b>×${a.boost.toFixed(2)}</b>`]);
+    const problems = sim.flow.problems.filter((p) => p.startsWith('分析基盤')).map((p) => `<li>${p.replace('分析基盤: ', '')}</li>`);
+    return {
+      key: `service:data@${base}`,
+      title: 'サービス',
+      subtitle: '分析基盤',
+      desc: 'すべてのサービスの web からアクセスログを hadoop に集めて集計し、ml(機械学習)で広告とおすすめを当てる。処理しきれた割合に応じて単価が上がる。',
+      fixed: tabs,
+      live:
+        section('効果', rows(summary)) +
+        (problems.length ? section('警告', `<ul class="problems">${problems.join('')}</ul>`) : '') +
+        section('hadoop', a.hadoop.length ? rows(a.hadoop.map(nodeRow)) : '<div class="muted small">まだありません(サーバか VM に役割「hadoop」を付ける)</div>') +
+        (sim.unlocks.has('ml')
+          ? section('ml', a.ml.length ? rows(a.ml.map(nodeRow)) : '<div class="muted small">まだありません(GPU を載せたサーバに役割「ml」を付ける)</div>')
+          : ''),
+    };
+  }
+
   private serviceContent(sim: Simulation, base: string): Content {
     const flow = sim.flow;
     const f = sim.facility;
     const name = (id: number) => flow.nodes.get(id)?.name ?? nodeName(f, id);
     const active = sim.activeServices;
-    if (!active.includes(this.serviceTab)) this.serviceTab = 'blog';
+    // サービスのタブ(2 つ以上始めているか、分析基盤があれば)
+    const scopes: Scope[] = [...active, ...(sim.isScopeActive('data') ? (['data'] as Scope[]) : [])];
+    if (!scopes.includes(this.serviceTab)) this.serviceTab = 'blog';
+    const tabs =
+      scopes.length > 1
+        ? `<div class="svc-tabs">${scopes
+            .map((s) => `<button type="button" class="${s === this.serviceTab ? 'on' : ''}" data-act="svc" data-svc="${s}">${scopeName(s)}</button>`)
+            .join('')}</div>`
+        : '';
+    if (this.serviceTab === 'data') return this.analyticsContent(sim, base, tabs);
     const id = this.serviceTab;
     const def = SERVICES[id];
     const sf = flow.services[id];
     const r = sim.metrics.rollingOf(id);
     const W = sim.workloadOf(id);
 
-    // 見るサービスを切り替えるタブ(2 つ以上始めていれば)
-    let fixed = '';
-    if (active.length > 1) {
-      fixed += `<div class="svc-tabs">${active
-        .map((s) => `<button type="button" class="${s === id ? 'on' : ''}" data-act="svc" data-svc="${s}">${SERVICES[s].name}</button>`)
-        .join('')}</div>`;
-    }
+    let fixed = tabs;
     // キャンペーン(ショッピング)
     let campaign = '';
     if (id === 'shop') {

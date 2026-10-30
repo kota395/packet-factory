@@ -1,4 +1,4 @@
-import { SERVICE_IDS, splitRole, type RoleKey, type ServiceId } from '../sim/types';
+import { SCOPES, splitRole, type RoleKey, type Scope } from '../sim/types';
 
 const UNITS = ['', 'k', 'M', 'B', 'T', 'Qa', 'Qi'];
 
@@ -50,22 +50,23 @@ export function dataSize(kb: number): string {
 }
 
 /** サービスの短い名前(機器のラベルなど狭い所に出す) */
-export const SERVICE_SHORT: Readonly<Record<ServiceId, string>> = {
+export const SERVICE_SHORT: Readonly<Record<Scope, string>> = {
   blog: 'ブログ',
   shop: 'ショップ',
   photo: '写真',
   video: '動画',
+  data: '分析',
 };
 
 /** 役割の並びを、サービスごとにまとめて書く(例: 「ブログ web・db / ショップ search」) */
 export function rolesText(keys: readonly RoleKey[]): string {
-  const by = new Map<ServiceId, string[]>();
+  const by = new Map<Scope, string[]>();
   for (const k of keys) {
     const [s, r] = splitRole(k);
     if (!by.has(s)) by.set(s, []);
     by.get(s)!.push(r);
   }
-  return SERVICE_IDS.filter((s) => by.has(s))
+  return SCOPES.filter((s) => by.has(s))
     .map((s) => `${SERVICE_SHORT[s]} ${by.get(s)!.join('・')}`)
     .join(' / ');
 }
