@@ -54,6 +54,7 @@ export type ModelId =
   | 'srv-2u'
   | 'nas-2u'
   | 'lb-1u'
+  | 'lb-10g'
   | 'sw-24'
   | 'sw-48'
   | 'agg-10g';

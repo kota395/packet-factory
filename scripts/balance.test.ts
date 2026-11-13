@@ -137,7 +137,7 @@ it(`balance bot (${MINUTES} min)`, () => {
         if (dev.roles.includes('blog:web') || dev.roles.includes('blog:lb')) {
           if (!s.unlocks.has('lb')) return tryUnlock('lb');
           // LB アプライアンスを 1 台置く(あれば web を足す)
-          if (![...f.devices.values()].some((d) => d.model === 'lb-1u')) return buyLb();
+          if (![...f.devices.values()].some((d) => MODEL_BY_ID[d.model].category === 'lb')) return buyLb();
           const id = buyServer('1u-web', ['blog:web']);
           return id !== null || powerOrRack('1u-web');
         }

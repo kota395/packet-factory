@@ -118,6 +118,20 @@ export const MODELS: readonly ModelDef[] = [
     color: 0xffb703,
   },
   {
+    id: 'lb-10g',
+    category: 'lb',
+    name: 'ロードバランサ 10G(アプライアンス)',
+    short: 'LB10G',
+    description:
+      '10G SFP+ が 4 ポートの上位機種。1GbE の機種では帯域(4Gbps)が先に詰まるようになったら替える。10G のポートを持つスイッチにつながないと速度が出ない。HA は同じように 2 台で自動のペア。',
+    u: 1,
+    powerW: 220,
+    ports: [sfp(4, 10), { count: 1, speedGbps: 1, media: 'rj45', label: 'HA' }],
+    lbRps: 200_000,
+    requires: 'tenGig',
+    color: 0xfb8500,
+  },
+  {
     id: 'sw-24',
     category: 'switch',
     name: 'L2 スイッチ 24 ポート',
