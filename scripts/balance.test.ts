@@ -360,7 +360,13 @@ it(`balance bot (${MINUTES} min)`, () => {
 
   const goals: string[] = [];
   let goalsSeen = 0;
+  // BOT_WALL=秒: 実時間がこれを超えたら、そこまでの結果を出して終わる(終盤は計算に時間がかかる)
+  const deadline = Date.now() + Number(process.env.BOT_WALL ?? 1e9) * 1000;
   for (let sec = 0; sec <= MINUTES * 60; sec++) {
+    if (Date.now() > deadline) {
+      event('時間切れ(BOT_WALL)');
+      break;
+    }
     if (sec % 300 === 0) {
       const r = s.metrics.rolling;
       const servers = all().filter((d) => cat(d) === 'server').length;

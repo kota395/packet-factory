@@ -112,7 +112,7 @@ npm run dev      # 開発サーバー
 npm test         # シミュレーションのユニットテスト
 npm run build    # 型チェック + dist/ へビルド(依存ライセンスの検査込み)
 npm run preview  # ビルド結果の確認
-npm run balance  # バランス確認ボット(BOT_MIN=20 などで時間指定。既定は 60 分で、後半は計算に時間がかかる。BOT_SAVE=1 で最後の状態をセーブとして出力)
+npm run balance  # バランス確認ボット(BOT_MIN=20 などで時間指定。既定は 60 分で、後半は計算に時間がかかる。BOT_WALL=300 で実時間 300 秒で打ち切り、BOT_SAVE=1 で最後の状態をセーブとして出力)
 ```
 
 ### 調整値の場所
