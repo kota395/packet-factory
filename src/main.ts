@@ -31,6 +31,7 @@ for (const type of ['gesturestart', 'gesturechange']) {
 const SAVE_KEY = 'packet-factory:save:v3';
 const AUTOSAVE_MS = 5000;
 const SPEED_KEY = 'packet-factory:speed';
+const METRICS_KEY = 'packet-factory:metrics';
 const CHURN_WARN_INTERVAL_MS = 20_000;
 
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -392,6 +393,8 @@ function updateHud(): void {
 function saveGame(): void {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify(createSave(state.sim)));
+    // メトリクスの推移は別の鍵に(セーブコードには入れない)
+    localStorage.setItem(METRICS_KEY, JSON.stringify(state.sim.metrics.exportHistory()));
   } catch {
     // 保存できない環境(プライベートブラウズなど)では何もしない
   }
@@ -406,7 +409,13 @@ function restoreGame(): boolean {
     save = null;
   }
   if (!save) return false;
-  switchTo(loadSave(save));
+  const sim = loadSave(save);
+  try {
+    sim.metrics.importHistory(JSON.parse(localStorage.getItem(METRICS_KEY) ?? 'null'));
+  } catch {
+    // 推移が読めなくても、ゲームは続けられる
+  }
+  switchTo(sim);
   welcomeBack(applyAbsence(state.sim, Math.max(0, Date.now() - save.savedAt), save.incomePerSec));
   return true;
 }
