@@ -172,7 +172,7 @@ src/
     pricing.ts     価格・維持費
     save.ts        セーブ
   render/    PixiJS による列の立面図(ラックの前面・カメラ)
-  ui/        詳細パネル・投資パネル・クラスタ・メトリクス(ダッシュボード)・チュートリアル
+  ui/        詳細パネル(info.ts と info/ の種類ごとの中身)・投資パネル・クラスタ・メトリクス(ダッシュボード)・チュートリアル
   main.ts    画面のつなぎ込み
 tests/       Vitest(npm test)。分野ごとの *.test.ts、共通の部品は helpers.ts、自動配線だけで組む通しのテストは play.test.ts
 scripts/     バランス確認ボット(npm run balance)
