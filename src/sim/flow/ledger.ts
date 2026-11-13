@@ -175,7 +175,8 @@ export function createLedger(facility: Facility, input: FlowInput) {
   for (const gr of groups) {
     const names = gr.members.map(name).join('・');
     if (gr.active === null) problems.push(`LB(${names})が止まっていて、そこに来たリクエストが失敗しています`);
-    else if (gr.members.length > 1 && gr.active !== gr.members[0]) problems.push(`${name(gr.members[0])} が止まり、HA で ${name(gr.active)} が引き継いでいます`);
+    else if (gr.members.length > 1 && gr.active !== gr.members[0])
+      problems.push(`${name(gr.members[0])} が止まり、HA で ${name(gr.active)} が引き継いでいます`);
   }
   /** LB で 1 リクエストを振り分ける重さ(アプライアンスは処理能力から) */
   const lbMs = (id: number) => {

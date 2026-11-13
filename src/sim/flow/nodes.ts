@@ -17,9 +17,7 @@ export function computeNodes(
   bgp = false,
 ): ComputeNode[] {
   const nodes: ComputeNode[] = [];
-  const servers = [...facility.devices.values()]
-    .filter((d) => MODEL_BY_ID[d.model].category === 'server')
-    .sort((a, b) => a.id - b.id);
+  const servers = [...facility.devices.values()].filter((d) => MODEL_BY_ID[d.model].category === 'server').sort((a, b) => a.id - b.id);
   for (const d of servers) {
     if (d.hv || down.has(d.id)) continue;
     const m = specOf(d);

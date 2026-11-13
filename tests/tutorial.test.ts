@@ -16,8 +16,7 @@ describe('チュートリアル', () => {
     // 配線は自動
     expect(f.cablesOf(web).length && f.cablesOf(db).length).toBeTruthy();
     const skip = newGame();
-    const servers = (x: Simulation) =>
-      [...x.facility.devices.values()].filter((d) => d.parts).map((d) => [d.model, d.parts, d.roles]);
+    const servers = (x: Simulation) => [...x.facility.devices.values()].filter((d) => d.parts).map((d) => [d.model, d.parts, d.roles]);
     expect(servers(s)).toEqual(servers(skip));
     // チュートリアルで渡したお金は、使い切るとほぼ最初の資金に戻る
     expect(s.money).toBeGreaterThanOrEqual(START_MONEY);

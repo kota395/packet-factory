@@ -23,6 +23,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # 書式(prettier)と lint(oxlint)
+      - run: npm run format:check
+      - run: npm run lint
       - run: npm test
       # 型チェック + ビルド。許可外ライセンスの依存が入るとここで失敗する
       - run: npm run build

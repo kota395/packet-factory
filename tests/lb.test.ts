@@ -12,7 +12,11 @@ describe('LB 10G', () => {
     const sw = s.buyDevice('sw-48', 0, 40).id!;
     const lb1 = s.buyDevice('lb-1u', 0, 30).id!;
     const lb10 = s.buyDevice('lb-10g', 0, 28).id!;
-    const cap = (id: number) => f.cablesOf(id).filter((c) => f.otherEnd(c, id).device === sw).reduce((sum, c) => sum + Math.min(f.portDef(c.a)!.speedGbps, f.portDef(c.b)!.speedGbps), 0);
+    const cap = (id: number) =>
+      f
+        .cablesOf(id)
+        .filter((c) => f.otherEnd(c, id).device === sw)
+        .reduce((sum, c) => sum + Math.min(f.portDef(c.a)!.speedGbps, f.portDef(c.b)!.speedGbps), 0);
     expect(cap(lb1)).toBe(4);
     // sw-48 の 10G は 4 ポート。回線が 1 本使うので、LB には 3 本
     expect(cap(lb10)).toBeGreaterThanOrEqual(30);

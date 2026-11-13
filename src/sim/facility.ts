@@ -157,17 +157,25 @@ export class Facility {
     return null;
   }
 
-  place(
-    model: ModelId,
-    slot: number,
-    u: number,
-    paid: number,
-    opts: { id?: number; name?: string; parts?: ServerParts } = {},
-  ): Device {
+  place(model: ModelId, slot: number, u: number, paid: number, opts: { id?: number; name?: string; parts?: ServerParts } = {}): Device {
     const id = opts.id ?? this.nextDeviceId;
     this.nextDeviceId = Math.max(this.nextDeviceId, id + 1);
     const parts = isServerModel(model) ? (opts.parts ?? START_PARTS.web) : null;
-    const device: Device = { id, model, slot, u, parts, roles: [], hv: false, bgp: false, k8s: false, down: false, failedUntil: 0, paid, name: opts.name ?? this.newName(model) };
+    const device: Device = {
+      id,
+      model,
+      slot,
+      u,
+      parts,
+      roles: [],
+      hv: false,
+      bgp: false,
+      k8s: false,
+      down: false,
+      failedUntil: 0,
+      paid,
+      name: opts.name ?? this.newName(model),
+    };
     this.devices.set(id, device);
     this.version++;
     this.rewire();
@@ -280,11 +288,7 @@ export class Facility {
     return null;
   }
 
-  createVm(
-    host: number,
-    size: VmSize,
-    opts: { id?: number; name?: string; roles?: RoleKey[]; disk?: DiskKind; k8s?: boolean } = {},
-  ): Vm {
+  createVm(host: number, size: VmSize, opts: { id?: number; name?: string; roles?: RoleKey[]; disk?: DiskKind; k8s?: boolean } = {}): Vm {
     const id = opts.id ?? this.nextVmId;
     this.nextVmId = Math.max(this.nextVmId, id + 1);
     const used = new Set([...this.vms.values()].map((v) => v.name));

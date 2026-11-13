@@ -25,7 +25,10 @@ export function unitContent(sim: Simulation, slot: number, u: number, base: stri
   };
   const items = [
     ...PRESETS.map((p) => {
-      const drives = partsSummary(p.parts).split('・').filter((x) => /×/.test(x)).join('・');
+      const drives = partsSummary(p.parts)
+        .split('・')
+        .filter((x) => /×/.test(x))
+        .join('・');
       return item(MODEL_BY_ID[p.model], p.name, `${drives}(ミラー)。${p.description}`, p.id);
     }),
     ...BUYABLE_MODELS.filter((m) => !isServerModel(m.id)).map((m) => item(m, m.name, '')),

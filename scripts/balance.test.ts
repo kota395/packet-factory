@@ -166,7 +166,9 @@ it(`balance bot (${MINUTES} min)`, () => {
       if (all().filter((d) => cat(d) === 'lb').length >= 8) return addAgg('LB の先の帯域');
       if (s.money < s.devicePrice('lb-10g') * 2) return no('LB を買うお金がない');
       // 集約スイッチのポートが 1 組ぶん(4 本 × 2 台)空いていなければ、1G のポートにつながってしまうので買わない
-      const room = all().filter((d) => d.model === 'agg-10g').reduce((n, d) => n + portsOf(d).filter((p) => !f.cableAt({ device: d.id, port: p.index })).length, 0);
+      const room = all()
+        .filter((d) => d.model === 'agg-10g')
+        .reduce((n, d) => n + portsOf(d).filter((p) => !f.cableAt({ device: d.id, port: p.index })).length, 0);
       if (room < 8) return addAgg('LB をつなぐポート');
       const a = buy('lb-10g');
       const b = a === null ? null : buy('lb-10g');
@@ -264,7 +266,13 @@ it(`balance bot (${MINUTES} min)`, () => {
     if (server) {
       // 10G のポートがあるスイッチの下なら NIC を 10G に。なければ台数を足す
       const sw = server === x ? y : x;
-      if (s.unlocks.has('tenGig') && server.parts!.nic === 'none' && portsOf(sw).some((p) => p.speedGbps >= 10) && upgrade(server, { kind: 'nic', to: 'sfp10' })) return true;
+      if (
+        s.unlocks.has('tenGig') &&
+        server.parts!.nic === 'none' &&
+        portsOf(sw).some((p) => p.speedGbps >= 10) &&
+        upgrade(server, { kind: 'nic', to: 'sfp10' })
+      )
+        return true;
       return server.roles[0] ? scaleOut(server.roles[0]) : false;
     }
     // スイッチ同士: 1G だけのスイッチ(sw-24)のアップリンクなら、10G のアップリンクを持つ sw-48 に入れ替える
@@ -310,7 +318,10 @@ it(`balance bot (${MINUTES} min)`, () => {
     if (!b || b.rho <= BUSY) return false;
     const label = b.label;
     if (label.includes('⇄')) {
-      const [x, y] = label.split(' の')[0].split(' ⇄ ').map((n) => byName(n));
+      const [x, y] = label
+        .split(' の')[0]
+        .split(' ⇄ ')
+        .map((n) => byName(n));
       return x && y ? fixLink(x, y) : false;
     }
     const dev = byName(label.split(' ')[0]);

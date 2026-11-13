@@ -47,9 +47,7 @@ export function base(opts: { pv?: number; traffic?: Partial<Record<ServiceId, nu
   const s = new Simulation({
     startMoney: RICH,
     manualWiring: true,
-    traffic: opts.traffic
-      ? Object.fromEntries(Object.entries(opts.traffic).map(([k, v]) => [k, constant(v)]))
-      : constant(opts.pv ?? 10),
+    traffic: opts.traffic ? Object.fromEntries(Object.entries(opts.traffic).map(([k, v]) => [k, constant(v)])) : constant(opts.pv ?? 10),
     unlocks: opts.unlocks,
     upgrades: { uplink: opts.uplink ?? 2, rackPower: 3 },
   });

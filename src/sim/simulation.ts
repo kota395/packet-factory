@@ -41,7 +41,6 @@ export interface SimOptions {
   upgrades?: Partial<Record<UpgradeId, number>>;
 }
 
-
 /** サーバのパーツの替え方(ワンクリックの強化・変更) */
 export type PartChange =
   | { kind: 'cpu'; dir: 1 | -1 }
@@ -711,9 +710,7 @@ export class Simulation {
   }
 
   estimateCapacity(): number {
-    const now = Object.fromEntries(this.activeServices.map((id) => [id, this.trafficOf(id, this.time)])) as Partial<
-      Record<ServiceId, number>
-    >;
+    const now = Object.fromEntries(this.activeServices.map((id) => [id, this.trafficOf(id, this.time)])) as Partial<Record<ServiceId, number>>;
     // Pod はオートスケールで増えるので、ワーカーを使い切った置き方で見積もる
     const full = k8s.podsAtFullScale(this);
     const success = (pv: Partial<Record<ServiceId, number>>) => this.computeFlow(pv, full);
@@ -722,19 +719,13 @@ export class Simulation {
     const total = Object.values(now).reduce((a, b) => a + b!, 0);
     const ids = this.activeServices;
     const share = (id: ServiceId) => (total > 0 ? now[id]! / total : 1 / ids.length);
-    this.capacityPv = Simulation.searchMax(
-      (x) => success(Object.fromEntries(ids.map((id) => [id, x * share(id)]))).success >= target,
-      Math.max(1, total) * 2,
-    );
+    this.capacityPv = Simulation.searchMax((x) => success(Object.fromEntries(ids.map((id) => [id, x * share(id)]))).success >= target, Math.max(1, total) * 2);
     for (const id of SERVICE_IDS) {
       if (!this.isServiceActive(id)) {
         delete this.capacityBy[id];
         continue;
       }
-      this.capacityBy[id] = Simulation.searchMax(
-        (x) => (success({ ...now, [id]: x }).services[id]?.success ?? 0) >= target,
-        Math.max(1, now[id] ?? 0) * 2,
-      );
+      this.capacityBy[id] = Simulation.searchMax((x) => (success({ ...now, [id]: x }).services[id]?.success ?? 0) >= target, Math.max(1, now[id] ?? 0) * 2);
     }
     // 見積もりの計算で共有の経路データを使い回すので、今の流量で計算し直しておく
     this.refreshFlow();
@@ -807,10 +798,7 @@ export class Simulation {
     const pv = flow.pv * dt;
     this.money += revenue - this.upkeepPerSec * dt;
     this.lifetimeEarned += revenue;
-    this.metrics.record(
-      { dtMs: TICK_MS, pv, errors: Math.max(0, pv - served), latencyMs: flow.latencyMs, p99Ms: flow.p99Ms, revenue },
-      parts,
-    );
+    this.metrics.record({ dtMs: TICK_MS, pv, errors: Math.max(0, pv - served), latencyMs: flow.latencyMs, p99Ms: flow.p99Ms, revenue }, parts);
     if (!this.fixedTraffic) this.updateUsers(dt);
     this.updateGoal(TICK_MS);
     if (this.deployments.size && this.time - this.scaleAt >= K8S.scaleEveryMs) {

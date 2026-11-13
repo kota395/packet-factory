@@ -150,11 +150,7 @@ export function loadSave(save: SaveData): Simulation {
  * 離れていた時間ぶんを sim に反映する(お金とユーザー)。短すぎる不在なら何もしない。
  * incomePerSec は離れる直前の収支
  */
-export function applyAbsence(
-  sim: Simulation,
-  elapsedMs: number,
-  incomePerSec: number,
-): { elapsedMs: number; gained: number; users: number } {
+export function applyAbsence(sim: Simulation, elapsedMs: number, incomePerSec: number): { elapsedMs: number; gained: number; users: number } {
   if (elapsedMs < OFFLINE.minMs) return { elapsedMs, gained: 0, users: 0 };
   const counted = Math.min(elapsedMs, OFFLINE.maxMs) / 1000;
   const gained = incomePerSec > 0 ? incomePerSec * counted * OFFLINE.efficiency : 0;
@@ -241,9 +237,7 @@ export function parseSave(data: unknown): SaveData | null {
   const devices: SaveData['devices'] = [];
   /** v4 はサービスつきの役割、v3 は役割の名前だけ(ブログの役割として読む) */
   const okRoles = (roles: unknown[]): RoleKey[] =>
-    d.v === 3
-      ? roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId)).map((r) => roleKey('blog', r))
-      : roles.filter(isRoleKey);
+    d.v === 3 ? roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId)).map((r) => roleKey('blog', r)) : roles.filter(isRoleKey);
   for (const item of d.devices as unknown[]) {
     // 古いセーブは 7 要素(仮想化の前)・8 要素(BGP の前)・10 要素(Kubernetes の前)・11 要素(パーツの前)
     if (!Array.isArray(item) || ![7, 8, 10, 11, 12].includes(item.length)) return null;
@@ -259,20 +253,7 @@ export function parseSave(data: unknown): SaveData | null {
       parts = legacy?.parts ?? parseParts(rawParts) ?? null;
       if (!parts || partsError(model as 'srv-1u' | 'srv-2u', parts)) parts = model === 'srv-1u' ? START_PARTS.web : START_PARTS.db;
     }
-    devices.push([
-      id,
-      model as ModelId,
-      slot,
-      u,
-      okRoles(roles),
-      paid,
-      name.slice(0, 32),
-      hv === true,
-      bgp === true,
-      down === true,
-      k8s === true,
-      parts,
-    ]);
+    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true, bgp === true, down === true, k8s === true, parts]);
   }
 
   const vms: SaveData['vms'] = [];

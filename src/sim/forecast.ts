@@ -15,7 +15,7 @@ export function logistic(u0: number, market: number, rate: number, tSec: number)
 export function secondsUntil(u0: number, market: number, rate: number, target: number): number | null {
   if (target <= u0) return 0;
   if (target >= market || u0 <= 0) return null;
-  return Math.log(((market - u0) / u0) / (market / target - 1)) / rate;
+  return Math.log((market - u0) / u0 / (market / target - 1)) / rate;
 }
 
 /** 予測の点列(秒, ユーザー数) */
