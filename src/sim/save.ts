@@ -146,12 +146,21 @@ export function loadSave(save: SaveData): Simulation {
   return sim;
 }
 
-/** 不在だった時間と、その間の収入。短すぎる不在や赤字のときは 0 */
-export function offlineEarnings(save: SaveData, now: number): { elapsedMs: number; gained: number } {
-  const elapsedMs = Math.max(0, now - save.savedAt);
-  if (elapsedMs < OFFLINE.minMs || save.incomePerSec <= 0) return { elapsedMs, gained: 0 };
-  const counted = Math.min(elapsedMs, OFFLINE.maxMs);
-  return { elapsedMs, gained: save.incomePerSec * (counted / 1000) * OFFLINE.efficiency };
+/**
+ * 離れていた時間ぶんを sim に反映する(お金とユーザー)。短すぎる不在なら何もしない。
+ * incomePerSec は離れる直前の収支
+ */
+export function applyAbsence(
+  sim: Simulation,
+  elapsedMs: number,
+  incomePerSec: number,
+): { elapsedMs: number; gained: number; users: number } {
+  if (elapsedMs < OFFLINE.minMs) return { elapsedMs, gained: 0, users: 0 };
+  const counted = Math.min(elapsedMs, OFFLINE.maxMs) / 1000;
+  const gained = incomePerSec > 0 ? incomePerSec * counted * OFFLINE.efficiency : 0;
+  sim.money += gained;
+  const users = sim.growWhileAway(counted * OFFLINE.efficiency);
+  return { elapsedMs, gained, users };
 }
 
 // ---------------------------------------------------------------- 文字列化

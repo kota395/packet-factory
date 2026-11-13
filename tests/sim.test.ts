@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, portsOf, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
-import { ANALYTICS, BLOG_FEATURES, DIFFICULTY, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
-import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
+import { ANALYTICS, BLOG_FEATURES, DIFFICULTY, PV_PER_USER, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
+import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, applyAbsence, parseSave } from '../src/sim/save';
 import { lbGroups } from '../src/sim/flow';
 import { GOAL, GOALS } from '../src/sim/economy';
 import { Simulation } from '../src/sim/simulation';
@@ -1107,10 +1107,25 @@ describe('セーブ', () => {
     expect(parseSave(JSON.parse(JSON.stringify(save)))).toEqual(save);
   });
 
-  it('放置収入は直前の収支の一定割合', () => {
-    const save = { ...createSave(newGame(), 0), incomePerSec: 2 };
-    expect(offlineEarnings(save, 10_000).gained).toBe(0);
-    expect(offlineEarnings(save, 100_000).gained).toBeCloseTo(2 * 100 * 0.5);
+  it('離れていた間: 直前の収支の一定割合が入り、ユーザーは市場規模と捌ける量まで増える', () => {
+    const s = newGame();
+    expect(applyAbsence(s, 10_000, 2)).toEqual({ elapsedMs: 10_000, gained: 0, users: 0 });
+    const money = s.money;
+    const users = s.users;
+    const a = applyAbsence(s, 100_000, 2);
+    expect(a.gained).toBeCloseTo(2 * 100 * 0.5);
+    expect(s.money).toBeCloseTo(money + a.gained);
+    expect(s.users).toBeCloseTo(users + a.users);
+    expect(a.users).toBeGreaterThan(0);
+    // 長く離れても市場規模まで
+    applyAbsence(s, 8 * 3600_000, 0);
+    expect(s.users).toBeLessThanOrEqual(s.marketSize + 1e-6);
+    expect(s.users).toBeGreaterThan(s.marketSize * 0.99);
+    // 捌ける量(キャパシティ)より先へは増えない
+    s.upgrades.marketing = 12;
+    applyAbsence(s, 8 * 3600_000, 0);
+    expect(s.users * PV_PER_USER).toBeLessThanOrEqual(s.capacityOf('blog') * 1.01);
+    expect(s.users).toBeLessThan(s.marketSize / 2);
   });
 
   it('機種のデータが揃っている', () => {

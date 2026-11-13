@@ -383,7 +383,11 @@ export const METRICS = {
   forecastSec: 900,
 } as const;
 
-/** 放置(ページを閉じている間)の収入 */
+/**
+ * 放置(ページを閉じている間・タブを裏に回している間)。
+ * minMs 以上離れると、直前の収支 × efficiency のお金が入り、ユーザーも efficiency 倍の速さで増える
+ * (市場規模と、今の構成で捌ける量まで。離れている間に溢れて減ることはない)。maxMs で頭打ち
+ */
 export const OFFLINE = {
   minMs: 30_000,
   maxMs: 8 * 60 * 60 * 1000,

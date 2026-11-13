@@ -7,7 +7,7 @@ import {
   encodeSave,
   loadSave,
   newGame,
-  offlineEarnings,
+  applyAbsence,
   parseSave,
   tutorialGame,
   type SaveData,
@@ -154,10 +154,36 @@ renderer.app.ticker.add((ticker) => {
 });
 
 window.addEventListener('resize', () => dashboard.resize());
+// タブを裏に回すとブラウザが描画を止め、ゲームの時間も止まる。戻ってきたら、離れていた間として反映する
+let hiddenAt = 0;
+let hiddenIncome = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') saveGame();
+  if (document.visibilityState === 'hidden') {
+    hiddenAt = Date.now();
+    hiddenIncome = state.sim.incomePerSec;
+    saveGame();
+  } else {
+    // 一時停止中とチュートリアル中は進めない
+    if (hiddenAt && state.speed > 0 && !tutorial.active) {
+      welcomeBack(applyAbsence(state.sim, Date.now() - hiddenAt, hiddenIncome));
+      saveGame();
+    }
+    hiddenAt = 0;
+  }
 });
 window.addEventListener('pagehide', saveGame);
+
+/** 離れていた間に入ったお金と増えたユーザーを知らせる */
+function welcomeBack(a: { elapsedMs: number; gained: number; users: number }): void {
+  if (a.gained <= 0 && a.users < 1) return;
+  showModal(`
+    <h2>おかえりなさい</h2>
+    <p class="lead">離れていた ${duration(a.elapsedMs)} の間に</p>
+    <div class="big">+${money(a.gained)}</div>
+    ${a.users >= 1 ? `<p class="lead">ユーザー +${compact(a.users)}</p>` : ''}
+    <p class="note">離れている間は、直前の収支の ${OFFLINE.efficiency * 100}% が入り、ユーザーも ${OFFLINE.efficiency * 100}% の速さで増えます(市場規模と、今の構成で捌ける量まで。最大 ${OFFLINE.maxMs / 3_600_000} 時間分)。</p>
+    <div class="actions"><button type="button" class="primary" data-close>受け取る</button></div>`);
+}
 
 // ------------------------------------------------------------------ 選択
 
@@ -381,16 +407,7 @@ function restoreGame(): boolean {
   }
   if (!save) return false;
   switchTo(loadSave(save));
-  const { elapsedMs, gained } = offlineEarnings(save, Date.now());
-  if (gained > 0) {
-    state.sim.money += gained;
-    showModal(`
-      <h2>おかえりなさい</h2>
-      <p class="lead">離れていた ${duration(elapsedMs)} の間に</p>
-      <div class="big">+${money(gained)}</div>
-      <p class="note">放置中は直前の収支の ${OFFLINE.efficiency * 100}% を、最大 ${OFFLINE.maxMs / 3_600_000} 時間分まで受け取れます。</p>
-      <div class="actions"><button type="button" class="primary" data-close>受け取る</button></div>`);
-  }
+  welcomeBack(applyAbsence(state.sim, Math.max(0, Date.now() - save.savedAt), save.incomePerSec));
   return true;
 }
 
