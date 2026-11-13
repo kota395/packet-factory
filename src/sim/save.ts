@@ -316,7 +316,7 @@ export function parseSave(data: unknown): SaveData | null {
 }
 
 /** 機種固定だったころ(v4 まで)のサーバと、移す先の構成。ポートの並び(1GbE×2、仮想化ホストは 10G×2 も)は同じ */
-export const LEGACY_SERVERS: Record<string, { model: 'srv-1u' | 'srv-2u'; parts: ServerParts }> = {
+const LEGACY_SERVERS: Record<string, { model: 'srv-1u' | 'srv-2u'; parts: ServerParts }> = {
   'srv-1u-e': { model: 'srv-1u', parts: PRESET_BY_ID['1u-small'].parts },
   'srv-1u-d': { model: 'srv-1u', parts: PRESET_BY_ID['1u-web'].parts },
   'srv-2u-db': { model: 'srv-2u', parts: { cpu: 8, memGB: 64, backplane: 'sff', drives: ['ssd', 'ssd'], nic: 'none' } },
