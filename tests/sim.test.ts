@@ -781,6 +781,19 @@ describe('Kubernetes', () => {
     expect(webPods(s)).toBeLessThan(many);
   });
 
+  it('キャパシティは、Pod がオートスケールでワーカーを使い切った前提で見積もる', () => {
+    const { s, lb } = cluster(50, ['lb']);
+    lb(30);
+    s.toggleDeployment('blog:web');
+    expect(webPods(s)).toBe(K8S.minPods);
+    const cap = s.estimateCapacity();
+    // 今の 2 Pod で捌ける量(1 Pod = 1 vCPU、web 12ms → 約 83 PV/秒)よりずっと多い
+    const twoPods = (K8S.minPods * 1000) / SERVICES.blog.work.webCpuMs;
+    expect(cap).toBeGreaterThan(twoPods * 2);
+    // 見積もりで Pod の数は変わらない
+    expect(webPods(s)).toBe(K8S.minPods);
+  });
+
   it('LB も BGP もなければ届くのは Pod 1 つ。BGP を使うワーカーの Pod は LB なしで受けられる', () => {
     const { s, w1, w2 } = cluster(50, ['bgp']);
     s.toggleDeployment('blog:web');

@@ -843,10 +843,20 @@ export class Simulation {
    * 止まったワーカーの Pod は、ここで別のワーカーに置き直される
    */
   schedule(): void {
+    const { pods, pending } = this.placePods(this.deployments);
+    this.podsPending.clear();
+    for (const [key, n] of pending) this.podsPending.set(key, n);
+    const sig = (list: PodGroup[]) => list.map((p) => `${p.worker}${p.role}${p.count}`).join();
+    if (sig(pods) !== sig(this.pods)) this.podVersion++;
+    this.pods = pods;
+  }
+
+  /** Deployment ごとの Pod の数から、置き場所を決める(状態は変えない) */
+  private placePods(counts: ReadonlyMap<RoleKey, number>): { pods: PodGroup[]; pending: Map<RoleKey, number> } {
     const workers = this.k8sWorkers().map((w) => ({ ...w, freeCpu: w.vcpu, freeMem: w.memGB }));
     const placed = new Map<string, number>();
-    this.podsPending.clear();
-    for (const [key, count] of this.deployments) {
+    const pending = new Map<RoleKey, number>();
+    for (const [key, count] of counts) {
       if (this.deploymentError(key)) continue;
       for (let i = 0; i < count; i++) {
         let best: (typeof workers)[number] | null = null;
@@ -855,7 +865,7 @@ export class Simulation {
           if (!best || w.freeCpu > best.freeCpu) best = w;
         }
         if (!best) {
-          this.podsPending.set(key, count - i);
+          pending.set(key, count - i);
           break;
         }
         best.freeCpu -= K8S.pod.vcpu;
@@ -870,9 +880,23 @@ export class Simulation {
       const [worker, role] = k.split('|');
       pods.push({ id: id++, worker: Number(worker), role: role as RoleKey, count });
     }
-    const sig = (list: PodGroup[]) => list.map((p) => `${p.worker}${p.role}${p.count}`).join();
-    if (sig(pods) !== sig(this.pods)) this.podVersion++;
-    this.pods = pods;
+    return { pods, pending };
+  }
+
+  /**
+   * オートスケールでワーカーを使い切ったときの Pod の置き方(キャパシティの見積もり用)。
+   * いまの Pod の数の比のまま、ワーカーに載るだけ増やす
+   */
+  private podsAtFullScale(): PodGroup[] {
+    const counts = [...this.deployments].filter(([key]) => !this.deploymentError(key));
+    const total = counts.reduce((n, [, c]) => n + c, 0);
+    if (!total) return this.pods;
+    const slots = this.k8sWorkers().reduce(
+      (n, w) => n + Math.max(0, Math.min(Math.floor(w.vcpu / K8S.pod.vcpu), Math.floor(w.memGB / K8S.pod.memGB))),
+      0,
+    );
+    const factor = Math.max(1, slots / total);
+    return this.placePods(new Map(counts.map(([key, c]) => [key, Math.min(K8S.maxPods, Math.floor(c * factor))]))).pods;
   }
 
   /** オートスケール(HPA): Deployment ごとに、Pod の CPU 使用率が目標になるよう数を変える */
@@ -1131,6 +1155,7 @@ export class Simulation {
    * 今の構成で捌けるページビュー/秒の見積もり(成功率 METRICS.capacitySuccess を保てる最大)。
    *  - capacityPv: すべてのサービスの流量を同じ倍率で増やしたときの、合計の上限
    *  - capacityOf: そのサービスだけを増やしたとき(ほかは今の流量のまま)の、そのサービスの上限
+   * Kubernetes の Pod は、オートスケールでワーカーを使い切るまで増えた前提で見積もる。
    * 流量を変えて計算し直す二分探索なので、数秒ごとにだけ更新する
    */
   capacityPv = 0;
@@ -1162,7 +1187,9 @@ export class Simulation {
     const now = Object.fromEntries(this.activeServices.map((id) => [id, this.trafficOf(id, this.time)])) as Partial<
       Record<ServiceId, number>
     >;
-    const success = (pv: Partial<Record<ServiceId, number>>) => this.computeFlow(pv);
+    // Pod はオートスケールで増えるので、ワーカーを使い切った置き方で見積もる
+    const full = this.podsAtFullScale();
+    const success = (pv: Partial<Record<ServiceId, number>>) => this.computeFlow(pv, full);
     const target = METRICS.capacitySuccess;
     // 合計: 今の割合のまま全体を増やす(まだ流量がなければ均等に)
     const total = Object.values(now).reduce((a, b) => a + b!, 0);
@@ -1202,7 +1229,7 @@ export class Simulation {
   }
 
   /** 流量を計算する。pv を与えればそのページビュー/秒で(キャパシティの見積もり用) */
-  private computeFlow(pv?: Partial<Record<ServiceId, number>>): FlowResult {
+  private computeFlow(pv?: Partial<Record<ServiceId, number>>, pods: PodGroup[] = this.pods): FlowResult {
     const services: ServiceLoad[] = this.activeServices.map((id) => ({
       id,
       pv: pv ? (pv[id] ?? 0) : this.trafficOf(id, this.time),
@@ -1210,7 +1237,7 @@ export class Simulation {
     }));
     const flow = computeFlow(this.facility, {
       services,
-      pods: this.pods,
+      pods,
       uplinkGbps: this.uplinkGbps,
       roles: this.availableRoles,
       now: this.time,
