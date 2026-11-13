@@ -36,6 +36,7 @@ export const SELL_REFUND_RATE = 0.5;
 export const MODEL_PRICES: Readonly<Record<Exclude<ModelId, 'handoff' | 'srv-1u' | 'srv-2u'>, GrowingPrice>> = {
   'nas-2u': { first: 15_000, growth: 1 },
   'lb-1u': { first: 1200, growth: 1 },
+  'lb-10g': { first: 12_000, growth: 1 },
   'sw-24': { first: 150, growth: 1 },
   'sw-48': { first: 1500, growth: 1 },
   'agg-10g': { first: 6000, growth: 1 },
