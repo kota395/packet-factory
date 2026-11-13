@@ -5,9 +5,11 @@
  * ルール:
  *  1. コア: 集約スイッチがあれば集約スイッチ(すべて)、なければ一番速いポートを持つスイッチ(同じなら先に置いた方)
  *  2. 回線終端は、コアに順番に 1 本ずつ
- *  3. コア以外のスイッチ(ToR)は、コアそれぞれに WIRING.uplinksPerCore 本ずつ(速いポートから)
- *  4. サーバ・LB・ストレージは、同じラックのスイッチへ(なければ一番近いラックのスイッチへ)。
- *     スイッチが複数あれば別々のスイッチに分けてつなぐ(BGP で冗長化できる)
+ *  3. コア以外のスイッチ(ToR)は、コアそれぞれに WIRING.uplinksPerCore 本ずつ(速いポートから、コアに 1 本ずつ順に。
+ *     速いポートを使い切ったら、遅いポートでは足さない)
+ *  4. LB・ストレージ・サーバの順に(速いポートを LB に先に回す)、同じラックのスイッチへ(なければ一番近いラックのスイッチへ)。
+ *     スイッチが複数あれば、一番速くつながるスイッチへ(速すぎるポートは残す)。同じなら別々のスイッチに分けてつなぐ(BGP で冗長化できる)。
+ *     集約スイッチも、同じラックにあればつなぐ先になる。LB だけは、別のラックのコアにもつなげる
  *  5. LB アプライアンスは、置いた順に 2 台ずつ HA ポートを直結する
  * つなぐ先のポートが空いていなければつながらず、unwired に理由が残る。
  */
@@ -39,8 +41,8 @@ export function autoWire(f: Facility): Map<number, string> {
       .filter((p) => p.label !== 'HA' && !f.cableAt({ device: d.id, port: p.index }))
       .map((p) => ({ port: p.index, speed: p.speedGbps }));
 
-  /** a と b を 1 本つなぐ。リンクが一番速くなる組み合わせで、余分に速いポートは残す */
-  const link = (a: Device, b: Device): boolean => {
+  /** a と b をつなぐときの一番よいポートの組: リンクが一番速く、余分に速いポートは残す */
+  const pair = (a: Device, b: Device) => {
     let best: { pa: FreePort; pb: FreePort; speed: number; waste: number } | null = null;
     for (const pa of free(a)) {
       for (const pb of free(b)) {
@@ -49,6 +51,10 @@ export function autoWire(f: Facility): Map<number, string> {
         if (!best || speed > best.speed || (speed === best.speed && waste < best.waste)) best = { pa, pb, speed, waste };
       }
     }
+    return best;
+  };
+  const link = (a: Device, b: Device): boolean => {
+    const best = pair(a, b);
     if (!best) return false;
     f.connect({ device: a.id, port: best.pa.port }, { device: b.id, port: best.pb.port });
     return true;
@@ -64,17 +70,35 @@ export function autoWire(f: Facility): Map<number, string> {
 
   // 3. ToR → コア
   for (const t of tors) {
+    // コアに 1 本ずつ順に配る。2 周目は全部のコアに配れるときだけ(偏らせない)。最初の 1 本より遅いリンクは足さない
+    // (遅いリンクが混ざると、均等に分ける ECMP でそこだけ詰まる)
     let n = 0;
-    for (const c of cores) for (let i = 0; i < WIRING.uplinksPerCore; i++) if (link(t, c)) n++;
+    let speed = 0;
+    for (let i = 0; i < WIRING.uplinksPerCore; i++) {
+      // 2 周目からは、すべてのコアに同じ速さで配れるときだけ(コアごとの太さをそろえる)
+      const ok = cores.filter((c) => (pair(t, c)?.speed ?? 0) >= Math.max(speed, 1e-9));
+      if (i > 0 && (ok.length < cores.length || free(t).filter((p) => p.speed >= speed).length < cores.length)) break;
+      for (const c of ok) {
+        const best = pair(t, c);
+        if (!best || best.speed < speed) continue;
+        speed = best.speed;
+        if (link(t, c)) n++;
+      }
+    }
     if (!n) unwired.set(t.id, `${cores.map((c) => c.name).join('・')} のポートが空いていません`);
   }
 
   // 4. サーバ・LB・ストレージ → 同じラック(なければ近いラック)のスイッチ
-  const edge = tors.length || !aggs.length ? [...(aggs.length ? [] : cores), ...tors] : aggs;
+  // 集約スイッチも、同じラックにあればつなぐ先になる(ToR の速いポートが足りないときの 10G の LB など)
+  const edge = switches;
   const linksOf = { server: WIRING.serverLinks, lb: WIRING.lbLinks, storage: WIRING.storageLinks } as const;
-  for (const d of devices) {
-    const c = cat(d);
-    if (c !== 'server' && c !== 'lb' && c !== 'storage') continue;
+  // 数の少ない速いポートは、全体の流量が通る LB、次にストレージに先に回す。そのあとサーバを置いた順に
+  const order = { lb: 0, storage: 1, server: 2 } as const;
+  const endpoints = devices
+    .filter((d) => cat(d) in order)
+    .sort((a, b) => order[cat(a) as keyof typeof order] - order[cat(b) as keyof typeof order] || a.id - b.id);
+  for (const d of endpoints) {
+    const c = cat(d) as keyof typeof order;
     if (!edge.length) {
       unwired.set(d.id, 'スイッチがありません');
       continue;
@@ -82,12 +106,20 @@ export function autoWire(f: Facility): Map<number, string> {
     const dist = Math.min(...edge.map((s) => Math.abs(s.slot - d.slot)));
     const near = edge.filter((s) => Math.abs(s.slot - d.slot) === dist);
     const slot = Math.min(...near.map((s) => s.slot));
-    const targets = near.filter((s) => s.slot === slot);
+    // LB はすべての通信が通るので、ラックが違ってもコアのスイッチにつなげる(ポートが速い方を選ぶ)
+    const local = near.filter((s) => s.slot === slot);
+    const targets = c === 'lb' ? [...new Set([...local, ...cores])] : local;
     let n = 0;
     for (let i = 0; i < linksOf[c]; i++) {
-      // 順番にスイッチを替えながら。そのスイッチが埋まっていれば、ほかのスイッチへ
+      // 一番速くつながるスイッチへ(10G の機器を 1G のスイッチにつながない。1G の機器で 10G のポートを潰さない)。
+      // 同じなら順番にスイッチを替えて分ける。埋まっているスイッチは選ばれない
       const order = targets.map((_, k) => targets[(i + k) % targets.length]);
-      if (order.some((s) => link(d, s))) n++;
+      const options = order.map((sw) => ({ sw, p: pair(d, sw) })).filter((o) => o.p);
+      if (!options.length) break;
+      const speed = Math.max(...options.map((o) => o.p!.speed));
+      const waste = Math.min(...options.filter((o) => o.p!.speed === speed).map((o) => o.p!.waste));
+      const pick = options.find((o) => o.p!.speed === speed && o.p!.waste === waste)!;
+      if (link(d, pick.sw)) n++;
     }
     if (!n) unwired.set(d.id, `${targets.map((s) => s.name).join('・')} のポートが空いていません(スイッチを足す)`);
   }
