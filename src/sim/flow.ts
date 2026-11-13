@@ -531,7 +531,17 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   };
 
   const hostOf = (id: number) => nodes.get(id)!.host;
-  const route = (a: number, b: number) => routeOf(facility, g, input, a, b);
+  // 同じ 2 台の経路は 1 回の計算の中で何度も引くので、数値のキーで覚えておく(文字列のキーを作り直さない)
+  const routeMemo = new Map<number, Route | null>();
+  const route = (a: number, b: number) => {
+    const k = a * 0x100000 + b;
+    let r = routeMemo.get(k);
+    if (r === undefined) {
+      r = routeOf(facility, g, input, a, b);
+      routeMemo.set(k, r);
+    }
+    return r;
+  };
   const path = (a: number, b: number) => route(hostOf(a), hostOf(b));
 
   /** 機器の間の通信を経路に積む。届かなければ null */
@@ -1119,8 +1129,12 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   // ---- 使用率から、溢れずに通る割合と遅延
   const linkRho = (l: LinkLoad) => (l.capacityGbps > 0 ? Math.max(l.ab, l.ba) / l.capacityGbps : Infinity);
   /** 経路を通って溢れない割合と、通るのにかかる時間(ms) */
+  // 経路ごとの結果は、負荷が決まったあとは変わらないので覚えておく(web × db の組み合わせで何度も通る)
+  const alongMemo = new Map<Route, [number, number]>();
   function along(p: Route | null | undefined): [number, number] {
     if (!p) return [0, 0];
+    const memo = alongMemo.get(p);
+    if (memo) return memo;
     let ok = 1;
     let ms = 0;
     // ECMP で分かれた経路は、通る割合で重みを付ける
@@ -1134,7 +1148,9 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
       ok *= pass(rho) ** t.frac;
       ms += NET.hopMs * q(rho) * t.frac;
     }
-    return [ok, ms];
+    const out: [number, number] = [ok, ms];
+    alongMemo.set(p, out);
+    return out;
   }
   /** ノードが溢れずに処理できる割合(自分の CPU・ホストの CPU・ディスク、共有ディスクならストレージへの経路も) */
   function nodePass(id: number): number {
