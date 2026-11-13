@@ -24,6 +24,7 @@ import {
   TICK_MS,
   scopeName,
   VIRT,
+  type DifficultyId,
   type Workload,
 } from './config';
 import { secondsUntil } from './forecast';
@@ -84,6 +85,8 @@ export interface ActionResult {
 
 export interface SimOptions {
   startMoney?: number;
+  /** 難易度。指定しなければ「平和」(障害なし) */
+  difficulty?: DifficultyId;
   /** 自動配線をやめて、facility.connect で手で組む(流量モデルのテスト用) */
   manualWiring?: boolean;
   /** ブログの最初のユーザー数(数値)か、サービスごとのユーザー数 */
@@ -135,6 +138,10 @@ export class Simulation {
   /** サービスごとのユーザー数(始めていないサービスも、始めたときの値を持っておく) */
   readonly serviceUsers: Record<ServiceId, number>;
   lifetimeEarned = 0;
+  /** 難易度(障害の起き方)。いつでも変えられる */
+  difficulty: DifficultyId;
+  /** 最後に起きた障害(画面で知らせるのに使う) */
+  lastFailure: { id: number; name: string; at: number; repairSec: number } | null = null;
   /** ショッピングのキャンペーン */
   campaign: CampaignState = { until: 0, cooldownUntil: 0 };
   /** Kubernetes: Deployment にした役割と、その Pod の数(オートスケールで変わる) */
@@ -165,6 +172,7 @@ export class Simulation {
     if (typeof opts.startUsers === 'number') this.serviceUsers.blog = opts.startUsers;
     else if (opts.startUsers) Object.assign(this.serviceUsers, opts.startUsers);
     this.facility.autoWire = !opts.manualWiring;
+    this.difficulty = opts.difficulty ?? 'peace';
     this.fixedTraffic = typeof opts.traffic === 'function' ? { blog: opts.traffic } : (opts.traffic ?? null);
     this.unlocks = new Set(opts.unlocks ?? []);
     this.upgrades = { ...emptyUpgrades(), ...opts.upgrades };
@@ -662,12 +670,19 @@ export class Simulation {
 
   /** 障害(難易度オプション): 機器がときどき壊れ、しばらくすると直る */
   private rollFailures(dt: number): void {
-    const f = DIFFICULTY.failures;
-    if (!f.enabled) return;
+    const f = DIFFICULTY.levels[this.difficulty].failures;
+    if (!f || this.facility.devices.size < f.fromDevices) return;
+    let failed = false;
     for (const d of this.facility.devices.values()) {
       if (MODEL_BY_ID[d.model].category === 'handoff' || d.failedUntil > this.time) continue;
-      if (this.random() < dt / f.mtbfSec) d.failedUntil = this.time + f.repairSec * 1000;
+      if (this.random() < dt / f.mtbfSec) {
+        d.failedUntil = this.time + f.repairSec * 1000;
+        this.lastFailure = { id: d.id, name: d.name, at: this.time, repairSec: f.repairSec };
+        failed = true;
+      }
     }
+    // 止まったワーカーの Pod はすぐ置き直す
+    if (failed) this.schedule();
   }
 
   private seed = 0x9e3779b9;

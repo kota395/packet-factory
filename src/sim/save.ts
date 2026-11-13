@@ -1,5 +1,5 @@
 import { MODEL_BY_ID, PRESET_BY_ID, START_PARTS, isServerModel, partsError } from './catalog';
-import { OFFLINE, RACK, ROW } from './config';
+import { DIFFICULTY_IDS, OFFLINE, RACK, ROW, type DifficultyId } from './config';
 import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades } from './economy';
 import { PART_REFUND_RATE, memoryPrice, serverPrice } from './pricing';
 import { Simulation } from './simulation';
@@ -33,6 +33,8 @@ export interface SaveData {
   /** キャンペーンの残り時間とクールタイムの残り(ms) */
   campaign: [number, number];
   lifetimeEarned: number;
+  /** 難易度。ない(古いセーブ)なら「平和」 */
+  difficulty: DifficultyId;
   /** 保存時点の収支/秒。放置収入の計算に使う */
   incomePerSec: number;
   unlocks: UnlockId[];
@@ -49,8 +51,8 @@ export interface SaveData {
 }
 
 /** 新しいゲーム: ラック 1 本に、回線終端・スイッチ・リクエストを受ける 1U サーバ・db 用の 2U サーバ(HDD) */
-export function newGame(): Simulation {
-  const sim = new Simulation();
+export function newGame(difficulty: DifficultyId = 'normal'): Simulation {
+  const sim = new Simulation({ difficulty });
   const f = sim.facility;
   f.rent(0);
   f.place('handoff', 0, RACK.units, 0);
@@ -64,8 +66,8 @@ export function newGame(): Simulation {
 }
 
 /** チュートリアルの始まり: 回線終端とスイッチだけ(つないである)。チュートリアルで買う分のお金を足しておく */
-export function tutorialGame(): Simulation {
-  const sim = new Simulation();
+export function tutorialGame(difficulty: DifficultyId = 'normal'): Simulation {
+  const sim = new Simulation({ difficulty });
   const f = sim.facility;
   f.rent(0);
   f.place('handoff', 0, RACK.units, 0);
@@ -95,6 +97,7 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     users: { ...sim.serviceUsers },
     campaign: [Math.max(0, sim.campaign.until - sim.time), Math.max(0, sim.campaign.cooldownUntil - sim.time)],
     lifetimeEarned: sim.lifetimeEarned,
+    difficulty: sim.difficulty,
     incomePerSec: sim.incomePerSec,
     unlocks: [...sim.unlocks],
     disabled: [...sim.disabledFeatures],
@@ -115,6 +118,7 @@ export function loadSave(save: SaveData): Simulation {
     upgrades: save.upgrades,
   });
   sim.lifetimeEarned = save.lifetimeEarned;
+  sim.difficulty = save.difficulty;
   sim.campaign = { until: sim.time + save.campaign[0], cooldownUntil: sim.time + save.campaign[1] };
   const f = sim.facility;
   for (const slot of save.racks) f.rent(slot);
@@ -285,6 +289,7 @@ export function parseSave(data: unknown): SaveData | null {
     users,
     campaign,
     lifetimeEarned: d.lifetimeEarned,
+    difficulty: DIFFICULTY_IDS.includes(d.difficulty as DifficultyId) ? (d.difficulty as DifficultyId) : 'peace',
     incomePerSec: d.incomePerSec,
     unlocks,
     disabled,
