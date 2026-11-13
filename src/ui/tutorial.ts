@@ -1,11 +1,11 @@
 /**
  * チュートリアル。回線終端とスイッチだけのラックから、web と db のサーバを置いて役割を付け、
- * db を強化して配線するところまでを、実際に操作してもらいながら進める。
+ * db を強化するところまでを(配線は自動)、実際に操作してもらいながら進める。
  * スキップすると、チュートリアルで作るもの(newGame の構成)が最初からある状態で始まる。
  *
  * 各ステップは「終わったか」をゲームの状態から判定するので、どの順に操作しても先へ進む。
  */
-import type { Face, ViewState } from '../render/row';
+import type { ViewState } from '../render/row';
 import type { Device } from '../sim/facility';
 import type { Simulation } from '../sim/simulation';
 import type { Selection } from './info';
@@ -13,7 +13,6 @@ import type { Selection } from './info';
 export interface TutorialContext {
   readonly sim: Simulation;
   readonly selected: Selection | null;
-  readonly face: Face;
 }
 
 interface Step {
@@ -35,14 +34,6 @@ const servers = (sim: Simulation, model: 'srv-1u' | 'srv-2u'): Device[] =>
   [...sim.facility.devices.values()].filter((d) => d.model === model).sort((a, b) => a.id - b.id);
 const web = (sim: Simulation) => servers(sim, 'srv-1u')[0];
 const db = (sim: Simulation) => servers(sim, 'srv-2u')[0];
-const switchOf = (sim: Simulation) => [...sim.facility.devices.values()].find((d) => d.model === 'sw-24');
-/** サーバがスイッチにつながっているか */
-const wired = (sim: Simulation, d: Device | undefined) =>
-  !!d &&
-  sim.facility.cablesOf(d.id).some((c) => {
-    const other = sim.facility.devices.get(c.a.device === d.id ? c.b.device : c.a.device);
-    return other?.model === 'sw-24';
-  });
 /** 空いている U の目印(スイッチの下あたり) */
 const freeUnit = (sim: Simulation, height: number) => {
   for (let u = 38; u >= 1; u--) {
@@ -103,31 +94,12 @@ const STEPS: readonly Step[] = [
     highlight: (c) => (selectedIs(c, db(c.sim)) ? null : { devices: [db(c.sim)!.id] }),
   },
   {
-    title: '背面に切り替える',
-    body: () => 'サーバはまだネットワークにつながっていません。配線はラックの背面で行います。下の<b>「背面」</b>を押してください。',
-    done: (c) => c.face === 'back',
-    glow: () => ['#toolbar [data-tool="back"]'],
-  },
-  {
-    title: '配線する',
-    body: (c) => {
-      const left = [web(c.sim), db(c.sim)].filter((d) => d && !wired(c.sim, d)).map((d) => d!.name);
-      return `サーバの<b>ポート(左の小さな四角)</b>から、スイッチ <b>sw01</b> の空いているポートまでドラッグしてください。線が指(マウス)についてきて、離すとケーブルが引かれます。${left.length ? `残り: <b>${left.join('・')}</b>` : ''}`;
-    },
-    done: (c) => wired(c.sim, web(c.sim)) && wired(c.sim, db(c.sim)),
-    highlight: (c) => {
-      const sw = switchOf(c.sim);
-      const left = [web(c.sim), db(c.sim)].filter((d) => d && !wired(c.sim, d)).map((d) => d!.id);
-      return { devices: [...left, ...(sw ? [sw.id] : [])] };
-    },
-  },
-  {
     title: 'ブログが動きました',
     body: (c) => {
       const ok = c.sim.flow.success >= 0.99;
       return ok
-        ? '回線 → スイッチ → web → db の経路ができ、アクセスを捌けるようになりました。上の HUD で、ユーザー数・ページビュー・エラー率・応答時間が見られます。ケーブルの色は使用率です。'
-        : `まだうまく流れていません: ${c.sim.flow.problems[0] ?? '配線と役割を確かめてください'}`;
+        ? 'サーバは置くと同じラックのスイッチに自動でつながります。回線 → スイッチ → web → db の経路ができ、アクセスを捌けるようになりました。上の HUD で、ユーザー数・ページビュー・エラー率・応答時間が見られます。'
+        : `まだうまく流れていません: ${c.sim.flow.problems[0] ?? '役割を確かめてください'}`;
     },
     glow: () => ['#hud .stats'],
   },
@@ -160,6 +132,8 @@ export class Tutorial {
     host: HTMLElement,
     /** 終わったとき(skipped: スキップしたか) */
     private readonly onEnd: (skipped: boolean) => void,
+    /** 「次へ」で進んだとき(すぐ描き直してもらう) */
+    private readonly onAdvance: () => void = () => {},
   ) {
     this.card = document.createElement('section');
     this.card.id = 'tutorial';
@@ -238,6 +212,7 @@ export class Tutorial {
     this.step++;
     this.shown = '';
     if (this.step >= STEPS.length) this.end(false);
+    else this.onAdvance();
   }
 
   private end(skipped: boolean): void {

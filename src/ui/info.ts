@@ -1,5 +1,5 @@
 /**
- * 右の詳細パネル。選んだもの(機器・U・区画・ポート・ケーブル・サービス全体)に合わせて中身を作る。
+ * 右の詳細パネル。選んだもの(機器・VM・U・区画・サービス全体)に合わせて中身を作る。
  * ボタンを含む部分は選択や構成が変わったときだけ組み直し、数値の部分だけを定期的に更新する
  * (ボタンを作り直すとタップを取りこぼすため)。
  */
@@ -20,7 +20,7 @@ import {
 import { ANALYTICS, CAMPAIGN, K8S, RACK, SERVICES, VIRT, scopeName } from '../sim/config';
 import type { Device, Vm } from '../sim/facility';
 import { lbGroups, nodeName, type NodeLoad } from '../sim/flow';
-import { SELL_REFUND_RATE, UPKEEP } from '../sim/pricing';
+import { UPKEEP } from '../sim/pricing';
 import type { PartChange, Simulation } from '../sim/simulation';
 import {
   DATA_ROLES,
@@ -30,7 +30,6 @@ import {
   splitRole,
   type DiskKind,
   type ModelId,
-  type PortRef,
   type RoleId,
   type RoleKey,
   type Scope,
@@ -298,10 +297,6 @@ export class InfoPanel {
       case 'role':
         r = sim.toggleRole(Number(data.id), data.role as RoleKey);
         break;
-      case 'unplug':
-        r = sim.disconnect(Number(data.id));
-        if (r.ok) this.actions.select(null);
-        break;
       case 'device':
         this.actions.select({ kind: 'device', id: Number(data.id) });
         return;
@@ -377,12 +372,6 @@ export class InfoPanel {
         return this.unitContent(sim, sel.slot, sel.u, base);
       case 'slot':
         return this.slotContent(sim, sel.slot, base);
-      case 'port':
-        return this.portContent(sim, sel.ref, base);
-      case 'cable': {
-        const c = sim.facility.cables.get(sel.id);
-        return c ? this.portContent(sim, c.a, base, true) : null;
-      }
       case 'service':
         return this.serviceContent(sim, base);
       default:
@@ -437,7 +426,7 @@ export class InfoPanel {
     if (!sim.isMainLine(d.id)) {
       fixed += `<div class="actions">
         <button type="button" data-act="maint" data-id="${d.id}" data-on="${d.down ? '0' : '1'}">${d.down ? 'メンテナンスから戻す' : 'メンテナンスで止める'}</button>
-        <button type="button" class="danger" data-act="sell" data-id="${d.id}">売却する(+${money(Math.floor(d.paid * SELL_REFUND_RATE))})</button>
+        <button type="button" class="danger" data-act="sell" data-id="${d.id}">売却する(+${money(sim.sellValue(d.id))})</button>
       </div>`;
     }
 
@@ -466,7 +455,7 @@ export class InfoPanel {
       place.push([
         '冗長化(HA)',
         peer === undefined
-          ? '<span class="muted">なし(HA ポートを別の LB の HA ポートと直結すると冗長化)</span>'
+          ? '<span class="muted">なし(LB をもう 1 台置くと、自動で HA のペアになる)</span>'
           : `${f.devices.get(peer)?.name} とペア・${gr!.active === d.id ? '<span class="ok">アクティブ</span>' : gr!.active === null ? '<span class="bad">両方停止</span>' : 'スタンバイ'}`,
       ]);
     }
@@ -492,17 +481,20 @@ export class InfoPanel {
       loadRows.push(['通信量', gbps(l.gbps)]);
     }
 
-    const ports = portsOf(d);
+    // ネットワーク: 自動配線でつながった先ごとに、束ねた速度と使用率
     const links: [string, string][] = [];
-    ports.forEach((p, i) => {
-      const c = f.cableAt({ device: d.id, port: i });
-      if (!c) return;
-      const other = f.otherEnd(c, d.id);
-      const rho = sim.flow.cableRho.get(c.id) ?? 0;
-      links.push([`${p.label} ${p.number}`, `→ ${f.portName(other)}(${load(rho)})`]);
-    });
-    const used = links.length;
-    const portSummary: [string, string][] = [['使用中', `${used} / ${ports.length}`]];
+    for (const l of sim.flow.links) {
+      if (l.a !== d.id && l.b !== d.id) continue;
+      const other = f.devices.get(l.a === d.id ? l.b : l.a);
+      const n = l.cables.length;
+      const rho = l.capacityGbps > 0 ? Math.max(l.ab, l.ba) / l.capacityGbps : 0;
+      links.push([`→ ${other?.name ?? '?'}`, `${gbps(l.capacityGbps / n)}${n > 1 ? `×${n}` : ''} ${load(rho)}`]);
+    }
+    const why = f.unwired.get(d.id);
+    if (why) links.push(['<span class="bad">未接続</span>', why]);
+    const ports = portsOf(d).filter((p) => p.label !== 'HA');
+    const usedPorts = ports.filter((p) => f.cableAt({ device: d.id, port: p.index })).length;
+    links.push(['ポート', `${usedPorts} / ${ports.length} 使用`]);
 
     return {
       key: `dev${d.id}@${base}`,
@@ -513,7 +505,7 @@ export class InfoPanel {
       live:
         section('機器', rows(place)) +
         section('負荷', rows(loadRows)) +
-        section('ポート', rows([...portSummary, ...links.slice(0, 16)]) + (links.length > 16 ? `<div class="muted small">ほか ${links.length - 16} 本</div>` : '')),
+        section('ネットワーク(自動配線)', rows(links.slice(0, 20)) + (links.length > 20 ? `<div class="muted small">ほか ${links.length - 20} 件</div>` : '')),
     };
   }
 
@@ -677,45 +669,11 @@ export class InfoPanel {
       subtitle: rented ? '借りています' : '空き区画',
       desc: rented
         ? ''
-        : `データセンターの区画を借りてラックを置きます。42U・電力 ${sim.rackPowerW}W。ラック間はケーブルトレイを通して配線します(長くなるぶん高い)。`,
+        : `データセンターの区画を借りてラックを置きます。42U・電力 ${sim.rackPowerW}W。置いたサーバは同じラックのスイッチに自動でつながるので、新しいラックにはまずスイッチ(ToR)を置きます。`,
       fixed: rented
         ? ''
         : `<div class="actions"><button type="button" class="primary" data-act="rent" data-slot="${slot}">借りる(${money(sim.rackPrice())}、賃料 ${rate(rent)})</button></div>`,
       live: '',
-    };
-  }
-
-  private portContent(sim: Simulation, ref: PortRef, base: string, fromCable = false): Content | null {
-    const f = sim.facility;
-    const d = f.devices.get(ref.device);
-    const p = f.portDef(ref);
-    if (!d || !p) return null;
-    const c = f.cableAt(ref);
-    const info: [string, string][] = [['ポート', `${p.label}(${p.media === 'sfp' ? 'SFP' : 'RJ45'})`]];
-    let fixed = `<div class="actions"><button type="button" data-act="device" data-id="${d.id}">${d.name} の詳細</button>`;
-    if (c) {
-      const other = f.otherEnd(c, ref.device);
-      const po = f.portDef(other)!;
-      const speed = Math.min(p.speedGbps, po.speedGbps);
-      const link = sim.flow.links.find((l) => l.cables.includes(c.id));
-      const rho = sim.flow.cableRho.get(c.id) ?? 0;
-      info.push(['つながっている先', f.portName(other)]);
-      info.push(['ケーブル', `${c.fiber ? '光ファイバ' : 'LAN ケーブル'} ${c.meters}m(${money(c.paid)})`]);
-      info.push(['リンク速度', gbps(speed) + (link && link.cables.length > 1 ? `(${link.cables.length} 本束ねて ${gbps(link.capacityGbps)})` : '')]);
-      if (link) {
-        const [ab, ba] = link.a === ref.device ? [link.ab, link.ba] : [link.ba, link.ab];
-        info.push(['使用率', `${load(rho)}(送信 ${gbps(ab / link.cables.length)} / 受信 ${gbps(ba / link.cables.length)})`]);
-      }
-      fixed += `<button type="button" class="danger" data-act="unplug" data-id="${c.id}">ケーブルを抜く</button>`;
-    }
-    fixed += '</div>';
-    return {
-      key: `port${ref.device}:${ref.port}@${base}`,
-      title: fromCable && c ? 'ケーブル' : f.portName(ref),
-      subtitle: fromCable && c ? `${f.portName(c.a)} ⇄ ${f.portName(c.b)}` : MODEL_BY_ID[d.model].name,
-      desc: c ? '' : '空いています。背面でここから別のポートへドラッグすると配線できます。',
-      fixed,
-      live: rows(info),
     };
   }
 

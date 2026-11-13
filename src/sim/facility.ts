@@ -1,8 +1,9 @@
 /**
- * 物理層: 列・ラック・機器・ポート・ケーブル。お金や電力契約は扱わず、置けるか・つなげるかだけを判断する。
+ * 物理層: 列・ラック・機器・ポート・ケーブル。お金や電力契約は扱わず、置けるかだけを判断する。ケーブルは自動で引く(wiring.ts)。
  */
 import { MODEL_BY_ID, START_PARTS, isServerModel, portsOf, specOf, type PortDef } from './catalog';
-import { CABLE, RACK, ROW, VIRT } from './config';
+import { RACK, ROW, VIRT } from './config';
+import { autoWire } from './wiring';
 import type { DiskKind, ModelId, PortRef, RoleKey, ServerParts, VmSize } from './types';
 
 export interface Rack {
@@ -51,15 +52,11 @@ export interface Vm {
   downUntil: number;
 }
 
+/** ケーブル。自動配線(wiring.ts)が引く */
 export interface Cable {
   readonly id: number;
   readonly a: PortRef;
   readonly b: PortRef;
-  /** 長さ(m)。機器を動かすと引き直した長さになる */
-  meters: number;
-  /** 光ファイバ(片方でも SFP ならファイバ扱い) */
-  readonly fiber: boolean;
-  readonly paid: number;
 }
 
 const portKey = (r: PortRef) => `${r.device}:${r.port}`;
@@ -81,6 +78,13 @@ export class Facility {
   readonly vms = new Map<number, Vm>();
   /** 配置・配線が変わるたびに増える。描画や経路の作り直しの判定に使う */
   version = 0;
+  /**
+   * 自動配線(wiring.ts)。機器の配置が変わるたびにケーブルを引き直す。
+   * false にすると connect / disconnect で手で組める(流量モデルのテスト用)
+   */
+  autoWire = true;
+  /** 自動配線でつながらなかった機器と、その理由 */
+  unwired = new Map<number, string>();
   private readonly portToCable = new Map<string, number>();
   private nextDeviceId = 1;
   private nextCableId = 1;
@@ -166,6 +170,7 @@ export class Facility {
     const device: Device = { id, model, slot, u, parts, roles: [], hv: false, bgp: false, k8s: false, down: false, failedUntil: 0, paid, name: opts.name ?? this.newName(model) };
     this.devices.set(id, device);
     this.version++;
+    this.rewire();
     return device;
   }
 
@@ -174,9 +179,8 @@ export class Facility {
     if (!d) return;
     d.slot = slot;
     d.u = u;
-    // つながっているケーブルは引き直した長さにする
-    for (const c of this.cablesOf(id)) c.meters = this.cableLength(c.a, c.b);
     this.version++;
+    this.rewire();
   }
 
   /** 機器を外す。つながっていたケーブルも外し、外したケーブルを返す */
@@ -185,6 +189,7 @@ export class Facility {
     for (const c of removed) this.disconnect(c.id);
     this.devices.delete(id);
     this.version++;
+    this.rewire();
     return removed;
   }
 
@@ -209,6 +214,7 @@ export class Facility {
     if (!d || !d.parts) return;
     d.parts = parts;
     this.version++;
+    this.rewire();
   }
 
   setK8s(id: number, on: boolean): void {
@@ -331,6 +337,18 @@ export class Facility {
 
   // ---------------------------------------------------------------- ポートとケーブル
 
+  /** 自動配線なら引き直す */
+  rewire(): void {
+    if (this.autoWire) this.unwired = autoWire(this);
+  }
+
+  clearCables(): void {
+    this.cables.clear();
+    this.portToCable.clear();
+    this.nextCableId = 1;
+    this.version++;
+  }
+
   portDef(ref: PortRef): PortDef | undefined {
     const d = this.devices.get(ref.device);
     return d ? portsOf(d)[ref.port] : undefined;
@@ -360,10 +378,9 @@ export class Facility {
     return null;
   }
 
-  connect(a: PortRef, b: PortRef, paid: number, id?: number): Cable {
-    const cid = id ?? this.nextCableId;
-    this.nextCableId = Math.max(this.nextCableId, cid + 1);
-    const cable: Cable = { id: cid, a, b, meters: this.cableLength(a, b), fiber: this.isFiber(a, b), paid };
+  connect(a: PortRef, b: PortRef): Cable {
+    const cid = this.nextCableId++;
+    const cable: Cable = { id: cid, a, b };
     this.cables.set(cid, cable);
     this.portToCable.set(portKey(a), cid);
     this.portToCable.set(portKey(b), cid);
@@ -381,22 +398,6 @@ export class Facility {
     return c;
   }
 
-  /** 片方でも SFP なら光ファイバ(トランシーバ込み) */
-  isFiber(a: PortRef, b: PortRef): boolean {
-    return this.portDef(a)?.media === 'sfp' || this.portDef(b)?.media === 'sfp';
-  }
-
-  /** ポート間に引くケーブルの長さ(m)。ラック間はケーブルトレイを通る */
-  cableLength(a: PortRef, b: PortRef): number {
-    const da = this.devices.get(a.device);
-    const db = this.devices.get(b.device);
-    if (!da || !db) return 0;
-    if (da.slot === db.slot) return round1(CABLE.sameRackBaseM + Math.abs(da.u - db.u) * CABLE.perUnitM);
-    // ラックの上まで上がる分と下りる分も入れる
-    const up = (RACK.units - da.u + RACK.units - db.u) * CABLE.perUnitM;
-    return round1(CABLE.crossRackBaseM + up + Math.abs(da.slot - db.slot) * CABLE.perRackM);
-  }
-
   /** 「sw01 ポート 3」のような呼び名 */
   portName(ref: PortRef): string {
     const d = this.devices.get(ref.device);
@@ -406,5 +407,3 @@ export class Facility {
     return groups > 1 ? `${d.name} ${p.label} ${p.number}` : `${d.name} ポート ${p.number}`;
   }
 }
-
-const round1 = (v: number) => Math.round(v * 10) / 10;

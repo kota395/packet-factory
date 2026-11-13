@@ -8,7 +8,6 @@
  *    (サーバの価格 = シャーシ + パーツ。パーツを替えると、新しいパーツの価格から外したパーツの下取りを引いた額)
  *  - RACK_PRICE …… ラック区画を借りる初期費用(2 本目から)
  *  - UPKEEP …… 維持費($/秒)。ラックの賃料は電力契約のレベルで、回線は契約速度で変わる
- *  - CABLE_PRICES …… ケーブルの値段(本体 + 1m あたり)
  *  - UNLOCK_PRICES / UPGRADE_PRICES …… 投資の価格(新しいサービスを始める価格も UNLOCK_PRICES)
  *  - CAMPAIGN_PRICE …… ショッピングのキャンペーンの価格(ユーザー数で変わる)
  *  - LINE_PRICE …… 回線を増やす工事費(維持費は UPKEEP.uplinkByLevel が回線の本数ぶん)
@@ -113,12 +112,6 @@ export const UPKEEP = {
   perKw: 0.1,
 } as const;
 
-/** ケーブル: 本体(コネクタやトランシーバ込み)+ 長さ 1m あたり */
-export const CABLE_PRICES = {
-  copper: { base: 2, perM: 0.4 },
-  fiber: { base: 60, perM: 1 },
-} as const;
-
 export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   // 事業
   images: 2500,
@@ -188,9 +181,4 @@ export function modelPrice(id: ModelId, owned: number): number {
   if (id === 'handoff') return growingPrice(LINE_PRICE, Math.max(0, owned - 1));
   if (id === 'srv-1u' || id === 'srv-2u') return Math.round(CHASSIS_PRICES[id] * PRICE_SCALE);
   return growingPrice(MODEL_PRICES[id], owned);
-}
-
-export function cablePrice(fiber: boolean, meters: number): number {
-  const p = fiber ? CABLE_PRICES.fiber : CABLE_PRICES.copper;
-  return Math.round((p.base + p.perM * meters) * PRICE_SCALE);
 }

@@ -172,8 +172,6 @@ export interface FlowResult {
   readonly analytics: AnalyticsFlow;
   readonly devices: Map<number, DeviceLoad>;
   readonly links: LinkLoad[];
-  /** ケーブルごとの使用率 */
-  readonly cableRho: Map<number, number>;
   /** 役割を動かしているノード(物理サーバと VM)と、その負荷 */
   readonly nodes: Map<number, ComputeNode>;
   readonly nodeLoads: Map<number, NodeLoad>;
@@ -1209,8 +1207,6 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   const latencyMs = totalPv > 0 ? latPv / totalPv : avg(plans.map((p) => services[p.svc.id]!.latencyMs));
 
   // ---- 表示用: ケーブルごとの使用率と、一番詰まっている所
-  const cableRho = new Map<number, number>();
-  for (const l of g.links) for (const c of l.cables) cableRho.set(c, linkRho(l));
   let bottleneck: Bottleneck | null = null;
   const consider = (label: string, rho: number) => {
     if (rho > 0 && (!bottleneck || rho > bottleneck.rho)) bottleneck = { label, rho };
@@ -1235,7 +1231,6 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     analytics,
     devices,
     links: g.links,
-    cableRho,
     nodes,
     nodeLoads: loads,
     problems,

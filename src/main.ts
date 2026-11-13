@@ -1,5 +1,5 @@
 import './style.css';
-import { RowRenderer, type Face } from './render/row';
+import { RowRenderer } from './render/row';
 import { OFFLINE } from './sim/config';
 import {
   createSave,
@@ -26,7 +26,7 @@ for (const type of ['gesturestart', 'gesturechange']) {
   document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
 }
 
-/** v3 = ラックと配線の版。ノード図の版(v2)のセーブは引き継がない */
+/** v3 = ラックの版(鍵の名前。中身の版は SaveData.v)。ノード図の版(v2)のセーブは引き継がない */
 const SAVE_KEY = 'packet-factory:save:v3';
 const AUTOSAVE_MS = 5000;
 const SPEED_KEY = 'packet-factory:speed';
@@ -52,7 +52,6 @@ const ui = {
 
 const state = {
   sim: newGame(),
-  face: 'front' as Face,
   selected: null as Selection | null,
   speed: 1,
   lastChurnWarn: 0,
@@ -98,14 +97,13 @@ const tutorial = new Tutorial(ui.board, (skipped) => {
   // スキップしたら、チュートリアルで作るものが最初からある状態にする
   if (skipped) {
     switchTo(newGame());
-    toast('サーバと配線が済んだ状態から始めます');
+    toast('サーバを置いた状態から始めます');
   }
   state.highlight = null;
   select(null);
-  setFace('front');
   setSpeed(1);
   saveGame();
-});
+}, () => refreshTutorial());
 
 // ------------------------------------------------------------------ 起動
 
@@ -117,18 +115,13 @@ renderer.onDeviceMove = (id, slot, u) => {
   if (!r.ok && r.message) toast(r.message);
   select({ kind: 'device', id });
 };
-renderer.onConnect = (a, b) => {
-  const r = state.sim.connect(a, b);
-  if (r.message) toast(r.message);
-  if (r.ok && r.id !== undefined) select({ kind: 'cable', id: r.id });
-  saveGame();
-};
 el('btn-zoom-in').addEventListener('click', () => renderer.zoomBy(1.25));
 el('btn-zoom-out').addEventListener('click', () => renderer.zoomBy(0.8));
 el('btn-fit').addEventListener('click', () => renderer.fit());
 bindControls();
 const restored = restoreGame();
-setFace('front');
+updateHint();
+updateToolbar();
 setSpeed(savedSpeed());
 if (restored && Tutorial.pending()) startTutorial(true);
 updateHud();
@@ -141,7 +134,7 @@ renderer.app.ticker.add((ticker) => {
   // チュートリアルの間は時間を止めておく
   if (state.speed > 0 && !tutorial.active) sim.step(Math.min(ticker.deltaMS, 100) * state.speed);
   const sel = state.selected;
-  renderer.draw(sim, { face: state.face, selected: sel && sel.kind !== 'service' ? sel : null, highlight: state.highlight });
+  renderer.draw(sim, { selected: sel && sel.kind !== 'service' ? sel : null, highlight: state.highlight });
 
   hudTimer += ticker.deltaMS;
   if (hudTimer >= 250) {
@@ -173,14 +166,13 @@ function select(t: Selection | null): void {
 }
 
 function refreshTutorial(): void {
-  state.highlight = tutorial.update({ sim: state.sim, selected: state.selected, face: state.face });
+  state.highlight = tutorial.update({ sim: state.sim, selected: state.selected });
 }
 
 /** チュートリアルを始める(resume なら前回の続きから) */
 function startTutorial(resume = false): void {
   if (!resume) switchTo(tutorialGame());
   tutorial.start(resume);
-  setFace('front');
   setSpeed(0);
   saveGame();
   refreshTutorial();
@@ -188,12 +180,10 @@ function startTutorial(resume = false): void {
 
 // ------------------------------------------------------------------ ツールバー
 
-type ToolId = Face | 'service' | 'cluster' | 'invest';
+type ToolId = 'service' | 'cluster' | 'invest';
 
 function buildToolbar(): void {
   const items: { id: ToolId; html: string }[] = [
-    { id: 'front', html: '<span>前面</span><small>設置・移動</small>' },
-    { id: 'back', html: '<span>背面</span><small>配線</small>' },
     { id: 'service', html: '<span>サービス</span><small>流れ・負荷</small>' },
     { id: 'cluster', html: '<span>クラスタ</span><small>VM・k8s</small>' },
     { id: 'invest', html: '投資<span class="badge" hidden></span>' },
@@ -219,27 +209,12 @@ function onTool(id: ToolId): void {
     cluster.toggle(false);
     invest.toggle();
     if (invest.isOpen) select(null);
-  } else if (id === 'service') {
-    invest.toggle(false);
-    cluster.toggle(false);
-    select(state.selected?.kind === 'service' ? null : { kind: 'service' });
   } else {
     invest.toggle(false);
     cluster.toggle(false);
-    setFace(id);
+    select(state.selected?.kind === 'service' ? null : { kind: 'service' });
   }
   updateToolbar();
-}
-
-function setFace(face: Face): void {
-  state.face = face;
-  // チュートリアルの配線では、詳細パネルがポートを隠さないよう閉じておく
-  if (tutorial.active && face === 'back' && state.selected?.kind === 'device') state.selected = null;
-  // 面が変わると、ポートやケーブルの選択は意味がなくなる
-  if (state.selected && (state.selected.kind === 'port' || state.selected.kind === 'cable') && face === 'front') select(null);
-  updateHint();
-  updateToolbar();
-  refreshTutorial();
 }
 
 function updateToolbar(): void {
@@ -250,9 +225,7 @@ function updateToolbar(): void {
         ? invest.isOpen
         : t === 'cluster'
           ? cluster.isOpen
-          : t === 'service'
-            ? state.selected?.kind === 'service'
-            : t === state.face;
+          : state.selected?.kind === 'service';
     b.classList.toggle('active', active);
     // クラスタは仮想化か Kubernetes を解放してから
     if (t === 'cluster') b.hidden = !cluster.available(state.sim);
@@ -262,10 +235,7 @@ function updateToolbar(): void {
 }
 
 function updateHint(): void {
-  ui.hint.textContent =
-    state.face === 'front'
-      ? '前面: 空いている U をタップして機器を設置、機器はドラッグで移動。点線の区画をタップしてラックを借りる。'
-      : '背面: ポートから別のポートへドラッグして配線。ケーブルやポートをタップすると詳細と「抜く」。';
+  ui.hint.textContent = '空いている U をタップして機器を設置、機器はドラッグで移動。配線は自動。点線の区画をタップしてラックを借りる。';
 }
 
 // ------------------------------------------------------------------ HUD・操作ボタン
@@ -350,7 +320,6 @@ function updateHud(): void {
   // 選んでいた機器が売却などで消えたら閉じる
   const sel = state.selected;
   if (sel?.kind === 'device' && !sim.facility.devices.has(sel.id)) state.selected = null;
-  if (sel?.kind === 'cable' && !sim.facility.cables.has(sel.id)) state.selected = null;
   if (sel?.kind === 'vm' && !sim.facility.vms.has(sel.id)) state.selected = null;
   info.update(state.selected);
   updateToolbar();
@@ -448,10 +417,10 @@ function showSaveMenu(): void {
 function showWelcome(): void {
   showModal(`
     <h2>packet-factory</h2>
-    <p class="note">コロケーションの 1 ラックから、ブログサービスのインフラを育てるゲームです。サーバを置き、役割を付け、配線し、詰まった所に手を打って、増えていくユーザーを捌きます。</p>
+    <p class="note">コロケーションの 1 ラックから、ブログサービスのインフラを育てるゲームです。サーバを置き、役割を付け、詰まった所に手を打って、増えていくユーザーを捌きます。</p>
     <ul class="howto">
-      <li><b>チュートリアル</b>: サーバを 2 台置いて、役割を付け、強化して、配線するまでを実際に操作しながら覚えます(数分)</li>
-      <li><b>スキップ</b>: チュートリアルで作るもの(web と db のサーバ、配線)が最初からある状態で始めます</li>
+      <li><b>チュートリアル</b>: サーバを 2 台置いて、役割を付け、強化するまでを実際に操作しながら覚えます(数分)</li>
+      <li><b>スキップ</b>: チュートリアルで作るもの(web と db のサーバ)が最初からある状態で始めます</li>
     </ul>
     <div class="actions">
       <button type="button" id="wel-skip">スキップ</button>

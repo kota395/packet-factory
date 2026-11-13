@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, portsOf, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
 import { ANALYTICS, BLOG_FEATURES, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
 import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
+import { lbGroups } from '../src/sim/flow';
 import { Simulation } from '../src/sim/simulation';
 import { forecastSeries, logistic, secondsUntil } from '../src/sim/forecast';
 import {
@@ -15,12 +16,21 @@ import {
   UNLOCK_PRICES,
   UPKEEP,
   CDN_PRICE_PER_GB,
-  cablePrice,
   serverPrice,
 } from '../src/sim/pricing';
-import type { RoleKey, ServiceId, UnlockId } from '../src/sim/types';
+import type { PortRef, RoleKey, ServiceId, UnlockId } from '../src/sim/types';
 
 const constant = (pv: number) => () => pv;
+
+/** 手で配線する(流量モデルを、決めた配線で確かめるテスト用。ゲームでは自動配線) */
+const wire = (s: Simulation, a: PortRef, b: PortRef) => {
+  const err = s.facility.connectError(a, b);
+  if (!err) {
+    s.facility.connect(a, b);
+    s.refreshFlow();
+  }
+  return { ok: !err, message: err ?? '' };
+};
 
 /** 機種固定だったころのサーバ名で、同じくらいの構成のサーバを買う */
 type Legacy = 'srv-1u-e' | 'srv-1u-d' | 'srv-2u-db' | 'srv-2u-hv';
@@ -36,6 +46,7 @@ const RICH = 1_000_000;
 function base(opts: { pv?: number; traffic?: Partial<Record<ServiceId, number>>; unlocks?: UnlockId[]; uplink?: number } = {}) {
   const s = new Simulation({
     startMoney: RICH,
+    manualWiring: true,
     traffic: opts.traffic
       ? Object.fromEntries(Object.entries(opts.traffic).map(([k, v]) => [k, constant(v)]))
       : constant(opts.pv ?? 10),
@@ -46,21 +57,21 @@ function base(opts: { pv?: number; traffic?: Partial<Record<ServiceId, number>>;
   f.rent(0);
   const isp = f.place('handoff', 0, RACK.units, 0);
   const sw = s.buyDevice('sw-24', 0, 40).id!;
-  expect(s.connect({ device: isp.id, port: 0 }, { device: sw, port: 0 }).ok).toBe(true);
+  expect(wire(s, { device: isp.id, port: 0 }, { device: sw, port: 0 }).ok).toBe(true);
   let nextPort = 1;
   /** サーバを買って役割を付け、ToR につなぐ */
   const server = (model: Legacy, u: number, roles: RoleKey[], slot = 0, toSw = sw) => {
     const r = buy(s, model, slot, u);
     expect(r.ok, r.message).toBe(true);
     for (const role of roles) expect(s.toggleRole(r.id!, role).ok).toBe(true);
-    if (toSw === sw) expect(s.connect({ device: r.id!, port: 0 }, { device: sw, port: nextPort++ }).ok).toBe(true);
+    if (toSw === sw) expect(wire(s, { device: r.id!, port: 0 }, { device: sw, port: nextPort++ }).ok).toBe(true);
     return r.id!;
   };
   /** LB アプライアンスを買って ToR につなぐ */
   const lb = (u: number) => {
     const r = s.buyDevice('lb-1u', 0, u);
     expect(r.ok, r.message).toBe(true);
-    expect(s.connect({ device: r.id!, port: 0 }, { device: sw, port: nextPort++ }).ok).toBe(true);
+    expect(wire(s, { device: r.id!, port: 0 }, { device: sw, port: nextPort++ }).ok).toBe(true);
     return r.id!;
   };
   return { s, f, isp: isp.id, sw, server, lb };
@@ -96,19 +107,69 @@ describe('物理層', () => {
     expect(s.buyServer('2u-ssd', 0, 1 + fits * 2).ok).toBe(true);
   });
 
-  it('ポートには 1 本だけ。同じラック内は銅線、SFP が絡むと光ファイバで、ラック間は長くて高い', () => {
-    const { s, f, sw } = base({ unlocks: ['tenGig', 'agg'] });
-    const a = buy(s, 'srv-1u-e', 0, 30).id!;
-    expect(s.connect({ device: a, port: 0 }, { device: sw, port: 0 }).ok).toBe(false); // 回線が使用中
-    const near = s.cableQuote({ device: a, port: 0 }, { device: sw, port: 5 });
-    expect(near.fiber).toBe(false);
-    s.facility.rent(3);
-    const agg = s.buyDevice('agg-10g', 3, 40).id!;
-    const far = s.cableQuote({ device: a, port: 1 }, { device: agg, port: 0 });
-    expect(far.fiber).toBe(true);
-    expect(far.meters).toBeGreaterThan(near.meters);
-    expect(far.price).toBe(cablePrice(true, far.meters));
-    expect(f.connectError({ device: a, port: 0 }, { device: a, port: 1 })).not.toBeNull();
+  it('自動配線: 置くだけで同じラックのスイッチにつながり、ポートが埋まるとつながらない', () => {
+    const s = new Simulation({ startMoney: RICH, traffic: constant(10), upgrades: { rackPower: 3 } });
+    const f = s.facility;
+    f.rent(0);
+    const isp = f.place('handoff', 0, RACK.units, 0).id;
+    const sw = s.buyDevice('sw-24', 0, 40).id!;
+    const peers = (id: number) => f.cablesOf(id).map((c) => f.otherEnd(c, id).device);
+    expect(peers(isp)).toEqual([sw]);
+    const a = s.buyServer('1u-small', 0, 30).id!;
+    s.toggleRole(a, 'blog:web');
+    s.toggleRole(a, 'blog:db');
+    // サーバは 2 本(束ねて 1 本のリンク)
+    expect(peers(a)).toEqual([sw, sw]);
+    expect(run(s, 1000).success).toBe(1);
+    // 24 ポート: 回線 1 + サーバ 2 本ずつ。12 台目は 1 本、13 台目はつながらない
+    const ids: number[] = [a];
+    for (let u = 1; u <= 12; u++) ids.push(s.buyServer('1u-small', 0, u).id!);
+    expect(peers(ids[11])).toHaveLength(1);
+    expect(peers(ids[12])).toHaveLength(0);
+    expect(f.unwired.has(ids[12])).toBe(true);
+    expect(run(s, 1000).problems.join()).toContain('つながっていません');
+    // 売るとポートが空いて、つながる
+    s.sellDevice(ids[1]);
+    expect(peers(ids[12]).length).toBeGreaterThan(0);
+  });
+
+  it('自動配線: ToR はコアへ、サーバは同じラックの ToR へ。ToR が 2 台なら分けてつなぎ、LB は 2 台で HA', () => {
+    const s = new Simulation({ startMoney: RICH, traffic: constant(10), unlocks: ['tenGig', 'agg', 'lb', 'bgp'], upgrades: { rackPower: 3, uplink: 2 } });
+    const f = s.facility;
+    f.rent(0);
+    f.rent(1);
+    const isp = f.place('handoff', 0, RACK.units, 0).id;
+    const sw1 = s.buyDevice('sw-24', 0, 40).id!;
+    const peers = (id: number) => f.cablesOf(id).map((c) => f.otherEnd(c, id).device).sort((x, y) => x - y);
+    // 10G のポートを持つスイッチを置くと、それがコアになる: 回線は 10G で受け、ほかのスイッチは 2 本ずつつなぐ
+    const t1 = s.buyDevice('sw-48', 1, 40).id!;
+    const t2 = s.buyDevice('sw-48', 1, 39).id!;
+    expect(peers(isp)).toEqual([t1]);
+    expect(f.portDef(f.otherEnd(f.cablesOf(isp)[0], isp))!.speedGbps).toBe(10);
+    expect(peers(sw1)).toEqual([t1, t1]);
+    expect(peers(t2).filter((x) => x === t1)).toHaveLength(2);
+    const srv = s.buyServer('2u-ssd', 1, 20).id!;
+    expect(peers(srv)).toEqual([t1, t2]);
+    // 集約スイッチを置くと、コアが替わる: 回線も ToR も集約スイッチへ(10G のポートで)
+    const agg = s.buyDevice('agg-10g', 0, 38).id!;
+    expect(peers(isp)).toEqual([agg]);
+    expect(peers(t1).filter((x) => x === agg)).toHaveLength(2);
+    expect(peers(sw1).filter((x) => x === agg)).toHaveLength(2);
+    const up = f.cablesOf(t1).find((c) => f.otherEnd(c, t1).device === agg)!;
+    expect(f.portDef(up.a)!.speedGbps).toBe(10);
+    expect(f.portDef(up.b)!.speedGbps).toBe(10);
+    // BGP を使うサーバは 2 台の ToR に分かれて流れ、片方を止めても続く
+    s.toggleRole(srv, 'blog:web');
+    s.toggleRole(srv, 'blog:db');
+    s.setBgp(srv, true);
+    expect(run(s, 1000).success).toBe(1);
+    s.setMaintenance(t1, true);
+    expect(run(s, 1000).success).toBe(1);
+    // LB は置いた順に 2 台ずつ HA
+    const l1 = s.buyDevice('lb-1u', 1, 30).id!;
+    expect(lbGroups(f, new Set())[0].members).toEqual([l1]);
+    const l2 = s.buyDevice('lb-1u', 1, 31).id!;
+    expect(lbGroups(f, new Set())[0].members).toEqual([l1, l2]);
   });
 
   it('機器を売ると半額が戻り、つながっていたケーブルも外れる', () => {
@@ -160,8 +221,8 @@ describe('流量モデル', () => {
     s.toggleRole(web, 'blog:web');
     s.toggleRole(db, 'blog:db');
     const sw = [...s.facility.devices.values()].find((d) => d.model === 'sw-24')!.id;
-    s.connect({ device: web, port: 0 }, { device: sw, port: 1 });
-    s.connect({ device: db, port: 0 }, { device: sw, port: 2 });
+    wire(s, { device: web, port: 0 }, { device: sw, port: 1 });
+    wire(s, { device: db, port: 0 }, { device: sw, port: 2 });
     let flow = run(s);
     expect(flow.devices.get(db)!.io).toBeGreaterThan(1);
     expect(flow.bottleneck!.label).toContain('ディスク IO');
@@ -233,7 +294,7 @@ describe('流量モデル', () => {
     expect(run(s, 1000).success).toBeCloseTo(0.5, 6);
     s.setMaintenance(l1, false);
     const ha = portsOf(s.facility.devices.get(l1)!).findIndex((p) => p.label === 'HA');
-    expect(s.connect({ device: l1, port: ha }, { device: l2, port: ha }).ok).toBe(true);
+    expect(wire(s, { device: l1, port: ha }, { device: l2, port: ha }).ok).toBe(true);
     // ペアはアクティブの 1 台だけが受ける
     let flow = run(s, 1000);
     expect(flow.services.blog!.entries).toEqual([l1]);
@@ -276,13 +337,13 @@ describe('流量モデル', () => {
     s.facility.rent(1);
     const sw2 = s.buyDevice('sw-24', 1, 40).id!;
     const db = server('srv-2u-db', 20, ['blog:db'], 1, -1);
-    s.connect({ device: db, port: 0 }, { device: sw2, port: 1 });
+    wire(s, { device: db, port: 0 }, { device: sw2, port: 1 });
     for (let i = 0; i < 3; i++) server('srv-1u-d', 30 + i, ['blog:web']);
-    s.connect({ device: sw, port: 20 }, { device: sw2, port: 20 });
+    wire(s, { device: sw, port: 20 }, { device: sw2, port: 20 });
     const one = run(s);
     const uplink = one.links.find((l) => (l.a === sw && l.b === sw2) || (l.a === sw2 && l.b === sw))!;
     expect(uplink.capacityGbps).toBe(1);
-    s.connect({ device: sw, port: 21 }, { device: sw2, port: 21 });
+    wire(s, { device: sw, port: 21 }, { device: sw2, port: 21 });
     const two = run(s);
     const lag = two.links.find((l) => (l.a === sw && l.b === sw2) || (l.a === sw2 && l.b === sw))!;
     expect(lag.capacityGbps).toBe(2);
@@ -296,8 +357,8 @@ describe('流量モデル', () => {
     const b = buy(s, 'srv-1u-e', 0, 31).id!;
     s.toggleRole(b, 'blog:web');
     s.toggleRole(b, 'blog:db');
-    s.connect({ device: a, port: 0 }, { device: sw, port: 1 });
-    s.connect({ device: a, port: 1 }, { device: b, port: 0 });
+    wire(s, { device: a, port: 0 }, { device: sw, port: 1 });
+    wire(s, { device: a, port: 1 }, { device: b, port: 0 });
     expect(isp).toBeGreaterThan(0);
     expect(run(s).success).toBe(0);
   });
@@ -373,7 +434,7 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     expect(s.flow.success).toBe(1);
     // 共有ストレージにディスクを置くと、止めずに移せる。IO はストレージへ
     const nas = s.buyDevice('nas-2u', 0, 10).id!;
-    s.connect({ device: nas, port: 0 }, { device: sw, port: 10 });
+    wire(s, { device: nas, port: 0 }, { device: sw, port: 10 });
     expect(s.setVmDisk(vm, 'shared').ok).toBe(true);
     expect(s.vmMoveInfo(vm, h1).downtimeMs).toBe(0);
     s.moveVm(vm, h1);
@@ -395,8 +456,8 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     // ストレージ専用の 10G スイッチに、NAS とホストの 10G NIC(ポート 2)をつなぐ
     const ssw = s.buyDevice('sw-48', 0, 15).id!;
     const nas = s.buyDevice('nas-2u', 0, 10).id!;
-    s.connect({ device: nas, port: 0 }, { device: ssw, port: 48 });
-    s.connect({ device: h, port: 2 }, { device: ssw, port: 49 });
+    wire(s, { device: nas, port: 0 }, { device: ssw, port: 48 });
+    wire(s, { device: h, port: 2 }, { device: ssw, port: 49 });
     const flow = run(s);
     expect(flow.success).toBe(1);
     // サービス側の ToR の通信量は変わらず、ストレージの IO はストレージ用スイッチだけを通る
@@ -434,21 +495,21 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
 describe('BGP による冗長化', () => {
   /** 回線 → コア → ToR 2 台 → サーバ 1 台(両方の ToR につなぐ) */
   function dual(unlocks: UnlockId[] = []) {
-    const s = new Simulation({ startMoney: RICH, traffic: constant(50), unlocks, upgrades: { uplink: 2, rackPower: 3 } });
+    const s = new Simulation({ startMoney: RICH, manualWiring: true, traffic: constant(50), unlocks, upgrades: { uplink: 2, rackPower: 3 } });
     const f = s.facility;
     f.rent(0);
     const isp = f.place('handoff', 0, RACK.units, 0).id;
     const core = s.buyDevice('sw-24', 0, 40).id!;
     const t1 = s.buyDevice('sw-24', 0, 38).id!;
     const t2 = s.buyDevice('sw-24', 0, 37).id!;
-    s.connect({ device: isp, port: 0 }, { device: core, port: 0 });
-    s.connect({ device: core, port: 1 }, { device: t1, port: 0 });
-    s.connect({ device: core, port: 2 }, { device: t2, port: 0 });
+    wire(s, { device: isp, port: 0 }, { device: core, port: 0 });
+    wire(s, { device: core, port: 1 }, { device: t1, port: 0 });
+    wire(s, { device: core, port: 2 }, { device: t2, port: 0 });
     const srv = buy(s, 'srv-2u-db', 0, 20).id!;
     s.toggleRole(srv, 'blog:web');
     s.toggleRole(srv, 'blog:db');
-    s.connect({ device: srv, port: 0 }, { device: t1, port: 1 });
-    s.connect({ device: srv, port: 1 }, { device: t2, port: 1 });
+    wire(s, { device: srv, port: 0 }, { device: t1, port: 1 });
+    wire(s, { device: srv, port: 1 }, { device: t2, port: 1 });
     return { s, f, core, t1, t2, srv };
   }
 
@@ -775,7 +836,7 @@ describe('DB の分割・回線の多重化・CDN', () => {
     expect(s.buyDevice('handoff', 0, 38).ok).toBe(false);
     s.unlock('multihoming');
     const line2 = s.buyDevice('handoff', 0, 38).id!;
-    expect(s.connect({ device: line2, port: 0 }, { device: sw, port: 20 }).ok).toBe(true);
+    expect(wire(s, { device: line2, port: 0 }, { device: sw, port: 20 }).ok).toBe(true);
     const flow = run(s, 1000);
     const lines = [...s.facility.devices.values()].filter((d) => d.model === 'handoff');
     const [l1, l2] = lines.map((h) => flow.links.find((l) => l.a === h.id || l.b === h.id)!);
@@ -850,7 +911,7 @@ describe('分析基盤と GPU', () => {
     const w = s.buyServer('1u-compute', 0, 30).id!;
     s.toggleRole(w, 'video:worker');
     const sw = [...s.facility.devices.values()].find((d) => d.model === 'sw-24')!.id;
-    s.connect({ device: w, port: 0 }, { device: sw, port: 10 });
+    wire(s, { device: w, port: 0 }, { device: sw, port: 10 });
     const cpuOnly = run(s, 1000);
     const cpuBefore = cpuOnly.nodeLoads.get(w)!.cpu;
     expect(cpuOnly.nodeLoads.get(w)!.gpu).toBeUndefined();
@@ -898,14 +959,13 @@ describe('チュートリアル', () => {
   it('チュートリアルで作る構成は、スキップしたときの最初の構成と同じになる', () => {
     const s = tutorialGame();
     const f = s.facility;
-    const sw = [...f.devices.values()].find((d) => d.model === 'sw-24')!.id;
     const web = s.buyServer('1u-small', 0, 38).id!;
     expect(s.toggleRole(web, 'blog:web').ok).toBe(true);
     const db = s.buyServer('2u-hdd-small', 0, 35).id!;
     expect(s.toggleRole(db, 'blog:db').ok).toBe(true);
     expect(s.changeParts(db, { kind: 'mem', dir: 1 }).ok).toBe(true);
-    expect(s.connect({ device: web, port: 0 }, { device: sw, port: 1 }).ok).toBe(true);
-    expect(s.connect({ device: db, port: 0 }, { device: sw, port: 2 }).ok).toBe(true);
+    // 配線は自動
+    expect(f.cablesOf(web).length && f.cablesOf(db).length).toBeTruthy();
     const skip = newGame();
     const servers = (x: Simulation) =>
       [...x.facility.devices.values()].filter((d) => d.parts).map((d) => [d.model, d.parts, d.roles]);
@@ -956,8 +1016,8 @@ describe('経済', () => {
     const u0 = s.users;
     s.step(30_000);
     expect(s.users).toBeGreaterThan(u0);
-    // ケーブルを抜くと全部エラーになり、離脱する
-    for (const c of [...s.facility.cables.values()]) s.disconnect(c.id);
+    // スイッチを止めると全部エラーになり、離脱する
+    s.setMaintenance([...s.facility.devices.values()].find((d) => d.model === 'sw-24')!.id, true);
     const u1 = s.users;
     s.step(30_000);
     expect(s.users).toBeLessThan(u1);
@@ -982,7 +1042,8 @@ describe('セーブ', () => {
     const save = createSave(newGame(), 1000);
     expect(parseSave({ ...save, v: 2 })).toBeNull();
     expect(parseSave({ ...save, devices: [[1, 'nope', 0, 1, [], 0, 'x']] })).toBeNull();
-    expect(parseSave({ ...save, cables: [[1, 1, 99, 2, 0, 0]] })).toBeNull();
+    // 昔のセーブにあるケーブルは読み飛ばす(自動配線で引き直す)
+    expect(parseSave({ ...save, cables: [[1, 1, 99, 2, 0, 0]] })).toEqual(save);
     expect(decodeSave('not-base64!!')).toBeNull();
     expect(parseSave(JSON.parse(JSON.stringify(save)))).toEqual(save);
   });

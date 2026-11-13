@@ -1,7 +1,7 @@
 /**
  * ゲームの調整値。数値はここで変えれば全体に反映される。
  *  - 列とラック …… ROW / RACK / UPLINK_LEVELS_GBPS
- *  - ケーブルの長さ …… CABLE
+ *  - 自動配線で引く本数 …… WIRING
  *  - サービスの仕事量(1 ページビューあたり)…… WORK / SERVICES / BLOG_FEATURES / CAMPAIGN
  *  - ユーザーの増減 …… ユーザー / CHURN
  *  - 機器の性能 …… catalog.ts
@@ -26,16 +26,6 @@ export const RACK = {
 
 /** 回線契約の速度(Gbps)。レベル 0 が最初 */
 export const UPLINK_LEVELS_GBPS = [0.1, 1, 10] as const;
-
-// ---- ケーブル ---------------------------------------------------------
-export const CABLE = {
-  /** 同じラック内: 基本の長さ + 1U あたりの長さ(m) */
-  sameRackBaseM: 1,
-  perUnitM: 0.045,
-  /** ラック間: ケーブルトレイまで上がって下りる分 + ラック 1 本ぶん横に進むごとの長さ(m) */
-  crossRackBaseM: 4,
-  perRackM: 0.6,
-} as const;
 
 // ---- 時間 -------------------------------------------------------------
 /** 流量を計算し直す間隔(シミュレーション時間 ms) */
@@ -313,6 +303,16 @@ export const K8S = {
   scaleEveryMs: 5000,
   /** 1 回で減らす Pod の割合の上限(急に減らしすぎない) */
   scaleDownRate: 0.2,
+} as const;
+
+/** 自動配線で引く本数 */
+export const WIRING = {
+  /** ToR スイッチからコア(集約スイッチ)1 台あたりへのアップリンクの本数 */
+  uplinksPerCore: 2,
+  /** サーバ・LB アプライアンス・ストレージがスイッチへつなぐ本数(ポートの数まで) */
+  serverLinks: 2,
+  lbLinks: 4,
+  storageLinks: 4,
 } as const;
 
 export const NET = {

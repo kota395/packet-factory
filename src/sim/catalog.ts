@@ -11,7 +11,7 @@ export interface PortGroupDef {
   readonly count: number;
   readonly speedGbps: number;
   readonly media: Media;
-  /** 背面の表示や詳細で使う名前 */
+  /** 詳細で使う名前 */
   readonly label: string;
 }
 
@@ -109,7 +109,7 @@ export const MODELS: readonly ModelDef[] = [
     name: 'ロードバランサ(アプライアンス)',
     short: 'LB',
     description:
-      'L4/L7 のロードバランサ専用機。サービスごとの VIP でリクエストを受けて、後ろの web(や media)に振り分ける。2 台の HA ポート同士をケーブルで直結すると、アクティブ/スタンバイで冗長化される(片方が止まっても、もう片方が引き継ぐ)。',
+      'L4/L7 のロードバランサ専用機。サービスごとの VIP でリクエストを受けて、後ろの web(や media)に振り分ける。2 台置くと自動で HA のペアになり、アクティブ/スタンバイで冗長化される(片方が止まっても、もう片方が引き継ぐ)。',
     u: 1,
     powerW: 120,
     ports: [rj45(4), { count: 1, speedGbps: 1, media: 'rj45', label: 'HA' }],

@@ -1,27 +1,18 @@
 import { Application, Container, Graphics, Text, type FederatedPointerEvent } from 'pixi.js';
-import { DRIVES, MODEL_BY_ID, portsOf } from '../sim/catalog';
+import { DRIVES, MODEL_BY_ID } from '../sim/catalog';
 import { lbGroups } from '../sim/flow';
 import { RACK, ROW } from '../sim/config';
 import type { Device } from '../sim/facility';
 import type { Simulation } from '../sim/simulation';
-import type { PortRef } from '../sim/types';
 import { compact, money, rolesText } from '../ui/format';
 import {
-  PORT,
   RACK_W,
   RAIL,
   ROW_H,
   TOP,
   U_H,
-  cableRoute,
   deviceRect,
-  distanceToRoute,
-  pointAlong,
-  portAt,
-  portCenter,
-  portCenters,
   rackRect,
-  routeBetween,
   slotAt,
   unitAt,
   unitTop,
@@ -29,20 +20,15 @@ import {
   type Rect,
 } from './geometry';
 
-export type Face = 'front' | 'back';
-
 /** タップされたもの */
 export type Target =
   | { kind: 'device'; id: number }
   | { kind: 'vm'; id: number }
   | { kind: 'unit'; slot: number; u: number }
   | { kind: 'slot'; slot: number }
-  | { kind: 'port'; ref: PortRef }
-  | { kind: 'cable'; id: number }
   | { kind: 'none' };
 
 export interface ViewState {
-  face: Face;
   selected: Target | null;
   /** チュートリアルで目立たせる機器と U(点滅する枠) */
   highlight?: { devices?: number[]; units?: { slot: number; u: number }[] } | null;
@@ -63,13 +49,6 @@ const COLORS = {
   bad: 0xff4d4f,
   accent: 0x4aa3ff,
   select: 0xffffff,
-  copper: 0x8fa3b8,
-  fiber: 0x48cae4,
-  portRj45: 0x56677a,
-  portSfp: 0xb08d57,
-  portUsed: 0xd8e2ec,
-  back: 0x1a222c,
-  wire: 0xffd166,
 } as const;
 
 const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
@@ -89,22 +68,19 @@ type Gesture =
       world: Point;
       moveId: number | null;
       grabU: number;
-      wireFrom: PortRef | null;
     }
   | { kind: 'move'; id: number; grabU: number; x: number; y: number }
-  | { kind: 'wire'; from: PortRef; x: number; y: number }
   | { kind: 'pan'; lastX: number; lastY: number }
   | { kind: 'pinch'; dist: number; mid: Point };
 
 /**
- * 列の立面図。前面では機器の設置と移動、背面ではポート同士の配線をする。
+ * 列の立面図(ラックの前面)。機器の設置と移動をする。配線は自動(sim/wiring.ts)なので描かない。
  * カメラ(拡大率と位置)で、列全体からラックの U まで見る範囲を変えられる。
  */
 export class RowRenderer {
   readonly app = new Application();
   onTap: ((t: Target) => void) | null = null;
   onDeviceMove: ((id: number, slot: number, u: number) => void) | null = null;
-  onConnect: ((a: PortRef, b: PortRef) => void) | null = null;
 
   private readonly world = new Container();
   private readonly staticG = new Graphics();
@@ -120,7 +96,6 @@ export class RowRenderer {
   private readonly rackTexts = new Map<number, Text>();
 
   private sim: Simulation | null = null;
-  private view: ViewState = { face: 'front', selected: null };
   private builtKey = '';
   private fitted: Simulation | null = null;
   private zoom = 1;
@@ -174,11 +149,10 @@ export class RowRenderer {
 
   draw(sim: Simulation, view: ViewState): void {
     this.sim = sim;
-    this.view = view;
     const { width, height } = this.app.screen;
     if (width !== this.lastW || height !== this.lastH) this.relayout(width, height);
-    const key = `${sim.layoutVersion}|${view.face}|${sim.rackPowerW}|${sim.facility.racks.size}|${sim.podVersion}`;
-    if (key !== this.builtKey || this.labels.children.length === 0) this.rebuild(sim, view.face, key);
+    const key = `${sim.layoutVersion}|${sim.rackPowerW}|${sim.facility.racks.size}|${sim.podVersion}`;
+    if (key !== this.builtKey || this.labels.children.length === 0) this.rebuild(sim, key);
     if (this.fitted !== sim) this.fit();
 
     const now = performance.now();
@@ -187,7 +161,7 @@ export class RowRenderer {
       this.lastStatsAt = now;
       this.updateRackTexts(sim);
     }
-    this.drawDynamic(sim, view, now);
+    this.drawDynamic(sim);
     this.drawOverlay(sim, view);
   }
 
@@ -308,19 +282,14 @@ export class RowRenderer {
     const f = this.sim?.facility;
     let moveId: number | null = null;
     let grabU = 0;
-    let wireFrom: PortRef | null = null;
     if (f) {
-      if (this.view.face === 'back') {
-        wireFrom = portAt(f, p, this.portRadius);
-      } else {
-        const d = this.deviceAtPoint(p);
-        if (d && !this.sim!.isMainLine(d.id)) {
-          moveId = d.id;
-          grabU = (unitAt(p.y) ?? d.u) - d.u;
-        }
+      const d = this.deviceAtPoint(p);
+      if (d && !this.sim!.isMainLine(d.id)) {
+        moveId = d.id;
+        grabU = (unitAt(p.y) ?? d.u) - d.u;
       }
     }
-    this.gesture = { kind: 'pending', sx: e.global.x, sy: e.global.y, world: p, moveId, grabU, wireFrom };
+    this.gesture = { kind: 'pending', sx: e.global.x, sy: e.global.y, world: p, moveId, grabU };
   }
 
   private handleMove(e: FederatedPointerEvent): void {
@@ -341,8 +310,7 @@ export class RowRenderer {
     }
     if (g.kind === 'pending') {
       if (Math.hypot(e.global.x - g.sx, e.global.y - g.sy) < DRAG_THRESHOLD) return;
-      if (g.wireFrom) this.gesture = { kind: 'wire', from: g.wireFrom, x: g.world.x, y: g.world.y };
-      else if (g.moveId !== null) this.gesture = { kind: 'move', id: g.moveId, grabU: g.grabU, x: g.world.x, y: g.world.y };
+      if (g.moveId !== null) this.gesture = { kind: 'move', id: g.moveId, grabU: g.grabU, x: g.world.x, y: g.world.y };
       else this.gesture = { kind: 'pan', lastX: g.sx, lastY: g.sy };
     }
     const cur = this.gesture!;
@@ -351,7 +319,7 @@ export class RowRenderer {
       this.clampPan();
       cur.lastX = e.global.x;
       cur.lastY = e.global.y;
-    } else if (cur.kind === 'move' || cur.kind === 'wire') {
+    } else if (cur.kind === 'move') {
       const p = this.world.toLocal(e.global);
       cur.x = p.x;
       cur.y = p.y;
@@ -372,9 +340,6 @@ export class RowRenderer {
     if (g.kind === 'move') {
       const drop = this.dropTarget(g);
       if (drop) this.onDeviceMove?.(g.id, drop.slot, drop.u);
-    } else if (g.kind === 'wire') {
-      const to = portAt(this.sim.facility, g, this.portRadius);
-      if (to && (to.device !== g.from.device || to.port !== g.from.port)) this.onConnect?.(g.from, to);
     } else if (g.kind === 'pending') {
       this.onTap?.(this.targetAt(g.world));
     }
@@ -384,11 +349,6 @@ export class RowRenderer {
     const [a, b] = [...this.pointers.values()];
     if (!a || !b) return { kind: 'pinch', dist: 0, mid: { x: 0, y: 0 } };
     return { kind: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y), mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
-  }
-
-  /** 縮小していても指で当てられるよう、画面上で最低 10px の範囲で探す */
-  private get portRadius(): number {
-    return Math.max(PORT, 10 / this.zoom);
   }
 
   private deviceAtPoint(p: Point): Device | undefined {
@@ -401,19 +361,6 @@ export class RowRenderer {
   private targetAt(p: Point): Target {
     const sim = this.sim!;
     const f = sim.facility;
-    if (this.view.face === 'back') {
-      const port = portAt(f, p, this.portRadius);
-      if (port) return { kind: 'port', ref: port };
-      const tol = Math.max(4, 8 / this.zoom);
-      let best: { id: number; d: number } | null = null;
-      for (const c of f.cables.values()) {
-        const route = cableRoute(f, c);
-        if (!route) continue;
-        const d = distanceToRoute(route, p);
-        if (d < tol && (!best || d < best.d)) best = { id: c.id, d };
-      }
-      if (best) return { kind: 'cable', id: best.id };
-    }
     const slot = slotAt(p.x);
     if (slot === null) return { kind: 'none' };
     if (!f.isRented(slot)) {
@@ -436,7 +383,7 @@ export class RowRenderer {
 
   // ---------------------------------------------------------------- 静的な部分(配置が変わったときだけ描く)
 
-  private rebuild(sim: Simulation, face: Face, key: string): void {
+  private rebuild(sim: Simulation, key: string): void {
     this.builtKey = key;
     const g = this.staticG.clear();
     for (const c of this.labels.removeChildren()) c.destroy();
@@ -465,7 +412,7 @@ export class RowRenderer {
       g.stroke({ width: 1, color: COLORS.unitLine });
       g.rect(r.x, r.y, r.w, r.h).stroke({ width: 2, color: COLORS.railEdge });
       // 見出し(数値は updateRackTexts で入れる)
-      this.label(`ラック ${slot + 1}${face === 'back' ? '(背面)' : ''}`, r.x, TOP - 96, 15, COLORS.text, 0, false, true);
+      this.label(`ラック ${slot + 1}`, r.x, TOP - 96, 15, COLORS.text, 0, false, true);
       const t = this.label('', r.x + r.w, TOP - 96, 11, COLORS.muted, 1);
       this.rackTexts.set(slot, t);
     }
@@ -473,64 +420,54 @@ export class RowRenderer {
     for (const d of f.devices.values()) {
       const m = MODEL_BY_ID[d.model];
       const r = deviceRect(d);
-      if (face === 'front') {
-        g.roundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 3)
-          .fill({ color: m.color, alpha: 0.22 })
-          .stroke({ width: 1.5, color: m.color });
-        this.label(d.name, r.x + 8, r.y + r.h / 2, 11, COLORS.text, 0, true, true);
-        // サーバはデータを置くドライブの種類も(例: 2U HDD)
-        const kind = d.parts?.gpus
-          ? 'GPU'
-          : d.parts?.drives.length
-            ? DRIVES[d.parts.drives[d.parts.drives.length - 1]].name
-            : d.parts
-              ? 'SSD'
-              : '';
-        const short = d.hv ? `${m.short} HV` : kind ? `${m.short} ${kind}` : m.short;
-        this.label(short, r.x + 56, r.y + r.h / 2, 10, d.hv ? 0x95d5b2 : COLORS.muted, 0, true);
-        if (d.hv) {
-          // VM はサービスごとの台数だけ出す(例: VM 5 台 web×3・db・cache)
-          const vms = f.vmsOn(d.id);
-          const count = new Map<string, number>();
-          for (const v of vms) {
-            const key = v.k8s ? 'k8s' : v.roles.length ? rolesText(v.roles) : '役割なし';
-            count.set(key, (count.get(key) ?? 0) + 1);
-          }
-          const parts = [...count].map(([k, n]) => (n > 1 ? `${k}×${n}` : k));
-          const text = vms.length ? `VM ${vms.length} 台: ${parts.join('・')}` : 'VM なし';
-          const t = this.label(text, r.x + 108, r.y + r.h / 2, 10, 0xb7e4c7, 0, false, true);
-          const maxW = r.w - 108 - 64;
-          if (t.width > maxW) t.scale.set(maxW / t.width);
-        } else if (m.category === 'lb') {
-          // LB: HA の状態
-          const gr = lbGroups(f, sim.downDevices).find((x) => x.members.includes(d.id));
-          const stopped = sim.downDevices.has(d.id);
-          const text = stopped ? '停止中' : !gr || gr.members.length < 2 ? 'HA なし' : gr.active === d.id ? 'HA アクティブ' : 'HA スタンバイ';
-          this.label(text, r.x + 108, r.y + r.h / 2, 10, gr && gr.members.length > 1 ? 0xffd166 : COLORS.muted, 0, false, true);
-        } else if (d.k8s) {
-          // Kubernetes のワーカー: 置かれた Pod を役割ごとに
-          const parts = sim.pods.filter((p) => p.worker === d.id).map((p) => `${rolesText([p.role])}×${p.count}`);
-          const t = this.label(`k8s ${parts.join('・') || 'Pod なし'}`, r.x + 108, r.y + r.h / 2, 10, 0xc9b6ff, 0, false, true);
-          const maxW = r.w - 108 - 64;
-          if (t.width > maxW) t.scale.set(maxW / t.width);
-        } else if (d.roles.length) {
-          const t = this.label(rolesText(d.roles), r.x + 108, r.y + r.h / 2, 11, 0x9fd8ff, 0, false, true);
-          const maxW = r.w - 108 - 64;
-          if (t.width > maxW) t.scale.set(maxW / t.width);
+      g.roundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 3)
+        .fill({ color: m.color, alpha: 0.22 })
+        .stroke({ width: 1.5, color: m.color });
+      this.label(d.name, r.x + 8, r.y + r.h / 2, 11, COLORS.text, 0, true, true);
+      // サーバはデータを置くドライブの種類も(例: 2U HDD)
+      const kind = d.parts?.gpus
+        ? 'GPU'
+        : d.parts?.drives.length
+          ? DRIVES[d.parts.drives[d.parts.drives.length - 1]].name
+          : d.parts
+            ? 'SSD'
+            : '';
+      const short = d.hv ? `${m.short} HV` : kind ? `${m.short} ${kind}` : m.short;
+      this.label(short, r.x + 56, r.y + r.h / 2, 10, d.hv ? 0x95d5b2 : COLORS.muted, 0, true);
+      if (d.hv) {
+        // VM はサービスごとの台数だけ出す(例: VM 5 台 web×3・db・cache)
+        const vms = f.vmsOn(d.id);
+        const count = new Map<string, number>();
+        for (const v of vms) {
+          const key = v.k8s ? 'k8s' : v.roles.length ? rolesText(v.roles) : '役割なし';
+          count.set(key, (count.get(key) ?? 0) + 1);
         }
-      } else {
-        g.roundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 3)
-          .fill(COLORS.back)
-          .stroke({ width: 1, color: m.color, alpha: 0.7 });
-        this.label(d.name, r.x + 6, r.y + r.h / 2, 10, COLORS.text, 0, true, true);
-        const ports = portsOf(d);
-        portCenters(d).forEach((c, i) => {
-          const used = !!f.cableAt({ device: d.id, port: i });
-          const sfp = ports[i].media === 'sfp';
-          g.rect(c.x - PORT / 2, c.y - PORT / 2, PORT, PORT)
-            .fill(used ? COLORS.portUsed : COLORS.bg)
-            .stroke({ width: 1, color: sfp ? COLORS.portSfp : COLORS.portRj45 });
-        });
+        const parts = [...count].map(([k, n]) => (n > 1 ? `${k}×${n}` : k));
+        const text = vms.length ? `VM ${vms.length} 台: ${parts.join('・')}` : 'VM なし';
+        const t = this.label(text, r.x + 108, r.y + r.h / 2, 10, 0xb7e4c7, 0, false, true);
+        const maxW = r.w - 108 - 64;
+        if (t.width > maxW) t.scale.set(maxW / t.width);
+      } else if (m.category === 'lb') {
+        // LB: HA の状態
+        const gr = lbGroups(f, sim.downDevices).find((x) => x.members.includes(d.id));
+        const stopped = sim.downDevices.has(d.id);
+        const text = stopped ? '停止中' : !gr || gr.members.length < 2 ? 'HA なし' : gr.active === d.id ? 'HA アクティブ' : 'HA スタンバイ';
+        this.label(text, r.x + 108, r.y + r.h / 2, 10, gr && gr.members.length > 1 ? 0xffd166 : COLORS.muted, 0, false, true);
+      } else if (d.k8s) {
+        // Kubernetes のワーカー: 置かれた Pod を役割ごとに
+        const parts = sim.pods.filter((p) => p.worker === d.id).map((p) => `${rolesText([p.role])}×${p.count}`);
+        const t = this.label(`k8s ${parts.join('・') || 'Pod なし'}`, r.x + 108, r.y + r.h / 2, 10, 0xc9b6ff, 0, false, true);
+        const maxW = r.w - 108 - 64;
+        if (t.width > maxW) t.scale.set(maxW / t.width);
+      } else if (d.roles.length) {
+        const t = this.label(rolesText(d.roles), r.x + 108, r.y + r.h / 2, 11, 0x9fd8ff, 0, false, true);
+        const maxW = r.w - 108 - 64;
+        if (t.width > maxW) t.scale.set(maxW / t.width);
+      }
+      // 自動配線でつながらなかった機器(スイッチのポートが足りないなど)
+      if (f.unwired.has(d.id)) {
+        g.roundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 3).stroke({ width: 2, color: COLORS.bad });
+        this.label('未接続', r.x + r.w - 62, r.y + r.h / 2, 10, COLORS.bad, 1, false, true);
       }
     }
   }
@@ -566,7 +503,7 @@ export class RowRenderer {
 
   // ---------------------------------------------------------------- 動く部分(毎フレーム)
 
-  private drawDynamic(sim: Simulation, view: ViewState, now: number): void {
+  private drawDynamic(sim: Simulation): void {
     const g = this.dynamicG.clear();
     const f = sim.facility;
     const flow = sim.flow;
@@ -589,57 +526,32 @@ export class RowRenderer {
       g.rect(r.x, TOP - 82, r.w * Math.min(1, ratio), 5).fill(loadColor(ratio));
     }
 
-    if (view.face === 'front') {
-      // 負荷のメーター: サーバは CPU と IO、スイッチは処理能力
-      for (const d of f.devices.values()) {
-        const load = flow.devices.get(d.id);
-        if (!load) continue;
-        const m = MODEL_BY_ID[d.model];
-        const r = deviceRect(d);
-        const bars =
-          m.category === 'server'
-            ? load.gpu > 0 || (d.parts?.gpus ?? 0) > 0
-              ? [load.cpu, load.io, load.gpu]
-              : [load.cpu, load.io]
-            : m.category === 'switch'
-              ? [load.fabric]
-              : m.category === 'storage'
-                ? [load.io]
-                : m.category === 'lb'
-                  ? [load.cpu]
-                  : [];
-        const w = 46;
-        const h = 4;
-        bars.forEach((v, i) => {
-          const x = r.x + r.w - w - 8;
-          const y = r.y + r.h / 2 - (bars.length * (h + 2)) / 2 + i * (h + 2);
-          g.rect(x, y, w, h).fill(COLORS.bg);
-          if (v > 0) g.rect(x, y, w * Math.min(1, v), h).fill(loadColor(v));
-        });
-      }
-      return;
-    }
-
-    // 背面: ケーブル。色は使用率、太さは速度。流れている量に応じて光の点が動く
-    const width = (gbps: number) => (gbps >= 10 ? 3.5 : 2);
-    for (const c of f.cables.values()) {
-      const route = cableRoute(f, c);
-      if (!route) continue;
-      const rho = flow.cableRho.get(c.id) ?? 0;
-      const base = c.fiber ? COLORS.fiber : COLORS.copper;
-      const color = rho >= 0.7 ? loadColor(rho) : base;
-      const pa = f.portDef(c.a);
-      const pb = f.portDef(c.b);
-      const speed = Math.min(pa?.speedGbps ?? 1, pb?.speedGbps ?? 1);
-      polyline(g, route, width(speed), color, 0.9);
-      if (rho > 0.001) {
-        const dots = Math.min(4, 1 + Math.floor(rho * 4));
-        const phase = (now / 1500 + c.id * 0.37) % 1;
-        for (let i = 0; i < dots; i++) {
-          const p = pointAlong(route, (phase + i / dots) % 1);
-          g.circle(p.x, p.y, 2.5).fill({ color: 0xffffff, alpha: 0.85 });
-        }
-      }
+    // 負荷のメーター: サーバは CPU と IO、スイッチは処理能力
+    for (const d of f.devices.values()) {
+      const load = flow.devices.get(d.id);
+      if (!load) continue;
+      const m = MODEL_BY_ID[d.model];
+      const r = deviceRect(d);
+      const bars =
+        m.category === 'server'
+          ? load.gpu > 0 || (d.parts?.gpus ?? 0) > 0
+            ? [load.cpu, load.io, load.gpu]
+            : [load.cpu, load.io]
+          : m.category === 'switch'
+            ? [load.fabric]
+            : m.category === 'storage'
+              ? [load.io]
+              : m.category === 'lb'
+                ? [load.cpu]
+                : [];
+      const w = 46;
+      const h = 4;
+      bars.forEach((v, i) => {
+        const x = r.x + r.w - w - 8;
+        const y = r.y + r.h / 2 - (bars.length * (h + 2)) / 2 + i * (h + 2);
+        g.rect(x, y, w, h).fill(COLORS.bg);
+        if (v > 0) g.rect(x, y, w * Math.min(1, v), h).fill(loadColor(v));
+      });
     }
   }
 
@@ -673,13 +585,6 @@ export class RowRenderer {
       g.rect(r.x + RAIL, unitTop(sel.u), RACK_W, U_H).stroke({ ...stroke, color: COLORS.accent });
     } else if (sel?.kind === 'slot') {
       g.rect(...rectArgs(rackRect(sel.slot))).stroke({ ...stroke, color: COLORS.accent });
-    } else if (sel?.kind === 'port') {
-      const c = portCenter(f, sel.ref);
-      if (c) g.circle(c.x, c.y, PORT).stroke(stroke);
-      const cable = f.cableAt(sel.ref);
-      if (cable) this.highlightCable(g, cable.id);
-    } else if (sel?.kind === 'cable') {
-      this.highlightCable(g, sel.id);
     }
 
     const gesture = this.gesture;
@@ -694,37 +599,7 @@ export class RowRenderer {
           .stroke({ width: 2, color: err ? COLORS.bad : COLORS.ok });
         this.tooltip(err ?? `${drop.u}U へ移動`, r.x, r.y - 4, err ? COLORS.bad : COLORS.text);
       }
-    } else if (gesture?.kind === 'wire') {
-      // 配線中: ポートから指まで線が追従し、相手のポートの上では長さと値段を出す
-      const from = portCenter(f, gesture.from);
-      const fromDev = f.devices.get(gesture.from.device);
-      if (from && fromDev) {
-        const to = portAt(f, gesture, this.portRadius);
-        const toDev = to ? f.devices.get(to.device) : undefined;
-        let end: Point = { x: gesture.x, y: gesture.y };
-        let endSlot = slotAt(gesture.x) ?? fromDev.slot;
-        let color: number = COLORS.wire;
-        let text = f.portName(gesture.from);
-        if (to && toDev) {
-          end = portCenter(f, to)!;
-          endSlot = toDev.slot;
-          const err = f.connectError(gesture.from, to);
-          const q = sim.cableQuote(gesture.from, to);
-          color = err ? COLORS.bad : COLORS.ok;
-          text = err ?? `${f.portName(to)}  ${q.fiber ? '光' : '銅'} ${q.meters}m  ${money(q.price)}`;
-          g.circle(end.x, end.y, PORT).stroke({ width: 2, color });
-        }
-        polyline(g, routeBetween(from, fromDev.slot, end, endSlot, 0), 3, color, 1);
-        this.tooltip(text, end.x + 10, end.y - 8, color === COLORS.bad ? COLORS.bad : COLORS.text);
-      }
     }
-  }
-
-  private highlightCable(g: Graphics, id: number): void {
-    const f = this.sim!.facility;
-    const c = f.cables.get(id);
-    const route = c && cableRoute(f, c);
-    if (route) polyline(g, route, 5, COLORS.select, 0.9);
   }
 
   private tooltip(text: string, x: number, y: number, fill: number): void {
@@ -744,12 +619,6 @@ function clamp(v: number, min: number, max: number): number {
 
 function rectArgs(r: Rect): [number, number, number, number] {
   return [r.x, r.y, r.w, r.h];
-}
-
-function polyline(g: Graphics, pts: Point[], width: number, color: number, alpha: number): void {
-  g.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
-  g.stroke({ width, color, alpha, join: 'round', cap: 'round' });
 }
 
 function dashedRect(g: Graphics, r: Rect, color: number): void {

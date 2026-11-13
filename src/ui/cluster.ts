@@ -1,5 +1,5 @@
 /**
- * クラスタの画面。配線を済ませたサーバを、ハイパーバイザや Kubernetes のワーカーという
+ * クラスタの画面。役割を付けていないサーバを、ハイパーバイザや Kubernetes のワーカーという
  * 「コンピュートの資源」としてまとめて扱う。
  *  - 仮想化: ホストの追加・取り外し、VM をホストを選ばずに作る(空きの多いホストに自動で置く)・消す
  *  - Kubernetes: ワーカーの追加(空きサーバ、または VM を作って)・取り外し、Deployment のオン/オフと Pod の数
@@ -147,7 +147,7 @@ export class ClusterPanel {
     return `
       <header>
         <h2>クラスタ</h2>
-        <span class="sheet-note">配線済みのサーバを、コンピュートの資源としてまとめて扱う</span>
+        <span class="sheet-note">空きサーバを、コンピュートの資源としてまとめて扱う</span>
         <button type="button" class="sheet-close" data-act="close" aria-label="閉じる">✕</button>
       </header>
       <div class="sheet-tabs" role="tablist">${tabs
@@ -156,11 +156,11 @@ export class ClusterPanel {
       <div class="sheet-body">${this.tab === 'hv' ? this.hvTab(sim) : this.k8sTab(sim)}</div>`;
   }
 
-  /** 空きサーバ(配線済み・役割なし)を加えるボタン */
+  /** 空きサーバ(スイッチにつながっていて、役割なし)を加えるボタン */
   private spare(sim: Simulation, act: string, label: string): string {
     const list = sim.spareServers;
     if (!list.length) {
-      return '<div class="muted small">加えられる空きサーバがありません。前面でサーバを置いて背面でスイッチにつなぐと(役割は付けずに)、ここに出ます。</div>';
+      return '<div class="muted small">加えられる空きサーバがありません。サーバを置くと(役割は付けずに)、ここに出ます。</div>';
     }
     return `<div class="role-buttons">${list
       .map((d) => `<button type="button" data-act="${act}" data-id="${d.id}" data-on="1">+ ${d.name}(${d.parts?.cpu ?? '-'} コア・${d.parts?.memGB ?? '-'}GB)を${label}</button>`)

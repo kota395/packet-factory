@@ -7,7 +7,6 @@ import {
   isServerModel,
   partsError,
   partsRequires,
-  portsOf,
   specOf,
 } from './catalog';
 import {
@@ -54,7 +53,6 @@ import {
   memoryPrice,
   nicPrice,
   serverPrice,
-  cablePrice,
   campaignPrice,
   growingPrice,
   modelPrice,
@@ -68,7 +66,6 @@ import {
   type DriveType,
   type ModelId,
   type NicId,
-  type PortRef,
   type RoleId,
   type RoleKey,
   type Scope,
@@ -87,6 +84,8 @@ export interface ActionResult {
 
 export interface SimOptions {
   startMoney?: number;
+  /** 自動配線をやめて、facility.connect で手で組む(流量モデルのテスト用) */
+  manualWiring?: boolean;
   /** ブログの最初のユーザー数(数値)か、サービスごとのユーザー数 */
   startUsers?: number | Partial<Record<ServiceId, number>>;
   /**
@@ -165,6 +164,7 @@ export class Simulation {
     this.serviceUsers = Object.fromEntries(SERVICE_IDS.map((id) => [id, SERVICES[id].startUsers])) as Record<ServiceId, number>;
     if (typeof opts.startUsers === 'number') this.serviceUsers.blog = opts.startUsers;
     else if (opts.startUsers) Object.assign(this.serviceUsers, opts.startUsers);
+    this.facility.autoWire = !opts.manualWiring;
     this.fixedTraffic = typeof opts.traffic === 'function' ? { blog: opts.traffic } : (opts.traffic ?? null);
     this.unlocks = new Set(opts.unlocks ?? []);
     this.upgrades = { ...emptyUpgrades(), ...opts.upgrades };
@@ -366,13 +366,6 @@ export class Simulation {
     return modelPrice(model, owned);
   }
 
-  /** ポート間にケーブルを引いたときの長さ・種類・値段 */
-  cableQuote(a: PortRef, b: PortRef): { meters: number; fiber: boolean; price: number } {
-    const meters = this.facility.cableLength(a, b);
-    const fiber = this.facility.isFiber(a, b);
-    return { meters, fiber, price: cablePrice(fiber, meters) };
-  }
-
   upgradeCost(id: UpgradeId): number {
     return upgradeCost(id, this.upgrades[id]);
   }
@@ -516,12 +509,6 @@ export class Simulation {
         if (change.to === p.nic) return { parts: null, cost: 0, error: 'すでにその NIC です' };
         next = { ...p, nic: change.to };
         cost = nicPrice(change.to) - refund(nicPrice(p.nic));
-        // 外す NIC のポートにケーブルが挿さっていたら外せない
-        const before = portsOf(d).length;
-        const after = portsOf({ model: d.model, parts: next }).length;
-        for (let i = after; i < before; i++) {
-          if (this.facility.cableAt({ device: id, port: i })) return { parts: null, cost: 0, error: '外す NIC にケーブルが挿さっています' };
-        }
         break;
       }
     }
@@ -572,43 +559,26 @@ export class Simulation {
     return { ok: true };
   }
 
+  /** 売ったときに戻る額。サーバは今の構成の価格で引き取る */
+  sellValue(id: number): number {
+    const d = this.facility.devices.get(id);
+    if (!d) return 0;
+    const value = d.parts && isServerModel(d.model) ? serverPrice(d.model, d.parts) : d.paid;
+    return Math.floor(value * SELL_REFUND_RATE);
+  }
+
   sellDevice(id: number): ActionResult {
     const d = this.facility.devices.get(id);
     if (!d) return { ok: false, message: '機器が見つかりません' };
     if (this.isMainLine(d.id)) return { ok: false, message: '最初の回線終端は撤去できません' };
     const vms = this.facility.vmsOn(id);
     if (vms.length) return { ok: false, message: `${d.name} には VM が ${vms.length} 台載っています。先に移すか消してください` };
-    // サーバは今の構成の価格で引き取る
-    const value = d.parts && isServerModel(d.model) ? serverPrice(d.model, d.parts) : d.paid;
-    const refund = Math.floor(value * SELL_REFUND_RATE);
-    const cables = this.facility.remove(id);
+    const refund = this.sellValue(id);
+    this.facility.remove(id);
     this.money += refund;
+    this.schedule();
     this.refreshFlow();
-    const note = cables.length ? `、ケーブル ${cables.length} 本を外しました` : '';
-    return { ok: true, message: `${d.name}を売却しました(+$${refund})${note}` };
-  }
-
-  connect(a: PortRef, b: PortRef): ActionResult {
-    const err = this.facility.connectError(a, b);
-    if (err) return { ok: false, message: err };
-    const { price, meters, fiber } = this.cableQuote(a, b);
-    if (this.money < price) return { ok: false, message: `資金が足りません($${price} 必要)` };
-    this.money -= price;
-    const c = this.facility.connect(a, b, price);
-    this.refreshFlow();
-    const kind = fiber ? '光ファイバ' : 'LAN ケーブル';
-    return {
-      ok: true,
-      id: c.id,
-      message: `${this.facility.portName(a)} ⇄ ${this.facility.portName(b)}(${kind} ${meters}m、$${price})`,
-    };
-  }
-
-  disconnect(cableId: number): ActionResult {
-    const c = this.facility.disconnect(cableId);
-    if (!c) return { ok: false, message: 'ケーブルが見つかりません' };
-    this.refreshFlow();
-    return { ok: true, message: `${this.facility.portName(c.a)} ⇄ ${this.facility.portName(c.b)} のケーブルを抜きました` };
+    return { ok: true, message: `${d.name}を売却しました(+$${refund})` };
   }
 
   roleError(id: number, role: RoleKey): string | null {
@@ -1175,6 +1145,10 @@ export class Simulation {
       dbSplit: this.unlocks.has('sharding') ? 'shard' : this.unlocks.has('partition') ? 'functional' : 'none',
       down: this.downDevices,
     });
+    for (const [id, why] of this.facility.unwired) {
+      const d = this.facility.devices.get(id);
+      if (d) flow.problems.push(`${d.name} はネットワークにつながっていません: ${why}`);
+    }
     for (const [key, n] of this.podsPending) {
       const [s, r] = splitRole(key);
       flow.problems.push(`${scopeName(s)}の ${r} の Pod が ${n} 個、置き場所がなくて待っています(ワーカーを増やす)`);

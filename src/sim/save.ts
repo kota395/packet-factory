@@ -1,7 +1,7 @@
-import { MODEL_BY_ID, PRESET_BY_ID, START_PARTS, isServerModel, partsError, portsOf } from './catalog';
+import { MODEL_BY_ID, PRESET_BY_ID, START_PARTS, isServerModel, partsError } from './catalog';
 import { OFFLINE, RACK, ROW } from './config';
 import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades } from './economy';
-import { PART_REFUND_RATE, cablePrice, memoryPrice, serverPrice } from './pricing';
+import { PART_REFUND_RATE, memoryPrice, serverPrice } from './pricing';
 import { Simulation } from './simulation';
 import {
   ROLE_IDS,
@@ -20,7 +20,7 @@ import {
 } from './types';
 
 /**
- * セーブデータ。構成(ラック・機器・ケーブル)・お金・ユーザー数・投資状況を残す。
+ * セーブデータ。構成(ラック・機器。ケーブルは自動配線で引き直すので残さない)・お金・ユーザー数・投資状況を残す。
  * v5 = サーバがシャーシとパーツの構成になった版。
  * v4(複数のサービス、サーバは機種固定)・v3(ブログだけ)は読み込むときに移す。それより前(ノード図の版)は読み込めない
  */
@@ -46,8 +46,6 @@ export interface SaveData {
   vms: [number, string, number, VmSize, RoleKey[], DiskKind, boolean][];
   /** Kubernetes の Deployment と、その時点の Pod の数 */
   deployments: [RoleKey, number][];
-  /** [ID, 機器 A, ポート A, 機器 B, ポート B, 購入額] */
-  cables: [number, number, number, number, number, number][];
 }
 
 /** 新しいゲーム: ラック 1 本に、回線終端・スイッチ・リクエストを受ける 1U サーバ・db 用の 2U サーバ(HDD) */
@@ -55,15 +53,12 @@ export function newGame(): Simulation {
   const sim = new Simulation();
   const f = sim.facility;
   f.rent(0);
-  const isp = f.place('handoff', 0, RACK.units, 0);
-  const sw = f.place('sw-24', 0, RACK.units - 2, 0);
+  f.place('handoff', 0, RACK.units, 0);
+  f.place('sw-24', 0, RACK.units - 2, 0);
   const web = f.place('srv-1u', 0, RACK.units - 4, 0, { parts: START_PARTS.web });
   const db = f.place('srv-2u', 0, RACK.units - 7, 0, { parts: START_PARTS.db });
   f.setRoles(web.id, ['blog:web']);
   f.setRoles(db.id, ['blog:db']);
-  f.connect({ device: isp.id, port: 0 }, { device: sw.id, port: 0 }, 0);
-  f.connect({ device: sw.id, port: 1 }, { device: web.id, port: 0 }, 0);
-  f.connect({ device: sw.id, port: 2 }, { device: db.id, port: 0 }, 0);
   sim.refreshFlow();
   return sim;
 }
@@ -73,23 +68,21 @@ export function tutorialGame(): Simulation {
   const sim = new Simulation();
   const f = sim.facility;
   f.rent(0);
-  const isp = f.place('handoff', 0, RACK.units, 0);
-  const sw = f.place('sw-24', 0, RACK.units - 2, 0);
-  f.connect({ device: isp.id, port: 0 }, { device: sw.id, port: 0 }, 0);
+  f.place('handoff', 0, RACK.units, 0);
+  f.place('sw-24', 0, RACK.units - 2, 0);
   sim.money += tutorialGrant();
   sim.refreshFlow();
   return sim;
 }
 
-/** チュートリアルで使うお金: サーバ 2 台、db のメモリ 1 段、ケーブル 2 本(ラック内の長め) */
+/** チュートリアルで使うお金: サーバ 2 台、db のメモリ 1 段 */
 export function tutorialGrant(): number {
   const db = PRESET_BY_ID['2u-hdd-small'].parts;
   return (
     serverPrice('srv-1u', PRESET_BY_ID['1u-small'].parts) +
     serverPrice('srv-2u', db) +
     memoryPrice(START_PARTS.db.memGB) -
-    Math.floor(memoryPrice(db.memGB) * PART_REFUND_RATE) +
-    2 * cablePrice(false, 3)
+    Math.floor(memoryPrice(db.memGB) * PART_REFUND_RATE)
   );
 }
 
@@ -110,7 +103,6 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     devices: [...f.devices.values()].map((d) => [d.id, d.model, d.slot, d.u, [...d.roles], d.paid, d.name, d.hv, d.bgp, d.down, d.k8s, d.parts]),
     vms: [...f.vms.values()].map((v) => [v.id, v.name, v.host, v.size, [...v.roles], v.disk, v.k8s]),
     deployments: [...sim.deployments],
-    cables: [...f.cables.values()].map((c) => [c.id, c.a.device, c.a.port, c.b.device, c.b.port, c.paid]),
   };
 }
 
@@ -139,11 +131,6 @@ export function loadSave(save: SaveData): Simulation {
   for (const [id, name, host, size, roles, disk, k8s] of save.vms) {
     if (!f.devices.get(host)?.hv) continue;
     f.createVm(host, size, { id, name, roles: k8s ? [] : roles, disk, k8s });
-  }
-  for (const [id, da, pa, db, pb, paid] of save.cables) {
-    const a = { device: da, port: pa };
-    const b = { device: db, port: pb };
-    if (f.connectError(a, b) === null) f.connect(a, b, paid, id);
   }
   for (const [key, count] of save.deployments) sim.deployments.set(key, count);
   sim.schedule();
@@ -207,7 +194,7 @@ export function parseSave(data: unknown): SaveData | null {
     campaign[1] = d.campaign[1] as number;
   }
   if (!isNum(d.lifetimeEarned) || !isNum(d.incomePerSec)) return null;
-  if (![d.unlocks, d.disabled, d.racks, d.devices, d.cables].every(Array.isArray)) return null;
+  if (![d.unlocks, d.disabled, d.racks, d.devices].every(Array.isArray)) return null;
   if (!d.upgrades || typeof d.upgrades !== 'object') return null;
 
   const ids = (list: unknown[]): UnlockId[] | null => {
@@ -291,18 +278,6 @@ export function parseSave(data: unknown): SaveData | null {
     deployments.push([item[0], Math.min(item[1], 1000)]);
   }
 
-  const cables: SaveData['cables'] = [];
-  for (const item of d.cables as unknown[]) {
-    if (!Array.isArray(item) || item.length !== 6 || !item.every(isNum)) return null;
-    const [id, da, pa, db, pb, paid] = item as number[];
-    const ok = (dev: number, port: number) => {
-      const dv = devices.find((x) => x[0] === dev);
-      return dv !== undefined && isInt(port) && port >= 0 && port < portsOf({ model: dv[1], parts: dv[11] }).length;
-    };
-    if (!ok(da, pa) || !ok(db, pb)) return null;
-    cables.push([id, da, pa, db, pb, paid]);
-  }
-
   return {
     v: 5,
     savedAt: d.savedAt,
@@ -317,7 +292,6 @@ export function parseSave(data: unknown): SaveData | null {
     racks,
     devices,
     vms,
-    cables,
     deployments,
   };
 }

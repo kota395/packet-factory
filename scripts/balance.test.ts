@@ -5,12 +5,12 @@
  * 調整値(src/sim/config.ts, pricing.ts, catalog.ts, economy.ts)を変えたら、ログの節目の時刻を見比べる。
  */
 import { it } from 'vitest';
-import { MODEL_BY_ID, PRESET_BY_ID, portsOf } from '../src/sim/catalog';
+import { MODEL_BY_ID, PRESET_BY_ID } from '../src/sim/catalog';
 import type { PartChange } from '../src/sim/simulation';
 import { RACK } from '../src/sim/config';
 import { unlockCost } from '../src/sim/economy';
 import { createSave, newGame } from '../src/sim/save';
-import type { ModelId, PortRef, RoleKey, UnlockId } from '../src/sim/types';
+import type { ModelId, RoleKey, UnlockId } from '../src/sim/types';
 
 declare const process: { env: Record<string, string | undefined> };
 
@@ -24,29 +24,22 @@ it(`balance bot (${MINUTES} min)`, () => {
 
   const devices = (pred: (d: { model: ModelId; roles: RoleKey[] }) => boolean) => [...f.devices.values()].filter(pred);
   const isSwitch = (m: ModelId) => MODEL_BY_ID[m].category === 'switch';
-  const freePort = (id: number): PortRef | null => {
-    const d = f.devices.get(id)!;
-    for (let i = 0; i < portsOf(d).length; i++) if (!f.cableAt({ device: id, port: i })) return { device: id, port: i };
-    return null;
-  };
   /** そのラックで、上から空いている U を探す(電力も見る) */
   const findU = (model: ModelId, slot: number): number | null => {
     for (let u = RACK.units - MODEL_BY_ID[model].u + 1; u >= 1; u--) if (!s.placeError(model, slot, u)) return u;
     return null;
   };
-  /** サーバ(プリセット)を買って、同じラックの ToR(なければ最初のスイッチ)につなぐ */
+  /** サーバ(プリセット)を、スイッチのあるラックに買う(配線は自動) */
   const buyServer = (preset: string, roles: RoleKey[]): number | null => {
     const { model, parts } = PRESET_BY_ID[preset];
-    // ケーブル代も残しておく
-    if (s.money < s.devicePrice(model, parts) + 30) return null;
+    if (s.money < s.devicePrice(model, parts)) return null;
     for (const slot of [...f.racks.keys()].sort((a, b) => a - b)) {
-      const tor = devices((d) => isSwitch(d.model)).find((d) => (d as { slot: number }).slot === slot && freePort(d.id) !== null);
+      const tor = devices((d) => isSwitch(d.model)).find((d) => (d as { slot: number }).slot === slot);
       let u: number | null = null;
       for (let x = RACK.units - MODEL_BY_ID[model].u + 1; x >= 1 && u === null; x--) if (!s.placeError(model, slot, x, undefined, parts)) u = x;
       if (u === null || !tor) continue;
       const r = s.buyServer(preset, slot, u);
       if (!r.ok) continue;
-      s.connect({ device: r.id!, port: 0 }, freePort(tor.id)!);
       for (const role of roles) s.toggleRole(r.id!, role);
       event(`${preset} 設置(${roles.join('+') || '役割なし'})`);
       return r.id!;
@@ -57,12 +50,11 @@ it(`balance bot (${MINUTES} min)`, () => {
   const buyLb = (): boolean => {
     if (s.money < s.devicePrice('lb-1u') + 30) return false;
     for (const slot of [...f.racks.keys()]) {
-      const tor = devices((d) => isSwitch(d.model)).find((d) => (d as { slot: number }).slot === slot && freePort(d.id) !== null);
+      const tor = devices((d) => isSwitch(d.model)).find((d) => (d as { slot: number }).slot === slot);
       const u = findU('lb-1u', slot);
       if (u === null || !tor) continue;
       const r = s.buyDevice('lb-1u', slot, u);
       if (!r.ok) continue;
-      s.connect({ device: r.id!, port: 0 }, freePort(tor.id)!);
       event('LB アプライアンス設置');
       return true;
     }
@@ -79,13 +71,7 @@ it(`balance bot (${MINUTES} min)`, () => {
     const slot = [...f.racks.keys()].length;
     if (s.money < s.rackPrice() + 400) return false;
     if (!s.rentRack(slot).ok) return false;
-    const r = s.buyDevice('sw-24', slot, RACK.units - 1);
-    const core = devices((d) => d.model === 'sw-24')[0];
-    for (let i = 0; i < 2; i++) {
-      const a = freePort(core.id);
-      const b = freePort(r.id!);
-      if (a && b) s.connect(a, b);
-    }
+    s.buyDevice('sw-24', slot, RACK.units - 1);
     event(`ラック ${slot + 1} を借りて ToR を設置`);
     return true;
   };
@@ -98,17 +84,8 @@ it(`balance bot (${MINUTES} min)`, () => {
     if (devices((d) => d.model === 'sw-48').length) return false;
     const u = findU('sw-48', 0);
     if (u === null || s.money < s.devicePrice('sw-48') + 300) return false;
-    const core = s.buyDevice('sw-48', 0, u).id!;
-    const isp = devices((d) => d.model === 'handoff')[0];
-    const old = f.cablesOf(isp.id)[0];
-    const tor = devices((d) => d.model === 'sw-24')[0];
-    if (old) s.disconnect(old.id);
-    s.connect({ device: isp.id, port: 0 }, { device: core, port: 48 });
-    for (let i = 0; i < 4; i++) {
-      const a = freePort(tor.id);
-      if (a) s.connect({ device: core, port: i }, a);
-    }
-    event('sw-48 を入れて回線を 10G で受け、sw01 へ 4 本束ねる');
+    s.buyDevice('sw-48', 0, u);
+    event('sw-48 を入れて回線を 10G で受ける(コアが替わる)');
     return true;
   };
 
@@ -168,17 +145,13 @@ it(`balance bot (${MINUTES} min)`, () => {
       // リンクの帯域: 空きポートがあれば束ね、サーバの NIC が埋まっていれば同じ役割のサーバを足す
       if (label.includes('⇄')) {
         const [x, y] = label.split(' の')[0].split(' ⇄ ').map((n) => [...f.devices.values()].find((d) => d.name === n)!);
-        const a = freePort(x.id);
-        const c = freePort(y.id);
-        if (a && c && s.connect(a, c).ok) {
-          event(`${x.name} ⇄ ${y.name} を 1 本追加`);
-          return true;
-        }
         const server = [x, y].find((d) => MODEL_BY_ID[d.model].category === 'server');
         if (server && server.roles.length) {
           const role = server.roles[0];
           return buyServer('1u-web', [role]) !== null || powerOrRack('1u-web');
         }
+        // スイッチ同士・回線: 10G のスイッチをコアにする
+        return coreTo10G();
       }
     }
     return false;
