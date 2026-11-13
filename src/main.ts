@@ -15,6 +15,7 @@ import {
 import type { Simulation } from './sim/simulation';
 import { Dashboard } from './ui/dashboard';
 import { compact, duration, money, rate } from './ui/format';
+import { GOAL, GOALS } from './sim/economy';
 import { InfoPanel, type Selection } from './ui/info';
 import { InvestPanel } from './ui/invest';
 import { ClusterPanel } from './ui/cluster';
@@ -55,6 +56,8 @@ const state = {
   selected: null as Selection | null,
   speed: 1,
   lastChurnWarn: 0,
+  /** 知らせ済みの目標の達成時刻 */
+  lastGoalAt: -1,
   /** 知らせ済みの障害の時刻 */
   lastFailureAt: -1,
   /** 市場規模に届いたことを知らせたか */
@@ -236,8 +239,25 @@ function updateToolbar(): void {
   if (badge) badge.hidden = !invest.anyAffordable(state.sim);
 }
 
+let shownHint = '';
+
+/** 下の 1 行: いまの目標と進み具合。すべて達成したら操作の案内 */
 function updateHint(): void {
-  ui.hint.textContent = '空いている U をタップして機器を設置、機器はドラッグで移動。配線は自動。点線の区画をタップしてラックを借りる。';
+  const sim = state.sim;
+  const g = sim.goal;
+  if (!g) {
+    ui.hint.textContent = shownHint = '空いている U をタップして機器を設置、機器はドラッグで移動。配線は自動。点線の区画をタップしてラックを借りる。';
+    return;
+  }
+  const r = sim.metrics.rolling;
+  const served = r.pv * (1 - r.errorRate);
+  const need = [`${compact(g.pv)} PV/秒を、エラー ${GOAL.maxErrorRate * 100}% 未満で ${GOAL.holdSec} 秒`];
+  if ((g.services ?? 1) > 1) need.push(`サービス ${g.services} つ`);
+  if (g.boost) need.push(`分析で単価 ×${g.boost}`);
+  const held = sim.goalHeldMs / (GOAL.holdSec * 1000);
+  const state_ = held > 0 ? `達成まで ${Math.ceil(GOAL.holdSec * (1 - held))} 秒` : `いま ${compact(served, 1)} PV/秒`;
+  const html = `<b>目標 ${sim.goalsDone + 1}/${GOALS.length}</b> ${need.join('・')}(報酬 ${money(g.reward)}) — <span class="${held > 0 ? 'ok' : ''}">${state_}</span><span class="goal-hint">ヒント: ${g.hint}</span>`;
+  if (html !== shownHint) ui.hint.innerHTML = shownHint = html;
 }
 
 // ------------------------------------------------------------------ HUD・操作ボタン
@@ -315,6 +335,13 @@ function updateHud(): void {
     const b = sim.flow.bottleneck;
     toast(b && b.rho > 1 ? `エラーで離脱が出ています: ${b.label}が溢れています` : 'エラーが多く、ユーザーが離脱しています');
   }
+
+  const done = sim.lastGoal;
+  if (done && done.at !== state.lastGoalAt) {
+    state.lastGoalAt = done.at;
+    toast(`目標 ${done.index + 1} を達成しました(報酬 +${money(done.reward)})`);
+  }
+  updateHint();
 
   const fail = sim.lastFailure;
   if (fail && fail.at !== state.lastFailureAt) {

@@ -29,6 +29,9 @@ import {
 } from './config';
 import { secondsUntil } from './forecast';
 import {
+  GOAL,
+  GOALS,
+  type GoalDef,
   UNLOCKS,
   UNLOCK_BY_ID,
   UPGRADE_BY_ID,
@@ -138,6 +141,11 @@ export class Simulation {
   /** サービスごとのユーザー数(始めていないサービスも、始めたときの値を持っておく) */
   readonly serviceUsers: Record<ServiceId, number>;
   lifetimeEarned = 0;
+  /** 達成した目標の数(GOALS の先頭から)と、いまの目標の条件を満たし続けている時間(ms) */
+  goalsDone = 0;
+  goalHeldMs = 0;
+  /** 最後に達成した目標(画面で知らせるのに使う) */
+  lastGoal: { index: number; reward: number; at: number } | null = null;
   /** 難易度(障害の起き方)。いつでも変えられる */
   difficulty: DifficultyId;
   /** 最後に起きた障害(画面で知らせるのに使う) */
@@ -669,6 +677,37 @@ export class Simulation {
   }
 
   /** 障害(難易度オプション): 機器がときどき壊れ、しばらくすると直る */
+  /** いまの目標(すべて達成していれば null) */
+  get goal(): GoalDef | null {
+    return GOALS[this.goalsDone] ?? null;
+  }
+
+  /** いまの目標の条件を満たしているか(捌けているページビュー・エラー率・サービスの数・分析の効果) */
+  goalMet(): boolean {
+    const g = this.goal;
+    if (!g) return false;
+    const r = this.metrics.rolling;
+    return (
+      r.errorRate < GOAL.maxErrorRate &&
+      r.pv * (1 - r.errorRate) >= g.pv &&
+      this.activeServices.length >= (g.services ?? 1) &&
+      this.flow.analytics.boost >= (g.boost ?? 1)
+    );
+  }
+
+  /** 目標: 条件を続けて満たしたら達成して報酬。流量を固定している(テスト用)ときは動かさない */
+  private updateGoal(dtMs: number): void {
+    const g = this.goal;
+    if (!g || this.fixedTraffic) return;
+    this.goalHeldMs = this.goalMet() ? this.goalHeldMs + dtMs : 0;
+    if (this.goalHeldMs < GOAL.holdSec * 1000) return;
+    this.money += g.reward;
+    this.lastGoal = { index: this.goalsDone, reward: g.reward, at: this.time };
+    this.goalsDone++;
+    this.goalHeldMs = 0;
+    this.purchaseVersion++;
+  }
+
   private rollFailures(dt: number): void {
     const f = DIFFICULTY.levels[this.difficulty].failures;
     if (!f || this.facility.devices.size < f.fromDevices) return;
@@ -1199,6 +1238,7 @@ export class Simulation {
       parts,
     );
     if (!this.fixedTraffic) this.updateUsers(dt);
+    this.updateGoal(TICK_MS);
     if (this.deployments.size && this.time - this.scaleAt >= K8S.scaleEveryMs) {
       this.scaleAt = this.time;
       this.autoscale();

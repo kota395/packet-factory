@@ -27,6 +27,7 @@ GitHub Pages などの静的ホスティングだけで動く。
   - ドライブは 2 本ずつのミラーで、IO 性能は本数と種類で決まる(容量は扱わない)。HDD < SSD < NVMe(NVMe は投資で解放)
   - CPU はコア数が多いほど 1 コアあたりの電力と価格が下がる。電力はシャーシとパーツの合計
 - ラックには電力の上限がある(最初は 2kW)。U より先に電力が詰まりやすい
+- 画面の下に、いまの目標が出る(例: 150 PV/秒を、エラー 1% 未満で 30 秒)。達成すると報酬が入り、次の目標へ進む。全部で 9 つ
 - ページを閉じている間も、直前の収支の 50% を最大 8 時間分受け取れる。進行はブラウザに自動保存される
 
 ### 操作
@@ -125,7 +126,7 @@ npm run balance  # バランス確認ボット(BOT_MIN=20 などで時間指定�
 | ユーザーの増え方・離脱 | `src/sim/config.ts`(`GROWTH_RATE`・`CHURN`) |
 | 難易度ごとの障害(何台から・頻度・直るまで)、流量の揺れ | `src/sim/config.ts` の `DIFFICULTY` |
 | メトリクスの保存期間・キャパシティの見積もり間隔と基準・予測の長さ | `src/sim/config.ts` の `METRICS` |
-| 解放・強化の効果、段階、投資メニューのタブ | `src/sim/economy.ts` |
+| 解放・強化の効果、段階、投資メニューのタブ、目標(条件と報酬) | `src/sim/economy.ts`(目標は `GOALS` / `GOAL`) |
 | VM の大きさ、オーバーコミット、移行で止まる時間、共有ストレージの IO | `src/sim/config.ts` の `VIRT` |
 | レプリカの反映の負荷 | `src/sim/config.ts` の `REPLICATION` |
 | 分析基盤(ログの量、集計・学習の重さ、単価の上がり方)、GPU の CPU の使い方 | `src/sim/config.ts` の `ANALYTICS` / `GPU`(GPU の枚数と電力は `catalog.ts` の `CHASSIS` / `GPU_POWER_W`、価格は `pricing.ts` の `GPU_PRICE`) |

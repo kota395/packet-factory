@@ -33,6 +33,8 @@ export interface SaveData {
   /** キャンペーンの残り時間とクールタイムの残り(ms) */
   campaign: [number, number];
   lifetimeEarned: number;
+  /** 達成した目標の数 */
+  goalsDone: number;
   /** 難易度。ない(古いセーブ)なら「平和」 */
   difficulty: DifficultyId;
   /** 保存時点の収支/秒。放置収入の計算に使う */
@@ -97,6 +99,7 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     users: { ...sim.serviceUsers },
     campaign: [Math.max(0, sim.campaign.until - sim.time), Math.max(0, sim.campaign.cooldownUntil - sim.time)],
     lifetimeEarned: sim.lifetimeEarned,
+    goalsDone: sim.goalsDone,
     difficulty: sim.difficulty,
     incomePerSec: sim.incomePerSec,
     unlocks: [...sim.unlocks],
@@ -119,6 +122,7 @@ export function loadSave(save: SaveData): Simulation {
   });
   sim.lifetimeEarned = save.lifetimeEarned;
   sim.difficulty = save.difficulty;
+  sim.goalsDone = save.goalsDone;
   sim.campaign = { until: sim.time + save.campaign[0], cooldownUntil: sim.time + save.campaign[1] };
   const f = sim.facility;
   for (const slot of save.racks) f.rent(slot);
@@ -289,6 +293,7 @@ export function parseSave(data: unknown): SaveData | null {
     users,
     campaign,
     lifetimeEarned: d.lifetimeEarned,
+    goalsDone: isInt(d.goalsDone) && d.goalsDone >= 0 ? Math.min(d.goalsDone, 1000) : 0,
     difficulty: DIFFICULTY_IDS.includes(d.difficulty as DifficultyId) ? (d.difficulty as DifficultyId) : 'peace',
     incomePerSec: d.incomePerSec,
     unlocks,
