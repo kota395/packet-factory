@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, portsOf, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
-import { ANALYTICS, BLOG_FEATURES, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
+import { ANALYTICS, BLOG_FEATURES, DIFFICULTY, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
 import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, offlineEarnings, parseSave } from '../src/sim/save';
 import { lbGroups } from '../src/sim/flow';
 import { Simulation } from '../src/sim/simulation';
@@ -549,10 +549,32 @@ describe('BGP による冗長化', () => {
     expect(s.usesBgp(srv)).toBe(true);
   });
 
-  it('障害は難易度オプションで、既定ではオフ', () => {
+  it('障害は難易度で決まる: 機器が少ないうちは壊れず、増えると壊れてしばらくで直る。「平和」では壊れない', () => {
+    // 標準: 最初の 4 台では壊れない
     const s = newGame();
-    s.step(60_000);
-    expect(s.downDevices.size).toBe(0);
+    expect(s.difficulty).toBe('normal');
+    s.step(120_000);
+    expect(s.lastFailure).toBeNull();
+    // 過酷: 5 台を超えると壊れ始め、直る
+    const h = newGame('hard');
+    h.money = RICH;
+    for (let u = 1; u <= 6; u++) h.buyServer('1u-small', 0, u);
+    h.step(600_000);
+    expect(h.lastFailure).not.toBeNull();
+    const repair = DIFFICULTY.levels.hard.failures!.repairSec * 1000;
+    expect(h.facility.devices.get(h.lastFailure!.id)!.failedUntil).toBe(h.lastFailure!.at + repair);
+    // 回線終端は壊れない
+    expect([...h.facility.devices.values()].find((d) => d.model === 'handoff')!.failedUntil).toBe(0);
+    // 平和に変えると、もう壊れない
+    h.difficulty = 'peace';
+    h.lastFailure = null;
+    h.step(600_000);
+    expect(h.lastFailure).toBeNull();
+    // セーブに残る。難易度のない古いセーブは「平和」
+    const save = createSave(newGame('hard'), 0);
+    expect(loadSave(parseSave(JSON.parse(JSON.stringify(save)))!).difficulty).toBe('hard');
+    const { difficulty: _d, ...old } = save;
+    expect(parseSave(old)!.difficulty).toBe('peace');
   });
 });
 

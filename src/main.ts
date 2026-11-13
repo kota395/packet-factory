@@ -1,6 +1,6 @@
 import './style.css';
 import { RowRenderer } from './render/row';
-import { OFFLINE } from './sim/config';
+import { DIFFICULTY, DIFFICULTY_IDS, OFFLINE, type DifficultyId } from './sim/config';
 import {
   createSave,
   decodeSave,
@@ -55,6 +55,8 @@ const state = {
   selected: null as Selection | null,
   speed: 1,
   lastChurnWarn: 0,
+  /** 知らせ済みの障害の時刻 */
+  lastFailureAt: -1,
   /** 市場規模に届いたことを知らせたか */
   cappedNotified: false,
   /** チュートリアルで光らせる機器・U */
@@ -171,7 +173,7 @@ function refreshTutorial(): void {
 
 /** チュートリアルを始める(resume なら前回の続きから) */
 function startTutorial(resume = false): void {
-  if (!resume) switchTo(tutorialGame());
+  if (!resume) switchTo(tutorialGame(state.sim.difficulty));
   tutorial.start(resume);
   setSpeed(0);
   saveGame();
@@ -314,6 +316,12 @@ function updateHud(): void {
     toast(b && b.rho > 1 ? `エラーで離脱が出ています: ${b.label}が溢れています` : 'エラーが多く、ユーザーが離脱しています');
   }
 
+  const fail = sim.lastFailure;
+  if (fail && fail.at !== state.lastFailureAt) {
+    state.lastFailureAt = fail.at;
+    toast(`${fail.name} が故障しました(${fail.repairSec} 秒で復旧)`);
+  }
+
   dashboard.update();
   invest.update();
   cluster.update();
@@ -374,6 +382,11 @@ function showSaveMenu(): void {
       <button type="button" id="sv-export">セーブコードをコピー</button>
       <textarea id="sv-code" rows="3" placeholder="ここにセーブコードを貼り付け"></textarea>
       <button type="button" id="sv-import">貼り付けたコードを読み込む</button>
+      <div class="difficulty">
+        <div class="note">難易度(いつでも変えられます)</div>
+        <div class="role-buttons">${DIFFICULTY_IDS.map((id) => `<button type="button" class="toggle ${id === state.sim.difficulty ? 'on' : ''}" data-difficulty="${id}" title="${DIFFICULTY.levels[id].note}">${DIFFICULTY.levels[id].name}</button>`).join('')}</div>
+        <div class="note" id="sv-difficulty-note">${DIFFICULTY.levels[state.sim.difficulty].note}</div>
+      </div>
       <button type="button" id="sv-tutorial">チュートリアルを最初から(進行状況は消えます)</button>
       <button type="button" id="sv-reset" class="danger">最初からやり直す</button>
     </div>
@@ -406,9 +419,18 @@ function showSaveMenu(): void {
     closeModal();
     startTutorial();
   });
+  for (const b of document.querySelectorAll<HTMLButtonElement>('button[data-difficulty]')) {
+    b.addEventListener('click', () => {
+      const id = b.dataset.difficulty as DifficultyId;
+      state.sim.difficulty = id;
+      for (const x of document.querySelectorAll('button[data-difficulty]')) x.classList.toggle('on', x === b);
+      el('sv-difficulty-note').textContent = DIFFICULTY.levels[id].note;
+      saveGame();
+    });
+  }
   el('sv-reset').addEventListener('click', () => {
     if (!confirm('すべての進行状況を消して最初からやり直しますか?')) return;
-    switchTo(newGame());
+    switchTo(newGame(state.sim.difficulty));
     saveGame();
     closeModal();
   });
@@ -421,6 +443,7 @@ function showWelcome(): void {
     <ul class="howto">
       <li><b>チュートリアル</b>: サーバを 2 台置いて、役割を付け、強化するまでを実際に操作しながら覚えます(数分)</li>
       <li><b>スキップ</b>: チュートリアルで作るもの(web と db のサーバ)が最初からある状態で始めます</li>
+      <li>機器が 10 台を超えると、ときどき故障します(難易度「標準」)。「セーブ」から難易度を変えられます</li>
     </ul>
     <div class="actions">
       <button type="button" id="wel-skip">スキップ</button>
