@@ -84,7 +84,7 @@ export interface ComputeNode {
   readonly advertised?: boolean;
   /** LB アプライアンスなら、1 秒あたりに振り分けられるリクエスト数 */
   readonly lbRps?: number;
-  /** GPU の枚数(物理サーバだけ) */
+  /** 使える GPU の枚数。VM と Pod は、載っているサーバの GPU を分け合う(パススルー) */
   readonly gpus?: number;
 }
 
@@ -483,7 +483,8 @@ export function computeNodes(
       advertised: bgp && (hostDev.bgp || hostDev.hv),
     });
   }
-  return nodes;
+  // VM と Pod は、載っているサーバの GPU を使える
+  return nodes.map((n) => (n.gpus !== undefined ? n : { ...n, gpus: specOf(facility.devices.get(n.host)!).gpus }));
 }
 
 /** ノード(機器 ID か −VM ID)の名前 */
@@ -1139,7 +1140,8 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
   function nodePass(id: number): number {
     const n = nodes.get(id)!;
     const l = loads.get(id)!;
-    let ok = pass(Math.max(cpuRho(id), l.io, l.gpu ?? 0));
+    // GPU は同じサーバの VM・Pod で分け合うので、サーバ全体の使用率で見る
+    let ok = pass(Math.max(cpuRho(id), l.io, l.gpu !== undefined ? devices.get(n.host)!.gpu : 0));
     if (n.disk === 'shared') ok *= l.storage != null ? along(route(n.host, l.storage))[0] : 0;
     return ok;
   }
