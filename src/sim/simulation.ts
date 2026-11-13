@@ -27,7 +27,7 @@ import {
   type DifficultyId,
   type Workload,
 } from './config';
-import { secondsUntil } from './forecast';
+import { logistic, secondsUntil } from './forecast';
 import {
   GOAL,
   GOALS,
@@ -677,6 +677,26 @@ export class Simulation {
   }
 
   /** 障害(難易度オプション): 機器がときどき壊れ、しばらくすると直る */
+  /**
+   * 離れていた間のユーザーの増加を反映する。サービスごとに、市場規模と今の構成で捌ける量のどちらか小さい方へ
+   * 向かって増える(減りはしない)。増えた人数の合計を返す
+   */
+  growWhileAway(seconds: number): number {
+    if (this.fixedTraffic || seconds <= 0) return 0;
+    this.estimateCapacity();
+    let gained = 0;
+    for (const id of this.activeServices) {
+      const u = this.serviceUsers[id];
+      const limit = Math.min(this.marketOf(id), this.capacityOf(id) / PV_PER_USER);
+      if (limit <= u) continue;
+      const next = Math.min(limit, logistic(u, this.marketOf(id), GROWTH_RATE, seconds));
+      gained += next - u;
+      this.serviceUsers[id] = next;
+    }
+    this.refreshFlow();
+    return gained;
+  }
+
   /** いまの目標(すべて達成していれば null) */
   get goal(): GoalDef | null {
     return GOALS[this.goalsDone] ?? null;
