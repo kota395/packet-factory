@@ -1356,3 +1356,24 @@ button.part .cost {
   padding: 0 10px;
   font-size: 12px;
 }
+
+/* 目標(下の 1 行) */
+#hint b {
+  color: var(--text);
+}
+
+#hint .ok {
+  color: var(--ok);
+}
+
+.goal-hint {
+  margin-left: 12px;
+  opacity: 0.8;
+}
+
+@media (max-width: 600px) {
+  .goal-hint {
+    display: block;
+    margin-left: 0;
+  }
+}

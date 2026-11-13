@@ -374,3 +374,39 @@ export const emptyUpgrades = (): Record<UpgradeId, number> => ({
   uplink: 0,
   rackPower: 0,
 });
+
+/**
+ * 目標。上から順に 1 つずつ。条件を holdSec 秒続けて満たすと達成で、報酬のお金が入る。
+ * 「次に何を目指すか」と、仕組みを入れる動機を示す
+ */
+export interface GoalDef {
+  /** 捌く(成功する)ページビュー/秒。すべてのサービスの合計 */
+  readonly pv: number;
+  /** 始めているサービスの数(以上) */
+  readonly services?: number;
+  /** 分析基盤による単価の倍率(以上) */
+  readonly boost?: number;
+  /** 達成の報酬($) */
+  readonly reward: number;
+  /** 手がかり */
+  readonly hint: string;
+}
+
+export const GOAL = {
+  /** エラー率がこれ未満で */
+  maxErrorRate: 0.01,
+  /** この秒数続けて満たす */
+  holdSec: 30,
+} as const;
+
+export const GOALS: readonly GoalDef[] = [
+  { pv: 30, reward: 300, hint: 'db のメモリを増やし、HDD を SSD に替える' },
+  { pv: 150, reward: 1500, hint: 'LB アプライアンスを置いて、web を並べる' },
+  { pv: 500, reward: 5000, hint: '回線契約を上げ、memcached で db の読み込みを減らす' },
+  { pv: 1500, reward: 20_000, hint: '10G のスイッチと LB、リードレプリカ、2 本目のラック' },
+  { pv: 3000, services: 2, reward: 60_000, hint: 'ショッピングを始める。検索サーバと注文の書き込みに備える' },
+  { pv: 6000, services: 2, reward: 200_000, hint: '仮想化や Kubernetes で台数をまとめる。故障に備えて HA と BGP' },
+  { pv: 12_000, services: 3, reward: 600_000, hint: '写真共有を始める。画像の配信(media)と CDN、回線の多重化' },
+  { pv: 25_000, services: 4, reward: 2_000_000, hint: '動画配信を始める。エンコードは GPU で、db はシャーディング' },
+  { pv: 40_000, services: 4, boost: 1.3, reward: 6_000_000, hint: '分析基盤(Hadoop と機械学習)で単価を上げる' },
+];
