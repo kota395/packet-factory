@@ -153,7 +153,15 @@ src/
     catalog.ts     機種、サーバのシャーシ・パーツ・プリセット
     facility.ts    物理層: ラック・機器・ポート・ケーブル
     wiring.ts      自動配線のルール
-    flow.ts        流量モデル: 経路、使用率、成功率、応答時間
+    flow.ts        流量モデルの入口(computeFlow): 台帳を作り、サービスと分析基盤の負荷を積み、結果をまとめる
+    flow/          流量モデルの中身
+      types.ts       入力と結果の型
+      network.ts     リンクのグラフと経路(ECMP)、LB の HA ペア
+      nodes.ts       役割を動かすノード(サーバ・VM・Pod)の一覧
+      ledger.ts      台帳: 負荷を積む、使用率から成功率と時間を引く
+      service.ts     サービス 1 つぶんの流れ(LB → web → cache → db、検索、配信、投稿)
+      analytics.ts   分析基盤(Hadoop・機械学習)
+      math.ts        待ち時間と溢れの式
     simulation.ts  時間・お金・ユーザー・操作・キャパシティの見積もり
     forecast.ts    需要予測(ロジスティック成長)
     metrics.ts     直近の集計と 1 秒ごとの推移
