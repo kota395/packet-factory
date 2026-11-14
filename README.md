@@ -125,7 +125,7 @@ npm run balance  # バランス確認ボット(BOT_MIN=20 などで時間指定�
 | 自動配線で引く本数(アップリンク、サーバ・LB・ストレージ) | `src/sim/config.ts` の `WIRING`(ルールは `src/sim/wiring.ts`) |
 | ユーザーの増え方・離脱 | `src/sim/config.ts`(`GROWTH_RATE`・`CHURN`) |
 | 難易度ごとの障害(何台から・頻度・直るまで)、流量の揺れ | `src/sim/config.ts` の `DIFFICULTY` |
-| メトリクスの保存期間・キャパシティの見積もり間隔と基準・予測の長さ | `src/sim/config.ts` の `METRICS` |
+| メトリクスの保存期間・保存するときの間引き・キャパシティの見積もり間隔と基準・予測の長さ | `src/sim/config.ts` の `METRICS` |
 | 解放・強化の効果、段階、投資メニューのタブ、目標(条件と報酬) | `src/sim/economy.ts`(目標は `GOALS` / `GOAL`) |
 | VM の大きさ、オーバーコミット、移行で止まる時間、共有ストレージの IO | `src/sim/config.ts` の `VIRT` |
 | レプリカの反映の負荷 | `src/sim/config.ts` の `REPLICATION` |

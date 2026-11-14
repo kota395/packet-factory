@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, portsOf, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel, partsError, partsRequires, specOf } from '../src/sim/catalog';
-import { ANALYTICS, BLOG_FEATURES, DIFFICULTY, PV_PER_USER, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
+import { ANALYTICS, BLOG_FEATURES, DIFFICULTY, METRICS, PV_PER_USER, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
 import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, applyAbsence, parseSave } from '../src/sim/save';
 import { lbGroups } from '../src/sim/flow';
 import { GOAL, GOALS } from '../src/sim/economy';
@@ -1024,6 +1024,27 @@ describe('目標', () => {
     expect(s.money).toBeGreaterThan(before + GOALS[0].reward - 50);
     expect(s.goal).toBe(GOALS[1]);
     expect(loadSave(parseSave(JSON.parse(JSON.stringify(createSave(s, 0))))!).goalsDone).toBe(1);
+  });
+});
+
+describe('メトリクスの保存', () => {
+  it('推移を間引いて保存し、読み込むと過去の分として続きに記録される', () => {
+    const a = newGame('peace');
+    a.step(125_000);
+    const saved = JSON.parse(JSON.stringify(a.metrics.exportHistory()));
+    expect(saved.total.t.length).toBe(Math.ceil(125 / METRICS.saveEverySec));
+    expect(saved.total.t.at(-1)).toBe(0);
+    const b = loadSave(parseSave(JSON.parse(JSON.stringify(createSave(a, 0))))!);
+    expect(b.metrics.importHistory(saved)).toBe(true);
+    expect(b.metrics.history.users.at(-1)).toBeCloseTo(a.metrics.history.users.at(-1)!, -1);
+    b.step(3000);
+    const t = b.metrics.history.t;
+    expect(t.at(-1)).toBe(3);
+    expect(t[0]).toBeLessThan(-100);
+    expect(b.metrics.services.get('blog')!.pv.length).toBe(t.length);
+    // 壊れたデータは無視する
+    expect(newGame().metrics.importHistory({ total: { t: [0, 1], pv: [1] } })).toBe(false);
+    expect(newGame().metrics.importHistory(null)).toBe(false);
   });
 });
 

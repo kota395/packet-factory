@@ -381,6 +381,8 @@ export const METRICS = {
   capacitySuccess: 0.99,
   /** 需要予測を何秒先まで出すか */
   forecastSec: 900,
+  /** 推移を保存するときに間引く間隔(秒)。1 時間ぶんで 360 点になる */
+  saveEverySec: 10,
 } as const;
 
 /**
