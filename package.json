@@ -9,13 +9,18 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "balance": "vitest run --mode balance --silent=false"
+    "balance": "vitest run --mode balance --silent=false",
+    "lint": "oxlint --deny-warnings",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "pixi.js": "^8.22.0",
     "uplot": "^1.6.32"
   },
   "devDependencies": {
+    "oxlint": "^1.93.0",
+    "prettier": "^3.10.1",
     "rollup-plugin-license": "^3.7.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",

@@ -48,16 +48,7 @@ export type DiskKind = 'local' | 'shared';
 export type Category = 'server' | 'switch' | 'handoff' | 'storage' | 'lb';
 
 /** 機種 */
-export type ModelId =
-  | 'handoff'
-  | 'srv-1u'
-  | 'srv-2u'
-  | 'nas-2u'
-  | 'lb-1u'
-  | 'lb-10g'
-  | 'sw-24'
-  | 'sw-48'
-  | 'agg-10g';
+export type ModelId = 'handoff' | 'srv-1u' | 'srv-2u' | 'nas-2u' | 'lb-1u' | 'lb-10g' | 'sw-24' | 'sw-48' | 'agg-10g';
 
 /** ポートの差し込み口 */
 export type Media = 'rj45' | 'sfp';

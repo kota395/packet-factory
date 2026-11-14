@@ -132,8 +132,8 @@ export const SERVICES: Readonly<Record<ServiceId, ServiceDef>> = {
     name: 'ショッピング',
     roles: ['lb', 'web', 'cache', 'search', 'db', 'replica'],
     startUsers: 200,
-    baseMarket: 3000,
-    revenuePerPv: 0.15,
+    baseMarket: 2000,
+    revenuePerPv: 0.1,
     work: {
       pageKB: 40,
       webCpuMs: 18,
@@ -147,8 +147,8 @@ export const SERVICES: Readonly<Record<ServiceId, ServiceDef>> = {
     name: '写真共有',
     roles: ['lb', 'web', 'cache', 'db', 'replica', 'media', 'worker'],
     startUsers: 200,
-    baseMarket: 6000,
-    revenuePerPv: 0.08,
+    baseMarket: 4000,
+    revenuePerPv: 0.05,
     work: {
       pageKB: 25,
       webCpuMs: 10,
@@ -163,8 +163,8 @@ export const SERVICES: Readonly<Record<ServiceId, ServiceDef>> = {
     name: '動画配信',
     roles: ['lb', 'web', 'cache', 'db', 'replica', 'media', 'worker'],
     startUsers: 100,
-    baseMarket: 5000,
-    revenuePerPv: 0.6,
+    baseMarket: 3000,
+    revenuePerPv: 0.2,
     work: {
       pageKB: 40,
       webCpuMs: 15,
@@ -350,21 +350,23 @@ export const CHURN = {
  * 難易度のオプション。最初はオフ。
  * 難易度を上げるモードを作るときにオンにする(障害などのイベントもここに足していく)。
  */
+export type DifficultyId = 'peace' | 'normal' | 'hard';
+export const DIFFICULTY_IDS: readonly DifficultyId[] = ['peace', 'normal', 'hard'];
+
 export const DIFFICULTY = {
   /** 1 日の波(昼夜で流量が上下する)の振れ幅。0.2 なら ±20%。0 でなし */
   dayWave: 0,
   dayCycleMs: 120_000,
   /**
-   * 障害。オンにすると、回線終端以外の機器がときどき止まり、しばらくすると直る。
-   * 冗長化(BGP で 2 台の ToR につなぐ、web を並べる など)が効いてくる
+   * 難易度ごとの障害。回線終端以外の機器がときどき止まり、しばらくすると直る。
+   * 冗長化(LB の HA、ToR 2 台と BGP、web を並べる、Kubernetes)が効いてくる。
+   * 機器が fromDevices 台以上になってから起き始める(序盤の 1〜2 台を壊さない)
    */
-  failures: {
-    enabled: false,
-    /** 機器 1 台が平均して何秒に 1 回壊れるか */
-    mtbfSec: 1800,
-    /** 直るまでの秒数 */
-    repairSec: 60,
-  },
+  levels: {
+    peace: { name: '平和', note: '機器は壊れない', failures: null },
+    normal: { name: '標準', note: '機器が 10 台を超えると、ときどき壊れる(30 秒で直る)', failures: { fromDevices: 10, mtbfSec: 3600, repairSec: 30 } },
+    hard: { name: '過酷', note: '機器が 5 台を超えると、よく壊れる(60 秒で直る)', failures: { fromDevices: 5, mtbfSec: 1200, repairSec: 60 } },
+  } as Record<DifficultyId, { name: string; note: string; failures: { fromDevices: number; mtbfSec: number; repairSec: number } | null }>,
 };
 
 /** メトリクス(ダッシュボード)と需要予測 */
@@ -379,9 +381,15 @@ export const METRICS = {
   capacitySuccess: 0.99,
   /** 需要予測を何秒先まで出すか */
   forecastSec: 900,
+  /** 推移を保存するときに間引く間隔(秒)。1 時間ぶんで 360 点になる */
+  saveEverySec: 10,
 } as const;
 
-/** 放置(ページを閉じている間)の収入 */
+/**
+ * 放置(ページを閉じている間・タブを裏に回している間)。
+ * minMs 以上離れると、直前の収支 × efficiency のお金が入り、ユーザーも efficiency 倍の速さで増える
+ * (市場規模と、今の構成で捌ける量まで。離れている間に溢れて減ることはない)。maxMs で頭打ち
+ */
 export const OFFLINE = {
   minMs: 30_000,
   maxMs: 8 * 60 * 60 * 1000,

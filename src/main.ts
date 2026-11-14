@@ -1,20 +1,11 @@
 import './style.css';
 import { RowRenderer } from './render/row';
-import { OFFLINE } from './sim/config';
-import {
-  createSave,
-  decodeSave,
-  encodeSave,
-  loadSave,
-  newGame,
-  offlineEarnings,
-  parseSave,
-  tutorialGame,
-  type SaveData,
-} from './sim/save';
+import { DIFFICULTY, DIFFICULTY_IDS, OFFLINE, type DifficultyId } from './sim/config';
+import { createSave, decodeSave, encodeSave, loadSave, newGame, applyAbsence, parseSave, tutorialGame, type SaveData } from './sim/save';
 import type { Simulation } from './sim/simulation';
 import { Dashboard } from './ui/dashboard';
 import { compact, duration, money, rate } from './ui/format';
+import { GOAL, GOALS } from './sim/economy';
 import { InfoPanel, type Selection } from './ui/info';
 import { InvestPanel } from './ui/invest';
 import { ClusterPanel } from './ui/cluster';
@@ -30,6 +21,7 @@ for (const type of ['gesturestart', 'gesturechange']) {
 const SAVE_KEY = 'packet-factory:save:v3';
 const AUTOSAVE_MS = 5000;
 const SPEED_KEY = 'packet-factory:speed';
+const METRICS_KEY = 'packet-factory:metrics';
 const CHURN_WARN_INTERVAL_MS = 20_000;
 
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -55,6 +47,10 @@ const state = {
   selected: null as Selection | null,
   speed: 1,
   lastChurnWarn: 0,
+  /** 知らせ済みの目標の達成時刻 */
+  lastGoalAt: -1,
+  /** 知らせ済みの障害の時刻 */
+  lastFailureAt: -1,
   /** 市場規模に届いたことを知らせたか */
   cappedNotified: false,
   /** チュートリアルで光らせる機器・U */
@@ -93,17 +89,21 @@ const info = new InfoPanel(ui.info, () => state.sim, {
   },
 });
 
-const tutorial = new Tutorial(ui.board, (skipped) => {
-  // スキップしたら、チュートリアルで作るものが最初からある状態にする
-  if (skipped) {
-    switchTo(newGame());
-    toast('サーバを置いた状態から始めます');
-  }
-  state.highlight = null;
-  select(null);
-  setSpeed(1);
-  saveGame();
-}, () => refreshTutorial());
+const tutorial = new Tutorial(
+  ui.board,
+  (skipped) => {
+    // スキップしたら、チュートリアルで作るものが最初からある状態にする
+    if (skipped) {
+      switchTo(newGame());
+      toast('サーバを置いた状態から始めます');
+    }
+    state.highlight = null;
+    select(null);
+    setSpeed(1);
+    saveGame();
+  },
+  () => refreshTutorial(),
+);
 
 // ------------------------------------------------------------------ 起動
 
@@ -149,10 +149,36 @@ renderer.app.ticker.add((ticker) => {
 });
 
 window.addEventListener('resize', () => dashboard.resize());
+// タブを裏に回すとブラウザが描画を止め、ゲームの時間も止まる。戻ってきたら、離れていた間として反映する
+let hiddenAt = 0;
+let hiddenIncome = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') saveGame();
+  if (document.visibilityState === 'hidden') {
+    hiddenAt = Date.now();
+    hiddenIncome = state.sim.incomePerSec;
+    saveGame();
+  } else {
+    // 一時停止中とチュートリアル中は進めない
+    if (hiddenAt && state.speed > 0 && !tutorial.active) {
+      welcomeBack(applyAbsence(state.sim, Date.now() - hiddenAt, hiddenIncome));
+      saveGame();
+    }
+    hiddenAt = 0;
+  }
 });
 window.addEventListener('pagehide', saveGame);
+
+/** 離れていた間に入ったお金と増えたユーザーを知らせる */
+function welcomeBack(a: { elapsedMs: number; gained: number; users: number }): void {
+  if (a.gained <= 0 && a.users < 1) return;
+  showModal(`
+    <h2>おかえりなさい</h2>
+    <p class="lead">離れていた ${duration(a.elapsedMs)} の間に</p>
+    <div class="big">+${money(a.gained)}</div>
+    ${a.users >= 1 ? `<p class="lead">ユーザー +${compact(a.users)}</p>` : ''}
+    <p class="note">離れている間は、直前の収支の ${OFFLINE.efficiency * 100}% が入り、ユーザーも ${OFFLINE.efficiency * 100}% の速さで増えます(市場規模と、今の構成で捌ける量まで。最大 ${OFFLINE.maxMs / 3_600_000} 時間分)。</p>
+    <div class="actions"><button type="button" class="primary" data-close>受け取る</button></div>`);
+}
 
 // ------------------------------------------------------------------ 選択
 
@@ -171,7 +197,7 @@ function refreshTutorial(): void {
 
 /** チュートリアルを始める(resume なら前回の続きから) */
 function startTutorial(resume = false): void {
-  if (!resume) switchTo(tutorialGame());
+  if (!resume) switchTo(tutorialGame(state.sim.difficulty));
   tutorial.start(resume);
   setSpeed(0);
   saveGame();
@@ -220,12 +246,7 @@ function onTool(id: ToolId): void {
 function updateToolbar(): void {
   for (const b of ui.toolbar.querySelectorAll<HTMLButtonElement>('button')) {
     const t = b.dataset.tool as ToolId;
-    const active =
-      t === 'invest'
-        ? invest.isOpen
-        : t === 'cluster'
-          ? cluster.isOpen
-          : state.selected?.kind === 'service';
+    const active = t === 'invest' ? invest.isOpen : t === 'cluster' ? cluster.isOpen : state.selected?.kind === 'service';
     b.classList.toggle('active', active);
     // クラスタは仮想化か Kubernetes を解放してから
     if (t === 'cluster') b.hidden = !cluster.available(state.sim);
@@ -234,8 +255,25 @@ function updateToolbar(): void {
   if (badge) badge.hidden = !invest.anyAffordable(state.sim);
 }
 
+let shownHint = '';
+
+/** 下の 1 行: いまの目標と進み具合。すべて達成したら操作の案内 */
 function updateHint(): void {
-  ui.hint.textContent = '空いている U をタップして機器を設置、機器はドラッグで移動。配線は自動。点線の区画をタップしてラックを借りる。';
+  const sim = state.sim;
+  const g = sim.goal;
+  if (!g) {
+    ui.hint.textContent = shownHint = '空いている U をタップして機器を設置、機器はドラッグで移動。配線は自動。点線の区画をタップしてラックを借りる。';
+    return;
+  }
+  const r = sim.metrics.rolling;
+  const served = r.pv * (1 - r.errorRate);
+  const need = [`${compact(g.pv)} PV/秒を、エラー ${GOAL.maxErrorRate * 100}% 未満で ${GOAL.holdSec} 秒`];
+  if ((g.services ?? 1) > 1) need.push(`サービス ${g.services} つ`);
+  if (g.boost) need.push(`分析で単価 ×${g.boost}`);
+  const held = sim.goalHeldMs / (GOAL.holdSec * 1000);
+  const state_ = held > 0 ? `達成まで ${Math.ceil(GOAL.holdSec * (1 - held))} 秒` : `いま ${compact(served, 1)} PV/秒`;
+  const html = `<b>目標 ${sim.goalsDone + 1}/${GOALS.length}</b> ${need.join('・')}(報酬 ${money(g.reward)}) — <span class="${held > 0 ? 'ok' : ''}">${state_}</span><span class="goal-hint">ヒント: ${g.hint}</span>`;
+  if (html !== shownHint) ui.hint.innerHTML = shownHint = html;
 }
 
 // ------------------------------------------------------------------ HUD・操作ボタン
@@ -314,6 +352,19 @@ function updateHud(): void {
     toast(b && b.rho > 1 ? `エラーで離脱が出ています: ${b.label}が溢れています` : 'エラーが多く、ユーザーが離脱しています');
   }
 
+  const done = sim.lastGoal;
+  if (done && done.at !== state.lastGoalAt) {
+    state.lastGoalAt = done.at;
+    toast(`目標 ${done.index + 1} を達成しました(報酬 +${money(done.reward)})`);
+  }
+  updateHint();
+
+  const fail = sim.lastFailure;
+  if (fail && fail.at !== state.lastFailureAt) {
+    state.lastFailureAt = fail.at;
+    toast(`${fail.name} が故障しました(${fail.repairSec} 秒で復旧)`);
+  }
+
   dashboard.update();
   invest.update();
   cluster.update();
@@ -331,6 +382,8 @@ function updateHud(): void {
 function saveGame(): void {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify(createSave(state.sim)));
+    // メトリクスの推移は別の鍵に(セーブコードには入れない)
+    localStorage.setItem(METRICS_KEY, JSON.stringify(state.sim.metrics.exportHistory()));
   } catch {
     // 保存できない環境(プライベートブラウズなど)では何もしない
   }
@@ -345,17 +398,14 @@ function restoreGame(): boolean {
     save = null;
   }
   if (!save) return false;
-  switchTo(loadSave(save));
-  const { elapsedMs, gained } = offlineEarnings(save, Date.now());
-  if (gained > 0) {
-    state.sim.money += gained;
-    showModal(`
-      <h2>おかえりなさい</h2>
-      <p class="lead">離れていた ${duration(elapsedMs)} の間に</p>
-      <div class="big">+${money(gained)}</div>
-      <p class="note">放置中は直前の収支の ${OFFLINE.efficiency * 100}% を、最大 ${OFFLINE.maxMs / 3_600_000} 時間分まで受け取れます。</p>
-      <div class="actions"><button type="button" class="primary" data-close>受け取る</button></div>`);
+  const sim = loadSave(save);
+  try {
+    sim.metrics.importHistory(JSON.parse(localStorage.getItem(METRICS_KEY) ?? 'null'));
+  } catch {
+    // 推移が読めなくても、ゲームは続けられる
   }
+  switchTo(sim);
+  welcomeBack(applyAbsence(state.sim, Math.max(0, Date.now() - save.savedAt), save.incomePerSec));
   return true;
 }
 
@@ -374,6 +424,11 @@ function showSaveMenu(): void {
       <button type="button" id="sv-export">セーブコードをコピー</button>
       <textarea id="sv-code" rows="3" placeholder="ここにセーブコードを貼り付け"></textarea>
       <button type="button" id="sv-import">貼り付けたコードを読み込む</button>
+      <div class="difficulty">
+        <div class="note">難易度(いつでも変えられます)</div>
+        <div class="role-buttons">${DIFFICULTY_IDS.map((id) => `<button type="button" class="toggle ${id === state.sim.difficulty ? 'on' : ''}" data-difficulty="${id}" title="${DIFFICULTY.levels[id].note}">${DIFFICULTY.levels[id].name}</button>`).join('')}</div>
+        <div class="note" id="sv-difficulty-note">${DIFFICULTY.levels[state.sim.difficulty].note}</div>
+      </div>
       <button type="button" id="sv-tutorial">チュートリアルを最初から(進行状況は消えます)</button>
       <button type="button" id="sv-reset" class="danger">最初からやり直す</button>
     </div>
@@ -406,9 +461,18 @@ function showSaveMenu(): void {
     closeModal();
     startTutorial();
   });
+  for (const b of document.querySelectorAll<HTMLButtonElement>('button[data-difficulty]')) {
+    b.addEventListener('click', () => {
+      const id = b.dataset.difficulty as DifficultyId;
+      state.sim.difficulty = id;
+      for (const x of document.querySelectorAll('button[data-difficulty]')) x.classList.toggle('on', x === b);
+      el('sv-difficulty-note').textContent = DIFFICULTY.levels[id].note;
+      saveGame();
+    });
+  }
   el('sv-reset').addEventListener('click', () => {
     if (!confirm('すべての進行状況を消して最初からやり直しますか?')) return;
-    switchTo(newGame());
+    switchTo(newGame(state.sim.difficulty));
     saveGame();
     closeModal();
   });
@@ -421,6 +485,7 @@ function showWelcome(): void {
     <ul class="howto">
       <li><b>チュートリアル</b>: サーバを 2 台置いて、役割を付け、強化するまでを実際に操作しながら覚えます(数分)</li>
       <li><b>スキップ</b>: チュートリアルで作るもの(web と db のサーバ)が最初からある状態で始めます</li>
+      <li>機器が 10 台を超えると、ときどき故障します(難易度「標準」)。「セーブ」から難易度を変えられます</li>
     </ul>
     <div class="actions">
       <button type="button" id="wel-skip">スキップ</button>

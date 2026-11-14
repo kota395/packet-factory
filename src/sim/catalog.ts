@@ -70,8 +70,7 @@ export const MODELS: readonly ModelDef[] = [
     category: 'server',
     name: '1U サーバ',
     short: '1U',
-    description:
-      '前面に 2.5 インチのベイが 10 本(SSD・NVMe を混ぜられる)。オンボードの 1GbE が 2 ポート。CPU・メモリ・ドライブ・NIC はあとから替えられる。',
+    description: '前面に 2.5 インチのベイが 10 本(SSD・NVMe を混ぜられる)。オンボードの 1GbE が 2 ポート。CPU・メモリ・ドライブ・NIC はあとから替えられる。',
     u: 1,
     powerW: 40,
     ports: [rj45(2)],
@@ -82,8 +81,7 @@ export const MODELS: readonly ModelDef[] = [
     category: 'server',
     name: '2U サーバ',
     short: '2U',
-    description:
-      '前面は 3.5 インチ HDD 12 本か、2.5 インチ 24 本(SSD・NVMe を混ぜられる)。背面に OS 用の SSD 2 本(ミラー)。オンボードの 1GbE が 2 ポート。',
+    description: '前面は 3.5 インチ HDD 12 本か、2.5 インチ 24 本(SSD・NVMe を混ぜられる)。背面に OS 用の SSD 2 本(ミラー)。オンボードの 1GbE が 2 ポート。',
     u: 2,
     powerW: 70,
     ports: [rj45(2)],
@@ -270,7 +268,7 @@ export interface PresetDef {
   readonly parts: ServerParts;
 }
 
-const drives = (type: DriveType, n: number): DriveType[] => new Array<DriveType>(n).fill(type);
+const drives = (type: DriveType, n: number): DriveType[] => Array.from({ length: n }, () => type);
 
 export const PRESETS: readonly PresetDef[] = [
   {

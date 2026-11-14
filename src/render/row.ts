@@ -5,28 +5,11 @@ import { RACK, ROW } from '../sim/config';
 import type { Device } from '../sim/facility';
 import type { Simulation } from '../sim/simulation';
 import { compact, money, rolesText } from '../ui/format';
-import {
-  RACK_W,
-  RAIL,
-  ROW_H,
-  TOP,
-  U_H,
-  deviceRect,
-  rackRect,
-  slotAt,
-  unitAt,
-  unitTop,
-  type Point,
-  type Rect,
-} from './geometry';
+import { RACK_W, RAIL, ROW_H, TOP, U_H, deviceRect, rackRect, slotAt, unitAt, unitTop, type Point, type Rect } from './geometry';
 
 /** タップされたもの */
 export type Target =
-  | { kind: 'device'; id: number }
-  | { kind: 'vm'; id: number }
-  | { kind: 'unit'; slot: number; u: number }
-  | { kind: 'slot'; slot: number }
-  | { kind: 'none' };
+  { kind: 'device'; id: number } | { kind: 'vm'; id: number } | { kind: 'unit'; slot: number; u: number } | { kind: 'slot'; slot: number } | { kind: 'none' };
 
 export interface ViewState {
   selected: Target | null;
@@ -251,10 +234,7 @@ export class RowRenderer {
       const hi = Math.max(0, screen - s) + screen * slack;
       return clamp(left, lo, hi) - min * this.zoom;
     };
-    this.world.position.set(
-      fit(this.world.x, this.spanX.x, this.spanX.w, width),
-      fit(this.world.y, TOP - 120, ROW_H - TOP + 160, height),
-    );
+    this.world.position.set(fit(this.world.x, this.spanX.x, this.spanX.w, width), fit(this.world.y, TOP - 120, ROW_H - TOP + 160, height));
   }
 
   private relayout(width: number, height: number): void {
@@ -425,13 +405,7 @@ export class RowRenderer {
         .stroke({ width: 1.5, color: m.color });
       this.label(d.name, r.x + 8, r.y + r.h / 2, 11, COLORS.text, 0, true, true);
       // サーバはデータを置くドライブの種類も(例: 2U HDD)
-      const kind = d.parts?.gpus
-        ? 'GPU'
-        : d.parts?.drives.length
-          ? DRIVES[d.parts.drives[d.parts.drives.length - 1]].name
-          : d.parts
-            ? 'SSD'
-            : '';
+      const kind = d.parts?.gpus ? 'GPU' : d.parts?.drives.length ? DRIVES[d.parts.drives[d.parts.drives.length - 1]].name : d.parts ? 'SSD' : '';
       const short = d.hv ? `${m.short} HV` : kind ? `${m.short} ${kind}` : m.short;
       this.label(short, r.x + 56, r.y + r.h / 2, 10, d.hv ? 0x95d5b2 : COLORS.muted, 0, true);
       if (d.hv) {
@@ -472,16 +446,7 @@ export class RowRenderer {
     }
   }
 
-  private label(
-    text: string,
-    x: number,
-    y: number,
-    size: number,
-    fill: number,
-    anchorX: number,
-    mono = false,
-    bold = false,
-  ): Text {
+  private label(text: string, x: number, y: number, size: number, fill: number, anchorX: number, mono = false, bold = false): Text {
     const t = new Text({
       text,
       style: { fontFamily: mono ? MONO : FONT, fontSize: size, fill, fontWeight: bold ? '700' : '400' },

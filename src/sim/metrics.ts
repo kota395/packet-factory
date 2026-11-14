@@ -125,7 +125,7 @@ class Rolling {
 }
 
 const emptyServiceHistory = (len: number): ServiceHistory => {
-  const nulls = () => new Array<number | null>(len).fill(null);
+  const nulls = () => Array.from({ length: len }, (): number | null => null);
   return {
     pv: nulls(),
     errorRate: nulls(),
@@ -221,7 +221,7 @@ export class Metrics {
       seen.add(r.key);
       let series = this.resources.get(r.key);
       if (!series) {
-        series = { label: r.label, rho: new Array(len - 1).fill(null) };
+        series = { label: r.label, rho: Array.from({ length: len - 1 }, () => null) };
         this.resources.set(r.key, series);
       }
       series.label = r.label;
@@ -229,7 +229,8 @@ export class Metrics {
     }
     for (const [key, series] of this.resources) if (!seen.has(key)) series.rho.push(null);
 
-    if (len > METRICS.historySec) {
+    // 古い点を落とす(復元した推移は間引いてあるので、点の数ではなく時刻で見る)
+    while (h.t.length > 1 && h.t[0] < sec - METRICS.historySec) {
       for (const series of Object.values(h)) series.shift();
       for (const sh of this.services.values()) for (const series of Object.values(sh)) series.shift();
       for (const [key, series] of this.resources) {
@@ -238,4 +239,65 @@ export class Metrics {
       }
     }
   }
+
+  // ---------------------------------------------------------------- 保存と復元
+
+  /**
+   * 推移を保存用に間引いて取り出す(METRICS.saveEverySec 秒ごと、数値は 4 桁に丸める)。
+   * 資源ごとの使用率は残さない(機器の構成が変わると意味がなくなるので、読み込んだあとに溜め直す)
+   */
+  exportHistory(): SavedHistory {
+    const h = this.history;
+    const keep: number[] = [];
+    for (let i = h.t.length - 1; i >= 0; i -= METRICS.saveEverySec) keep.unshift(i);
+    const round = (v: number | null) => (v === null ? null : Number(v.toPrecision(4)));
+    const pick = <T extends object>(src: T): Record<keyof T, (number | null)[]> =>
+      Object.fromEntries(Object.entries(src).map(([k, arr]) => [k, keep.map((i) => round((arr as (number | null)[])[i]))])) as Record<
+        keyof T,
+        (number | null)[]
+      >;
+    const last = h.t[h.t.length - 1] ?? 0;
+    return {
+      total: { ...pick(h), t: keep.map((i) => h.t[i] - last) },
+      services: Object.fromEntries([...this.services].map(([id, sh]) => [id, pick(sh)])),
+    };
+  }
+
+  /** 保存した推移を戻す。時刻は「読み込んだ時点が 0」になるよう負の秒数にする。形が合わなければ何もしない */
+  importHistory(data: unknown): boolean {
+    const d = data as SavedHistory | null;
+    if (!d || typeof d !== 'object' || !d.total || !Array.isArray(d.total.t)) return false;
+    const len = d.total.t.length;
+    if (len === 0 || len > METRICS.historySec) return false;
+    const okArr = (a: unknown, nullable: boolean): a is (number | null)[] =>
+      Array.isArray(a) && a.length === len && a.every((v) => (v === null ? nullable : typeof v === 'number' && Number.isFinite(v)));
+    const fresh = emptyHistory();
+    for (const k of Object.keys(fresh) as (keyof History)[]) {
+      if (!okArr(d.total[k], false)) return false;
+      fresh[k] = [...(d.total[k] as number[])];
+    }
+    const services = new Map<ServiceId, ServiceHistory>();
+    for (const [id, sh] of Object.entries(d.services ?? {})) {
+      const empty = emptyServiceHistory(0);
+      for (const k of Object.keys(empty) as (keyof ServiceHistory)[]) {
+        if (!okArr((sh as ServiceHistory)[k], true)) return false;
+        empty[k] = [...(sh as ServiceHistory)[k]];
+      }
+      services.set(id as ServiceId, empty);
+    }
+    // 最後の点が 0 秒になるように(このあとの記録は 1 秒から続く)
+    const last = fresh.t[len - 1];
+    fresh.t = fresh.t.map((t) => t - last);
+    Object.assign(this.history, fresh);
+    this.services.clear();
+    for (const [id, sh] of services) this.services.set(id, sh);
+    this.resources.clear();
+    return true;
+  }
+}
+
+/** 保存する推移(間引いたもの) */
+export interface SavedHistory {
+  total: Record<keyof History, (number | null)[]>;
+  services: Partial<Record<ServiceId, Record<keyof ServiceHistory, (number | null)[]>>>;
 }

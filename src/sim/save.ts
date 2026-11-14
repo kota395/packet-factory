@@ -1,5 +1,5 @@
 import { MODEL_BY_ID, PRESET_BY_ID, START_PARTS, isServerModel, partsError } from './catalog';
-import { OFFLINE, RACK, ROW } from './config';
+import { DIFFICULTY_IDS, OFFLINE, RACK, ROW, type DifficultyId } from './config';
 import { UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades } from './economy';
 import { PART_REFUND_RATE, memoryPrice, serverPrice } from './pricing';
 import { Simulation } from './simulation';
@@ -33,6 +33,10 @@ export interface SaveData {
   /** キャンペーンの残り時間とクールタイムの残り(ms) */
   campaign: [number, number];
   lifetimeEarned: number;
+  /** 達成した目標の数 */
+  goalsDone: number;
+  /** 難易度。ない(古いセーブ)なら「平和」 */
+  difficulty: DifficultyId;
   /** 保存時点の収支/秒。放置収入の計算に使う */
   incomePerSec: number;
   unlocks: UnlockId[];
@@ -49,8 +53,8 @@ export interface SaveData {
 }
 
 /** 新しいゲーム: ラック 1 本に、回線終端・スイッチ・リクエストを受ける 1U サーバ・db 用の 2U サーバ(HDD) */
-export function newGame(): Simulation {
-  const sim = new Simulation();
+export function newGame(difficulty: DifficultyId = 'normal'): Simulation {
+  const sim = new Simulation({ difficulty });
   const f = sim.facility;
   f.rent(0);
   f.place('handoff', 0, RACK.units, 0);
@@ -64,8 +68,8 @@ export function newGame(): Simulation {
 }
 
 /** チュートリアルの始まり: 回線終端とスイッチだけ(つないである)。チュートリアルで買う分のお金を足しておく */
-export function tutorialGame(): Simulation {
-  const sim = new Simulation();
+export function tutorialGame(difficulty: DifficultyId = 'normal'): Simulation {
+  const sim = new Simulation({ difficulty });
   const f = sim.facility;
   f.rent(0);
   f.place('handoff', 0, RACK.units, 0);
@@ -95,6 +99,8 @@ export function createSave(sim: Simulation, now = Date.now()): SaveData {
     users: { ...sim.serviceUsers },
     campaign: [Math.max(0, sim.campaign.until - sim.time), Math.max(0, sim.campaign.cooldownUntil - sim.time)],
     lifetimeEarned: sim.lifetimeEarned,
+    goalsDone: sim.goalsDone,
+    difficulty: sim.difficulty,
     incomePerSec: sim.incomePerSec,
     unlocks: [...sim.unlocks],
     disabled: [...sim.disabledFeatures],
@@ -115,6 +121,8 @@ export function loadSave(save: SaveData): Simulation {
     upgrades: save.upgrades,
   });
   sim.lifetimeEarned = save.lifetimeEarned;
+  sim.difficulty = save.difficulty;
+  sim.goalsDone = save.goalsDone;
   sim.campaign = { until: sim.time + save.campaign[0], cooldownUntil: sim.time + save.campaign[1] };
   const f = sim.facility;
   for (const slot of save.racks) f.rent(slot);
@@ -138,12 +146,17 @@ export function loadSave(save: SaveData): Simulation {
   return sim;
 }
 
-/** 不在だった時間と、その間の収入。短すぎる不在や赤字のときは 0 */
-export function offlineEarnings(save: SaveData, now: number): { elapsedMs: number; gained: number } {
-  const elapsedMs = Math.max(0, now - save.savedAt);
-  if (elapsedMs < OFFLINE.minMs || save.incomePerSec <= 0) return { elapsedMs, gained: 0 };
-  const counted = Math.min(elapsedMs, OFFLINE.maxMs);
-  return { elapsedMs, gained: save.incomePerSec * (counted / 1000) * OFFLINE.efficiency };
+/**
+ * 離れていた時間ぶんを sim に反映する(お金とユーザー)。短すぎる不在なら何もしない。
+ * incomePerSec は離れる直前の収支
+ */
+export function applyAbsence(sim: Simulation, elapsedMs: number, incomePerSec: number): { elapsedMs: number; gained: number; users: number } {
+  if (elapsedMs < OFFLINE.minMs) return { elapsedMs, gained: 0, users: 0 };
+  const counted = Math.min(elapsedMs, OFFLINE.maxMs) / 1000;
+  const gained = incomePerSec > 0 ? incomePerSec * counted * OFFLINE.efficiency : 0;
+  sim.money += gained;
+  const users = sim.growWhileAway(counted * OFFLINE.efficiency);
+  return { elapsedMs, gained, users };
 }
 
 // ---------------------------------------------------------------- 文字列化
@@ -224,9 +237,7 @@ export function parseSave(data: unknown): SaveData | null {
   const devices: SaveData['devices'] = [];
   /** v4 はサービスつきの役割、v3 は役割の名前だけ(ブログの役割として読む) */
   const okRoles = (roles: unknown[]): RoleKey[] =>
-    d.v === 3
-      ? roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId)).map((r) => roleKey('blog', r))
-      : roles.filter(isRoleKey);
+    d.v === 3 ? roles.filter((r): r is RoleId => ROLE_IDS.includes(r as RoleId)).map((r) => roleKey('blog', r)) : roles.filter(isRoleKey);
   for (const item of d.devices as unknown[]) {
     // 古いセーブは 7 要素(仮想化の前)・8 要素(BGP の前)・10 要素(Kubernetes の前)・11 要素(パーツの前)
     if (!Array.isArray(item) || ![7, 8, 10, 11, 12].includes(item.length)) return null;
@@ -242,20 +253,7 @@ export function parseSave(data: unknown): SaveData | null {
       parts = legacy?.parts ?? parseParts(rawParts) ?? null;
       if (!parts || partsError(model as 'srv-1u' | 'srv-2u', parts)) parts = model === 'srv-1u' ? START_PARTS.web : START_PARTS.db;
     }
-    devices.push([
-      id,
-      model as ModelId,
-      slot,
-      u,
-      okRoles(roles),
-      paid,
-      name.slice(0, 32),
-      hv === true,
-      bgp === true,
-      down === true,
-      k8s === true,
-      parts,
-    ]);
+    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true, bgp === true, down === true, k8s === true, parts]);
   }
 
   const vms: SaveData['vms'] = [];
@@ -285,6 +283,8 @@ export function parseSave(data: unknown): SaveData | null {
     users,
     campaign,
     lifetimeEarned: d.lifetimeEarned,
+    goalsDone: isInt(d.goalsDone) && d.goalsDone >= 0 ? Math.min(d.goalsDone, 1000) : 0,
+    difficulty: DIFFICULTY_IDS.includes(d.difficulty as DifficultyId) ? (d.difficulty as DifficultyId) : 'peace',
     incomePerSec: d.incomePerSec,
     unlocks,
     disabled,
@@ -297,7 +297,7 @@ export function parseSave(data: unknown): SaveData | null {
 }
 
 /** 機種固定だったころ(v4 まで)のサーバと、移す先の構成。ポートの並び(1GbE×2、仮想化ホストは 10G×2 も)は同じ */
-export const LEGACY_SERVERS: Record<string, { model: 'srv-1u' | 'srv-2u'; parts: ServerParts }> = {
+const LEGACY_SERVERS: Record<string, { model: 'srv-1u' | 'srv-2u'; parts: ServerParts }> = {
   'srv-1u-e': { model: 'srv-1u', parts: PRESET_BY_ID['1u-small'].parts },
   'srv-1u-d': { model: 'srv-1u', parts: PRESET_BY_ID['1u-web'].parts },
   'srv-2u-db': { model: 'srv-2u', parts: { cpu: 8, memGB: 64, backplane: 'sff', drives: ['ssd', 'ssd'], nic: 'none' } },

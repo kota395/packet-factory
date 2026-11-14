@@ -459,7 +459,9 @@ button.danger {
   text-overflow: ellipsis;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.18s, transform 0.18s;
+  transition:
+    opacity 0.18s,
+    transform 0.18s;
 }
 
 #toast.show {
@@ -1355,4 +1357,25 @@ button.part .cost {
   min-height: 32px;
   padding: 0 10px;
   font-size: 12px;
+}
+
+/* 目標(下の 1 行) */
+#hint b {
+  color: var(--text);
+}
+
+#hint .ok {
+  color: var(--ok);
+}
+
+.goal-hint {
+  margin-left: 12px;
+  opacity: 0.8;
+}
+
+@media (max-width: 600px) {
+  .goal-hint {
+    display: block;
+    margin-left: 0;
+  }
 }

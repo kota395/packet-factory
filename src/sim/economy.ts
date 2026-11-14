@@ -67,8 +67,7 @@ export const UNLOCKS: readonly UnlockDef[] = [
   {
     id: 'video',
     name: `${SERVICES.video.name}を始める`,
-    description:
-      '単価は高いが、配信(media)で帯域を桁違いに使う。投稿された動画のエンコード(worker)は 1 本で CPU を何十秒も使う。',
+    description: '単価は高いが、配信(media)で帯域を桁違いに使う。投稿された動画のエンコード(worker)は 1 本で CPU を何十秒も使う。',
     requires: 'photo',
     service: 'video',
   },
@@ -94,8 +93,7 @@ export const UNLOCKS: readonly UnlockDef[] = [
   {
     id: 'slb',
     name: 'ソフトウェア LB(LVS)',
-    description:
-      'サーバや VM に役割「lb」を付けて LB にできる。専用機より安いサーバで、台数を増やして横に広げられる。',
+    description: 'サーバや VM に役割「lb」を付けて LB にできる。専用機より安いサーバで、台数を増やして横に広げられる。',
     requires: 'lb',
     role: 'lb',
   },
@@ -115,8 +113,7 @@ export const UNLOCKS: readonly UnlockDef[] = [
   {
     id: 'virtualization',
     name: '仮想化(ハイパーバイザ)',
-    description:
-      'サーバをハイパーバイザにして VM を載せられる。役割は VM に付ける。コアとメモリの多い構成にしたサーバに向く。',
+    description: 'サーバをハイパーバイザにして VM を載せられる。役割は VM に付ける。コアとメモリの多い構成にしたサーバに向く。',
   },
   {
     id: 'kubernetes',
@@ -165,26 +162,22 @@ export const UNLOCKS: readonly UnlockDef[] = [
   {
     id: 'cdn',
     name: 'CDN',
-    description:
-      'ブログの画像と、写真・動画の配信の多くを CDN が配る(オリジンの回線・サーバを通らない)。配った量に応じて従量課金がかかる。',
+    description: 'ブログの画像と、写真・動画の配信の多くを CDN が配る(オリジンの回線・サーバを通らない)。配った量に応じて従量課金がかかる。',
   },
   {
     id: 'gpu',
     name: 'GPU サーバ',
-    description:
-      'サーバに GPU を載せられるようになる(1U は 2 枚、2U は 4 枚まで)。動画のエンコードと機械学習を、CPU よりずっと速く・少ない電力で処理する。',
+    description: 'サーバに GPU を載せられるようになる(1U は 2 枚、2U は 4 枚まで)。動画のエンコードと機械学習を、CPU よりずっと速く・少ない電力で処理する。',
   },
   {
     id: 'nvme',
     name: 'NVMe SSD',
-    description:
-      'サーバの 2.5 インチのベイに NVMe SSD を入れられるようになる(SATA SSD の 5 倍の IO)。db のディスク IO の壁を越える。',
+    description: 'サーバの 2.5 インチのベイに NVMe SSD を入れられるようになる(SATA SSD の 5 倍の IO)。db のディスク IO の壁を越える。',
   },
   {
     id: 'storage',
     name: '共有ストレージ',
-    description:
-      'ストレージアプライアンスを買えるようになり、VM のディスクを共有ストレージに置ける。共有ディスクの VM はホストを止めずに移せる。',
+    description: 'ストレージアプライアンスを買えるようになり、VM のディスクを共有ストレージに置ける。共有ディスクの VM はホストを止めずに移せる。',
     requires: 'virtualization',
   },
 ];
@@ -195,7 +188,7 @@ export const UPGRADES: readonly UpgradeDef[] = [
   {
     id: 'marketing',
     name: '広告',
-    description: 'すべてのサービスの潜在ユーザー数(市場規模)を増やす。',
+    description: 'すべてのサービスの潜在ユーザー数(市場規模)を増やす。売上が大きいほど高くなる。',
     effect: (l) => 1.6 ** l,
     format: (v) => `市場 ×${v.toFixed(2)}`,
   },
@@ -203,7 +196,7 @@ export const UPGRADES: readonly UpgradeDef[] = [
     id: 'monetize',
     name: '収益化の改善',
     description: 'すべてのサービスの 1 ページビューあたりの収益を増やす。',
-    effect: (l) => 1.25 ** l,
+    effect: (l) => 1.2 ** l,
     format: (v) => `×${v.toFixed(2)}`,
   },
   {
@@ -285,8 +278,7 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 9,
     name: '複数のサービス',
-    summary:
-      'ショッピング・写真共有・動画配信を始める。同じサーバに相乗りさせても、ラックごと分けてもよい。検索・画像配信・エンコードと、詰まる所が増える。',
+    summary: 'ショッピング・写真共有・動画配信を始める。同じサーバに相乗りさせても、ラックごと分けてもよい。検索・画像配信・エンコードと、詰まる所が増える。',
     unlocks: ['shop', 'photo', 'video'],
   },
   {
@@ -311,8 +303,7 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 13,
     name: '分析基盤',
-    summary:
-      'ログを Hadoop に集めて分析し、広告とショッピングの単価を上げる。機械学習は GPU で。動画のエンコードも GPU に任せると速い。',
+    summary: 'ログを Hadoop に集めて分析し、広告とショッピングの単価を上げる。機械学習は GPU で。動画のエンコードも GPU に任せると速い。',
     unlocks: ['hadoop', 'ml', 'gpu'],
   },
 ];
@@ -374,3 +365,48 @@ export const emptyUpgrades = (): Record<UpgradeId, number> => ({
   uplink: 0,
   rackPower: 0,
 });
+
+/**
+ * 目標。上から順に 1 つずつ。条件を holdSec 秒続けて満たすと達成で、報酬のお金が入る。
+ * 「次に何を目指すか」と、仕組みを入れる動機を示す
+ */
+export interface GoalDef {
+  /** 捌く(成功する)ページビュー/秒。すべてのサービスの合計 */
+  readonly pv: number;
+  /** 始めているサービスの数(以上) */
+  readonly services?: number;
+  /** 分析基盤による単価の倍率(以上) */
+  readonly boost?: number;
+  /** 達成の報酬($) */
+  readonly reward: number;
+  /** 手がかり */
+  readonly hint: string;
+}
+
+export const GOAL = {
+  /** エラー率がこれ未満で */
+  maxErrorRate: 0.01,
+  /** この秒数続けて満たす */
+  holdSec: 30,
+} as const;
+
+export const GOALS: readonly GoalDef[] = [
+  { pv: 30, reward: 300, hint: 'db のメモリを増やし、HDD を SSD に替える' },
+  { pv: 150, reward: 1500, hint: 'LB アプライアンスを置いて、web を並べる' },
+  { pv: 500, reward: 5000, hint: '回線契約を上げ、memcached で db の読み込みを減らす' },
+  { pv: 1500, reward: 20_000, hint: '10G のスイッチと LB、リードレプリカ、2 本目のラック' },
+  { pv: 3000, services: 2, reward: 60_000, hint: 'ショッピングを始める。検索サーバと注文の書き込みに備える' },
+  { pv: 6000, services: 2, reward: 200_000, hint: '仮想化や Kubernetes で台数をまとめる。故障に備えて HA と BGP' },
+  { pv: 12_000, services: 3, reward: 600_000, hint: '写真共有を始める。画像の配信(media)と CDN、回線の多重化' },
+  { pv: 25_000, services: 4, reward: 2_000_000, hint: '動画配信を始める。エンコードは GPU で、db はシャーディング' },
+  { pv: 40_000, services: 4, boost: 1.3, reward: 6_000_000, hint: '分析基盤(Hadoop と機械学習)で単価を上げる' },
+];
+
+/** 役割を割り当てるのに必要な解放(web と db は最初から使える。search・media・worker はそれを使うサービスを始めれば使える) */
+export const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = {
+  lb: 'slb',
+  cache: 'cache',
+  replica: 'replication',
+  hadoop: 'hadoop',
+  ml: 'ml',
+};

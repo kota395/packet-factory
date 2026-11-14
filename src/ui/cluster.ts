@@ -163,7 +163,10 @@ export class ClusterPanel {
       return '<div class="muted small">加えられる空きサーバがありません。サーバを置くと(役割は付けずに)、ここに出ます。</div>';
     }
     return `<div class="role-buttons">${list
-      .map((d) => `<button type="button" data-act="${act}" data-id="${d.id}" data-on="1">+ ${d.name}(${d.parts?.cpu ?? '-'} コア・${d.parts?.memGB ?? '-'}GB)を${label}</button>`)
+      .map(
+        (d) =>
+          `<button type="button" data-act="${act}" data-id="${d.id}" data-on="1">+ ${d.name}(${d.parts?.cpu ?? '-'} コア・${d.parts?.memGB ?? '-'}GB)を${label}</button>`,
+      )
       .join('')}</div>`;
   }
 
@@ -235,7 +238,9 @@ export class ClusterPanel {
         .join('・') || 'Pod なし';
     const workers = [
       ...[...f.devices.values()].filter((d) => d.k8s).map((d) => ({ id: d.id, name: d.name, kind: 'サーバ', act: 'worker', ref: d.id, live: `dev:${d.id}` })),
-      ...[...f.vms.values()].filter((v) => v.k8s).map((v) => ({ id: -v.id, name: v.name, kind: `VM ${VIRT.sizes[v.size].label}`, act: 'vmworker', ref: v.id, live: `node:${-v.id}` })),
+      ...[...f.vms.values()]
+        .filter((v) => v.k8s)
+        .map((v) => ({ id: -v.id, name: v.name, kind: `VM ${VIRT.sizes[v.size].label}`, act: 'vmworker', ref: v.id, live: `node:${-v.id}` })),
     ];
     const workerRows = workers
       .map(

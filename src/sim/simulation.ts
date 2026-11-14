@@ -1,80 +1,21 @@
-import {
-  CPU_OPTIONS,
-  DRIVES,
-  MEMORY_OPTIONS,
-  MODEL_BY_ID,
-  PRESET_BY_ID,
-  isServerModel,
-  partsError,
-  partsRequires,
-  specOf,
-} from './catalog';
-import {
-  BLOG_FEATURES,
-  CAMPAIGN,
-  CDN,
-  CHURN,
-  DIFFICULTY,
-  K8S,
-  GROWTH_RATE,
-  MIN_USERS,
-  PV_PER_USER,
-  METRICS,
-  SERVICES,
-  TICK_MS,
-  scopeName,
-  VIRT,
-  type Workload,
-} from './config';
-import { secondsUntil } from './forecast';
-import {
-  UNLOCKS,
-  UNLOCK_BY_ID,
-  UPGRADE_BY_ID,
-  emptyUpgrades,
-  unlockCost,
-  upgradeCost,
-} from './economy';
-import { Facility, type Cable, type Device } from './facility';
-import { POD_ID_BASE, computeFlow, type FlowResult, type PodGroup, type ServiceLoad } from './flow';
-import { Metrics, type Snapshot } from './metrics';
-import {
-  RACK_PRICE,
-  SELL_REFUND_RATE,
-  PART_REFUND_RATE,
-  PRICE_SCALE,
-  START_MONEY,
-  UPKEEP,
-  BACKPLANE_PRICE,
-  CDN_PRICE_PER_GB,
-  cpuPrice,
-  drivePrice,
-  gpuPrice,
-  memoryPrice,
-  nicPrice,
-  serverPrice,
-  campaignPrice,
-  growingPrice,
-  modelPrice,
-} from './pricing';
-import {
-  DATA_ROLES,
-  SERVICE_IDS,
-  splitRole,
-  type Backplane,
-  type DiskKind,
-  type DriveType,
-  type ModelId,
-  type NicId,
-  type RoleId,
-  type RoleKey,
-  type Scope,
-  type ServerParts,
-  type ServiceId,
-  type UnlockId,
-  type UpgradeId,
-  type VmSize,
-} from './types';
+import { MODEL_BY_ID, isServerModel, specOf } from './catalog';
+import { BLOG_FEATURES, CAMPAIGN, CDN, CHURN, DIFFICULTY, K8S, GROWTH_RATE, MIN_USERS, PV_PER_USER, METRICS, SERVICES, TICK_MS, scopeName } from './config';
+import type { DifficultyId, Workload } from './config';
+import { logistic, secondsUntil } from './forecast';
+import { GOAL, GOALS, UNLOCKS, UNLOCK_BY_ID, UPGRADE_BY_ID, emptyUpgrades, unlockCost, upgradeCost, ROLE_UNLOCK } from './economy';
+import type { GoalDef } from './economy';
+import { Facility } from './facility';
+import type { Cable, Device } from './facility';
+import { computeFlow } from './flow';
+import type { FlowResult, PodGroup, ServiceLoad } from './flow';
+import { Metrics } from './metrics';
+import type { Snapshot } from './metrics';
+import { RACK_PRICE, START_MONEY, UPKEEP, MARKETING_REVENUE, CDN_PRICE_PER_GB, serverPrice, campaignPrice, growingPrice, modelPrice } from './pricing';
+import { SERVICE_IDS, splitRole } from './types';
+import type { Backplane, DiskKind, DriveType, ModelId, NicId, RoleId, RoleKey, Scope, ServerParts, ServiceId, UnlockId, UpgradeId, VmSize } from './types';
+import * as hardware from './sim-hardware';
+import * as k8s from './sim-k8s';
+import * as virt from './sim-virt';
 
 export interface ActionResult {
   ok: boolean;
@@ -84,6 +25,8 @@ export interface ActionResult {
 
 export interface SimOptions {
   startMoney?: number;
+  /** 難易度。指定しなければ「平和」(障害なし) */
+  difficulty?: DifficultyId;
   /** 自動配線をやめて、facility.connect で手で組む(流量モデルのテスト用) */
   manualWiring?: boolean;
   /** ブログの最初のユーザー数(数値)か、サービスごとのユーザー数 */
@@ -97,15 +40,6 @@ export interface SimOptions {
   disabledFeatures?: Iterable<UnlockId>;
   upgrades?: Partial<Record<UpgradeId, number>>;
 }
-
-/** 役割を割り当てるのに必要な解放(web と db は最初から使える。search・media・worker はそれを使うサービスを始めれば使える) */
-const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = {
-  lb: 'slb',
-  cache: 'cache',
-  replica: 'replication',
-  hadoop: 'hadoop',
-  ml: 'ml',
-};
 
 /** サーバのパーツの替え方(ワンクリックの強化・変更) */
 export type PartChange =
@@ -135,6 +69,15 @@ export class Simulation {
   /** サービスごとのユーザー数(始めていないサービスも、始めたときの値を持っておく) */
   readonly serviceUsers: Record<ServiceId, number>;
   lifetimeEarned = 0;
+  /** 達成した目標の数(GOALS の先頭から)と、いまの目標の条件を満たし続けている時間(ms) */
+  goalsDone = 0;
+  goalHeldMs = 0;
+  /** 最後に達成した目標(画面で知らせるのに使う) */
+  lastGoal: { index: number; reward: number; at: number } | null = null;
+  /** 難易度(障害の起き方)。いつでも変えられる */
+  difficulty: DifficultyId;
+  /** 最後に起きた障害(画面で知らせるのに使う) */
+  lastFailure: { id: number; name: string; at: number; repairSec: number } | null = null;
   /** ショッピングのキャンペーン */
   campaign: CampaignState = { until: 0, cooldownUntil: 0 };
   /** Kubernetes: Deployment にした役割と、その Pod の数(オートスケールで変わる) */
@@ -165,6 +108,7 @@ export class Simulation {
     if (typeof opts.startUsers === 'number') this.serviceUsers.blog = opts.startUsers;
     else if (opts.startUsers) Object.assign(this.serviceUsers, opts.startUsers);
     this.facility.autoWire = !opts.manualWiring;
+    this.difficulty = opts.difficulty ?? 'peace';
     this.fixedTraffic = typeof opts.traffic === 'function' ? { blog: opts.traffic } : (opts.traffic ?? null);
     this.unlocks = new Set(opts.unlocks ?? []);
     this.upgrades = { ...emptyUpgrades(), ...opts.upgrades };
@@ -360,261 +304,87 @@ export class Simulation {
 
   /** 機器の価格。サーバは構成(パーツ)ごと */
   devicePrice(model: ModelId, parts?: ServerParts): number {
-    if (isServerModel(model)) return serverPrice(model, parts ?? this.defaultParts(model));
+    if (isServerModel(model)) return serverPrice(model, parts ?? hardware.defaultParts(this, model));
     let owned = 0;
     for (const d of this.facility.devices.values()) if (d.model === model) owned++;
     return modelPrice(model, owned);
   }
 
   upgradeCost(id: UpgradeId): number {
-    return upgradeCost(id, this.upgrades[id]);
+    const base = upgradeCost(id, this.upgrades[id]);
+    if (id !== 'marketing') return base;
+    // 広告は売上に比例して高くなる(後半にユーザーが一気に増えすぎないように)
+    const levels = Math.max(0, this.upgrades.marketing + 1 - MARKETING_REVENUE.freeLevels);
+    const byRevenue = this.metrics.rolling.revenuePerSec * MARKETING_REVENUE.secPerLevel * levels;
+    return Math.max(base, Math.round(byRevenue));
   }
 
   // ---------------------------------------------------------------- 物理層の操作
 
   rentRack(slot: number): ActionResult {
-    const err = this.facility.rentError(slot);
-    if (err) return { ok: false, message: err };
-    const price = this.rackPrice();
-    if (this.money < price) return { ok: false, message: `資金が足りません($${price} 必要)` };
-    this.money -= price;
-    this.facility.rent(slot);
-    this.refreshFlow();
-    return { ok: true, message: `ラック ${slot + 1} を借りました` };
-  }
-
-  /** プリセットを指定せずにサーバを買ったときの構成 */
-  private defaultParts(model: 'srv-1u' | 'srv-2u'): ServerParts {
-    return PRESET_BY_ID[model === 'srv-1u' ? '1u-web' : '2u-hdd'].parts;
+    return hardware.rentRack(this, slot);
   }
 
   /** 最初からある回線終端(動かせない・売れない・止められない) */
   isMainLine(id: number): boolean {
-    let first: number | null = null;
-    for (const d of this.facility.devices.values()) if (d.model === 'handoff' && (first === null || d.id < first)) first = d.id;
-    return first === id;
+    return hardware.isMainLine(this, id);
   }
 
   canBuyModel(model: ModelId, parts?: ServerParts): string | null {
-    const m = MODEL_BY_ID[model];
-    if (m.category === 'handoff' && !this.unlocks.has('multihoming')) return `回線を増やすには投資の「${UNLOCK_BY_ID.multihoming.name}」が必要です`;
-    if (m.requires && !this.unlocks.has(m.requires)) return `投資の「${UNLOCK_BY_ID[m.requires].name}」が必要です`;
-    if (parts) return this.partsUnlockError(parts);
-    return null;
-  }
-
-  private partsUnlockError(parts: ServerParts): string | null {
-    for (const u of partsRequires(parts)) if (!this.unlocks.has(u)) return `投資の「${UNLOCK_BY_ID[u].name}」が必要です`;
-    return null;
+    return hardware.canBuyModel(this, model, parts);
   }
 
   placeError(model: ModelId, slot: number, u: number, ignore?: number, parts?: ServerParts): string | null {
-    const p = isServerModel(model) ? (parts ?? (ignore !== undefined ? undefined : this.defaultParts(model))) : null;
-    return this.facility.placeError(model, slot, u, this.rackPowerW, ignore, p);
+    return hardware.placeError(this, model, slot, u, ignore, parts);
   }
 
   /** 機器を買って置く。サーバは構成(プリセット ID かパーツ)を指定できる */
   buyDevice(model: ModelId, slot: number, u: number, config?: string | ServerParts): ActionResult {
-    let parts: ServerParts | undefined;
-    if (isServerModel(model)) {
-      const preset = typeof config === 'string' ? PRESET_BY_ID[config] : undefined;
-      if (typeof config === 'string' && (!preset || preset.model !== model)) return { ok: false, message: 'その構成はありません' };
-      parts = preset?.parts ?? (config as ServerParts | undefined) ?? this.defaultParts(model);
-      const perr = partsError(model, parts);
-      if (perr) return { ok: false, message: perr };
-    }
-    const err = this.canBuyModel(model, parts) ?? this.placeError(model, slot, u, undefined, parts);
-    if (err) return { ok: false, message: err };
-    const price = this.devicePrice(model, parts);
-    if (this.money < price) return { ok: false, message: `資金が足りません($${price} 必要)` };
-    this.money -= price;
-    const d = this.facility.place(model, slot, u, price, { parts });
-    this.refreshFlow();
-    return { ok: true, id: d.id, message: `${d.name}(${MODEL_BY_ID[model].name})を設置しました` };
+    return hardware.buyDevice(this, model, slot, u, config);
   }
 
   /** プリセットでサーバを買う */
   buyServer(preset: string, slot: number, u: number): ActionResult {
-    const p = PRESET_BY_ID[preset];
-    if (!p) return { ok: false, message: 'その構成はありません' };
-    return this.buyDevice(p.model, slot, u, preset);
+    return hardware.buyServer(this, preset, slot, u);
   }
 
   // ---------------------------------------------------------------- サーバのパーツ
 
   /** パーツを替えたあとの構成と、かかるお金(新しいパーツの価格 − 外したパーツの下取り。マイナスなら戻ってくる) */
   partChangeInfo(id: number, change: PartChange): { parts: ServerParts | null; cost: number; error: string | null } {
-    const d = this.facility.devices.get(id);
-    if (!d || !d.parts || !isServerModel(d.model)) return { parts: null, cost: 0, error: 'サーバではありません' };
-    const p = d.parts;
-    let next: ServerParts;
-    let cost = 0;
-    const refund = (v: number) => Math.floor(v * PART_REFUND_RATE);
-    const bpPrice = Math.round(BACKPLANE_PRICE * PRICE_SCALE);
-    const step = <T>(list: readonly T[], cur: T, dir: number): T | null => {
-      const i = list.indexOf(cur) + dir;
-      return i >= 0 && i < list.length ? list[i] : null;
-    };
-    switch (change.kind) {
-      case 'cpu': {
-        const cores = step(
-          CPU_OPTIONS.map((o) => o.cores),
-          p.cpu,
-          change.dir,
-        );
-        if (cores === null) return { parts: null, cost: 0, error: change.dir > 0 ? 'これより上の CPU はありません' : 'これより下の CPU はありません' };
-        next = { ...p, cpu: cores };
-        cost = cpuPrice(cores) - refund(cpuPrice(p.cpu));
-        break;
-      }
-      case 'mem': {
-        const gb = step(MEMORY_OPTIONS, p.memGB, change.dir);
-        if (gb === null) return { parts: null, cost: 0, error: change.dir > 0 ? 'これ以上は載りません' : 'これより減らせません' };
-        next = { ...p, memGB: gb };
-        cost = memoryPrice(gb) - refund(memoryPrice(p.memGB));
-        break;
-      }
-      case 'drive-add': {
-        if (DRIVES[change.type].bay !== p.backplane) {
-          return { parts: null, cost: 0, error: p.backplane === 'lff' ? '3.5 インチのベイには HDD だけ' : '2.5 インチのベイには SSD・NVMe だけ' };
-        }
-        next = { ...p, drives: [...p.drives, change.type, change.type] };
-        cost = drivePrice(change.type) * 2;
-        break;
-      }
-      case 'drive-remove': {
-        if (p.drives.length < 2) return { parts: null, cost: 0, error: 'ドライブがありません' };
-        const removed = p.drives.slice(-2);
-        next = { ...p, drives: p.drives.slice(0, -2) };
-        cost = -removed.reduce((s, t) => s + refund(drivePrice(t)), 0);
-        break;
-      }
-      case 'backplane': {
-        if (change.to === p.backplane) return { parts: null, cost: 0, error: 'すでにその構成です' };
-        // バックプレーンを替えると、入っていたドライブは外れる(下取り)。データ用に一番安いドライブを 2 本入れる
-        const first: DriveType = change.to === 'lff' ? 'hdd' : 'ssd';
-        next = { ...p, backplane: change.to, drives: [first, first] };
-        cost = bpPrice + drivePrice(first) * 2 - p.drives.reduce((s, t) => s + refund(drivePrice(t)), 0);
-        break;
-      }
-      case 'gpu': {
-        const now = p.gpus ?? 0;
-        const n = now + change.dir;
-        if (n < 0) return { parts: null, cost: 0, error: 'GPU は載っていません' };
-        next = { ...p, gpus: n };
-        cost = change.dir > 0 ? gpuPrice(1) : -refund(gpuPrice(1));
-        break;
-      }
-      case 'nic': {
-        if (change.to === p.nic) return { parts: null, cost: 0, error: 'すでにその NIC です' };
-        next = { ...p, nic: change.to };
-        cost = nicPrice(change.to) - refund(nicPrice(p.nic));
-        break;
-      }
-    }
-    const error =
-      partsError(d.model, next) ??
-      this.partsUnlockError(next) ??
-      this.partsFitError(d, next) ??
-      (cost > 0 && this.money < cost ? `資金が足りません($${cost} 必要)` : null);
-    return { parts: next, cost, error };
-  }
-
-  /** 替えたあとの構成で、ラックの電力・載っている VM が収まるか */
-  private partsFitError(d: Device, next: ServerParts): string | null {
-    const watts = this.facility.powerUsed(d.slot, d.id) + specOf({ model: d.model, parts: next }).powerW;
-    if (watts > this.rackPowerW) return `電力が足りません(${watts}W / 上限 ${this.rackPowerW}W)`;
-    if (d.hv) {
-      const used = this.facility.hostUsage(d.id);
-      const s = specOf({ model: d.model, parts: next });
-      if (used.memGB > s.memGB - VIRT.hostMemGB) return '載っている VM のメモリが収まりません';
-      if (used.vcpu > s.cores * VIRT.vcpuOvercommit) return '載っている VM の vCPU が収まりません';
-    }
-    return null;
+    return hardware.partChangeInfo(this, id, change);
   }
 
   /** パーツを替える(ワンクリックの強化) */
   changeParts(id: number, change: PartChange): ActionResult {
-    const info = this.partChangeInfo(id, change);
-    if (info.error || !info.parts) return { ok: false, message: info.error ?? '替えられません' };
-    const d = this.facility.devices.get(id)!;
-    this.money -= info.cost;
-    this.facility.setParts(id, info.parts);
-    d.paid = serverPrice(d.model as 'srv-1u' | 'srv-2u', info.parts);
-    this.schedule();
-    this.refreshFlow();
-    const money = info.cost >= 0 ? `-$${info.cost}` : `+$${-info.cost}`;
-    return { ok: true, message: `${d.name} の構成を替えました(${money})` };
+    return hardware.changeParts(this, id, change);
   }
 
   moveDevice(id: number, slot: number, u: number): ActionResult {
-    const d = this.facility.devices.get(id);
-    if (!d) return { ok: false, message: '機器が見つかりません' };
-    if (this.isMainLine(d.id)) return { ok: false, message: '最初の回線終端は動かせません' };
-    if (d.slot === slot && d.u === u) return { ok: true };
-    const err = this.placeError(d.model, slot, u, id);
-    if (err) return { ok: false, message: err };
-    this.facility.move(id, slot, u);
-    this.refreshFlow();
-    return { ok: true };
+    return hardware.moveDevice(this, id, slot, u);
   }
 
   /** 売ったときに戻る額。サーバは今の構成の価格で引き取る */
   sellValue(id: number): number {
-    const d = this.facility.devices.get(id);
-    if (!d) return 0;
-    const value = d.parts && isServerModel(d.model) ? serverPrice(d.model, d.parts) : d.paid;
-    return Math.floor(value * SELL_REFUND_RATE);
+    return hardware.sellValue(this, id);
   }
 
   sellDevice(id: number): ActionResult {
-    const d = this.facility.devices.get(id);
-    if (!d) return { ok: false, message: '機器が見つかりません' };
-    if (this.isMainLine(d.id)) return { ok: false, message: '最初の回線終端は撤去できません' };
-    const vms = this.facility.vmsOn(id);
-    if (vms.length) return { ok: false, message: `${d.name} には VM が ${vms.length} 台載っています。先に移すか消してください` };
-    const refund = this.sellValue(id);
-    this.facility.remove(id);
-    this.money += refund;
-    this.schedule();
-    this.refreshFlow();
-    return { ok: true, message: `${d.name}を売却しました(+$${refund})` };
+    return hardware.sellDevice(this, id);
   }
 
   roleError(id: number, role: RoleKey): string | null {
-    const d = this.facility.devices.get(id);
-    if (!d || MODEL_BY_ID[d.model].category !== 'server') return '役割はサーバにだけ割り当てられます';
-    if (d.hv) return 'ハイパーバイザには役割を付けられません。VM に付けてください';
-    if (d.k8s) return 'Kubernetes のワーカーには役割を付けられません(Pod が自動で置かれます)';
-    return this.roleUnlockError(role);
+    return hardware.roleError(this, id, role);
   }
 
   /** その役割を今使えない理由(サービスを始めていない・解放していない) */
   roleUnlockError(key: RoleKey): string | null {
-    const [scope, role] = splitRole(key);
-    // 分析基盤の役割(hadoop・ml)は、それぞれの解放だけ
-    if (scope === 'data') {
-      if (!DATA_ROLES.includes(role)) return `分析基盤には役割「${role}」はありません`;
-      const unlock = ROLE_UNLOCK[role]!;
-      return this.unlocks.has(unlock) ? null : `投資の「${UNLOCK_BY_ID[unlock].name}」が必要です`;
-    }
-    const service = scope;
-    if (DATA_ROLES.includes(role) || !SERVICES[service].roles.includes(role)) return `${SERVICES[service].name}には役割「${role}」はありません`;
-    if (!this.isServiceActive(service)) return `投資の「${UNLOCK_BY_ID[service as UnlockId].name}」が必要です`;
-    const unlock = ROLE_UNLOCK[role];
-    if (unlock && !this.unlocks.has(unlock)) return `投資の「${UNLOCK_BY_ID[unlock].name}」が必要です`;
-    return null;
+    return hardware.roleUnlockError(this, key);
   }
 
   /** 役割の割り当てを切り替える */
   toggleRole(id: number, role: RoleKey): ActionResult {
-    const d = this.facility.devices.get(id);
-    const err = this.roleError(id, role);
-    if (!d || err) return { ok: false, message: err ?? '機器が見つかりません' };
-    const roles = d.roles.includes(role) ? d.roles.filter((r) => r !== role) : [...d.roles, role];
-    this.facility.setRoles(id, roles);
-    this.refreshFlow();
-    return { ok: true };
+    return hardware.toggleRole(this, id, role);
   }
 
   // ---------------------------------------------------------------- 冗長化と障害
@@ -661,13 +431,71 @@ export class Simulation {
   }
 
   /** 障害(難易度オプション): 機器がときどき壊れ、しばらくすると直る */
+  /**
+   * 離れていた間のユーザーの増加を反映する。サービスごとに、市場規模と今の構成で捌ける量のどちらか小さい方へ
+   * 向かって増える(減りはしない)。増えた人数の合計を返す
+   */
+  growWhileAway(seconds: number): number {
+    if (this.fixedTraffic || seconds <= 0) return 0;
+    this.estimateCapacity();
+    let gained = 0;
+    for (const id of this.activeServices) {
+      const u = this.serviceUsers[id];
+      const limit = Math.min(this.marketOf(id), this.capacityOf(id) / PV_PER_USER);
+      if (limit <= u) continue;
+      const next = Math.min(limit, logistic(u, this.marketOf(id), GROWTH_RATE, seconds));
+      gained += next - u;
+      this.serviceUsers[id] = next;
+    }
+    this.refreshFlow();
+    return gained;
+  }
+
+  /** いまの目標(すべて達成していれば null) */
+  get goal(): GoalDef | null {
+    return GOALS[this.goalsDone] ?? null;
+  }
+
+  /** いまの目標の条件を満たしているか(捌けているページビュー・エラー率・サービスの数・分析の効果) */
+  goalMet(): boolean {
+    const g = this.goal;
+    if (!g) return false;
+    const r = this.metrics.rolling;
+    return (
+      r.errorRate < GOAL.maxErrorRate &&
+      r.pv * (1 - r.errorRate) >= g.pv &&
+      this.activeServices.length >= (g.services ?? 1) &&
+      this.flow.analytics.boost >= (g.boost ?? 1)
+    );
+  }
+
+  /** 目標: 条件を続けて満たしたら達成して報酬。流量を固定している(テスト用)ときは動かさない */
+  private updateGoal(dtMs: number): void {
+    const g = this.goal;
+    if (!g || this.fixedTraffic) return;
+    this.goalHeldMs = this.goalMet() ? this.goalHeldMs + dtMs : 0;
+    if (this.goalHeldMs < GOAL.holdSec * 1000) return;
+    this.money += g.reward;
+    this.lastGoal = { index: this.goalsDone, reward: g.reward, at: this.time };
+    this.goalsDone++;
+    this.goalHeldMs = 0;
+    this.purchaseVersion++;
+  }
+
   private rollFailures(dt: number): void {
-    const f = DIFFICULTY.failures;
-    if (!f.enabled) return;
+    const f = DIFFICULTY.levels[this.difficulty].failures;
+    if (!f || this.facility.devices.size < f.fromDevices) return;
+    let failed = false;
     for (const d of this.facility.devices.values()) {
       if (MODEL_BY_ID[d.model].category === 'handoff' || d.failedUntil > this.time) continue;
-      if (this.random() < dt / f.mtbfSec) d.failedUntil = this.time + f.repairSec * 1000;
+      if (this.random() < dt / f.mtbfSec) {
+        d.failedUntil = this.time + f.repairSec * 1000;
+        this.lastFailure = { id: d.id, name: d.name, at: this.time, repairSec: f.repairSec };
+        failed = true;
+      }
     }
+    // 止まったワーカーの Pod はすぐ置き直す
+    if (failed) this.schedule();
   }
 
   private seed = 0x9e3779b9;
@@ -684,84 +512,26 @@ export class Simulation {
 
   /** ワーカーにできない理由(物理サーバは id、VM は vm を指定) */
   k8sWorkerError(target: { device?: number; vm?: number }, on: boolean): string | null {
-    if (on && !this.unlocks.has('kubernetes')) return `投資の「${UNLOCK_BY_ID.kubernetes.name}」が必要です`;
-    if (target.vm !== undefined) return this.facility.vms.has(target.vm) ? null : 'VM が見つかりません';
-    const d = this.facility.devices.get(target.device ?? -1);
-    if (!d || MODEL_BY_ID[d.model].category !== 'server') return 'ワーカーにできるのはサーバか VM だけです';
-    if (d.hv) return 'ハイパーバイザはワーカーにできません。VM をワーカーにしてください';
-    return null;
+    return k8s.k8sWorkerError(this, target, on);
   }
 
   /** サーバか VM を Kubernetes のワーカーにする / やめる。する場合、付けていた役割は外れる */
   setK8sWorker(target: { device?: number; vm?: number }, on: boolean): ActionResult {
-    const err = this.k8sWorkerError(target, on);
-    if (err) return { ok: false, message: err };
-    let label: string;
-    if (target.vm !== undefined) {
-      this.facility.setVmK8s(target.vm, on);
-      label = this.facility.vms.get(target.vm)!.name;
-    } else {
-      this.facility.setK8s(target.device!, on);
-      label = this.facility.devices.get(target.device!)!.name;
-    }
-    this.schedule();
-    this.refreshFlow();
-    return { ok: true, message: `${label} を${on ? 'Kubernetes のワーカーにしました' : 'ワーカーから外しました'}` };
+    return k8s.setK8sWorker(this, target, on);
   }
 
   deploymentError(key: RoleKey): string | null {
-    if (!this.unlocks.has('kubernetes')) return `投資の「${UNLOCK_BY_ID.kubernetes.name}」が必要です`;
-    const [, role] = splitRole(key);
-    if (!K8S.roles.includes(role)) return `${role} は状態を持つので、Pod ではなくサーバか VM で動かします`;
-    return this.roleUnlockError(key);
+    return k8s.deploymentError(this, key);
   }
 
   /** 役割を Deployment にする / やめる。最初は下限の数の Pod から始め、あとは自動で増減する */
   toggleDeployment(key: RoleKey): ActionResult {
-    if (this.deployments.has(key)) {
-      this.deployments.delete(key);
-      this.podsPending.delete(key);
-    } else {
-      const err = this.deploymentError(key);
-      if (err) return { ok: false, message: err };
-      this.deployments.set(key, K8S.minPods);
-    }
-    this.schedule();
-    this.purchaseVersion++;
-    this.refreshFlow();
-    const [s, r] = splitRole(key);
-    return {
-      ok: true,
-      message: `${scopeName(s)}の ${r} を${this.deployments.has(key) ? 'Deployment にしました(Pod は自動で増減します)' : 'Deployment から外しました'}`,
-    };
+    return k8s.toggleDeployment(this, key);
   }
 
   /** Kubernetes 全体: ワーカーの数、Pod に使える vCPU、置いた Pod と待っている Pod */
   get k8sCapacity(): { workers: number; vcpu: number; pods: number; pending: number } {
-    const w = this.k8sWorkers();
-    return {
-      workers: w.length,
-      vcpu: w.reduce((s, x) => s + x.vcpu, 0),
-      pods: this.pods.reduce((s, p) => s + p.count, 0),
-      pending: [...this.podsPending.values()].reduce((s, n) => s + n, 0),
-    };
-  }
-
-  /** ワーカー(動いているもの)と、Pod に使える CPU・メモリ */
-  private k8sWorkers(): { node: number; vcpu: number; memGB: number }[] {
-    const down = this.downDevices;
-    const out: { node: number; vcpu: number; memGB: number }[] = [];
-    for (const d of [...this.facility.devices.values()].sort((a, b) => a.id - b.id)) {
-      if (!d.k8s || d.hv || down.has(d.id)) continue;
-      const m = specOf(d);
-      out.push({ node: d.id, vcpu: m.cores, memGB: m.memGB - K8S.systemMemGB });
-    }
-    for (const v of [...this.facility.vms.values()].sort((a, b) => a.id - b.id)) {
-      if (!v.k8s || v.downUntil > this.time || down.has(v.host)) continue;
-      const z = VIRT.sizes[v.size];
-      out.push({ node: -v.id, vcpu: z.vcpu, memGB: z.memGB - K8S.systemMemGB });
-    }
-    return out;
+    return k8s.k8sCapacity(this);
   }
 
   /**
@@ -769,222 +539,76 @@ export class Simulation {
    * 止まったワーカーの Pod は、ここで別のワーカーに置き直される
    */
   schedule(): void {
-    const workers = this.k8sWorkers().map((w) => ({ ...w, freeCpu: w.vcpu, freeMem: w.memGB }));
-    const placed = new Map<string, number>();
-    this.podsPending.clear();
-    for (const [key, count] of this.deployments) {
-      if (this.deploymentError(key)) continue;
-      for (let i = 0; i < count; i++) {
-        let best: (typeof workers)[number] | null = null;
-        for (const w of workers) {
-          if (w.freeCpu < K8S.pod.vcpu || w.freeMem < K8S.pod.memGB) continue;
-          if (!best || w.freeCpu > best.freeCpu) best = w;
-        }
-        if (!best) {
-          this.podsPending.set(key, count - i);
-          break;
-        }
-        best.freeCpu -= K8S.pod.vcpu;
-        best.freeMem -= K8S.pod.memGB;
-        const k = `${best.node}|${key}`;
-        placed.set(k, (placed.get(k) ?? 0) + 1);
-      }
-    }
-    let id = POD_ID_BASE;
-    const pods: PodGroup[] = [];
-    for (const [k, count] of placed) {
-      const [worker, role] = k.split('|');
-      pods.push({ id: id++, worker: Number(worker), role: role as RoleKey, count });
-    }
-    const sig = (list: PodGroup[]) => list.map((p) => `${p.worker}${p.role}${p.count}`).join();
-    if (sig(pods) !== sig(this.pods)) this.podVersion++;
-    this.pods = pods;
-  }
-
-  /** オートスケール(HPA): Deployment ごとに、Pod の CPU 使用率が目標になるよう数を変える */
-  private autoscale(): void {
-    for (const [key, current] of this.deployments) {
-      let used = 0;
-      let cores = 0;
-      for (const n of this.flow.nodes.values()) {
-        if (n.pods === undefined || !n.roles.includes(key)) continue;
-        used += this.flow.nodeLoads.get(n.id)!.cpu * n.cores;
-        cores += n.cores;
-      }
-      if (!cores) continue;
-      const util = used / cores;
-      let desired = Math.ceil((current * util) / K8S.targetCpu);
-      if (desired < current) desired = Math.max(desired, current - Math.max(1, Math.floor(current * K8S.scaleDownRate)));
-      this.deployments.set(key, Math.min(K8S.maxPods, Math.max(K8S.minPods, desired)));
-    }
-    this.schedule();
+    return k8s.schedule(this);
   }
 
   // ---------------------------------------------------------------- 仮想化
 
   hvError(id: number, on: boolean): string | null {
-    const d = this.facility.devices.get(id);
-    if (!d || MODEL_BY_ID[d.model].category !== 'server') return 'ハイパーバイザにできるのはサーバだけです';
-    if (on && !this.unlocks.has('virtualization')) return `投資の「${UNLOCK_BY_ID.virtualization.name}」が必要です`;
-    if (on && d.k8s) return 'Kubernetes のワーカーはハイパーバイザにできません';
-    if (!on && this.facility.vmsOn(id).length) return 'VM が載っている間はやめられません';
-    return null;
+    return virt.hvError(this, id, on);
   }
 
   /** サーバをハイパーバイザにする / やめる。する場合、付けていた役割は外れる */
   setHv(id: number, on: boolean): ActionResult {
-    const err = this.hvError(id, on);
-    if (err) return { ok: false, message: err };
-    const d = this.facility.devices.get(id)!;
-    const dropped = d.roles.length;
-    this.facility.setHv(id, on);
-    this.refreshFlow();
-    const note = on && dropped ? '(役割は外れました。VM に付けてください)' : '';
-    return { ok: true, message: `${d.name} を${on ? 'ハイパーバイザにしました' : '物理サーバに戻しました'}${note}` };
+    return virt.setHv(this, id, on);
   }
 
   // ---------------------------------------------------------------- クラスタ(コンピュートの資源としてまとめて扱う)
 
   /** サーバがスイッチにつながっているか(配線が済んでいるか) */
   isWired(id: number): boolean {
-    const f = this.facility;
-    return f.cablesOf(id).some((c) => {
-      const other = f.devices.get(c.a.device === id ? c.b.device : c.a.device);
-      return !!other && MODEL_BY_ID[other.model].category === 'switch';
-    });
+    return virt.isWired(this, id);
   }
 
   /** ハイパーバイザかワーカーに加えられる空きサーバ(配線済みで、役割もなく、ほかの用途にしていない) */
   get spareServers(): Device[] {
-    return [...this.facility.devices.values()]
-      .filter((d) => MODEL_BY_ID[d.model].category === 'server' && !d.hv && !d.k8s && !d.roles.length && this.isWired(d.id))
-      .sort((a, b) => a.id - b.id);
+    return virt.spareServers(this);
   }
 
   /** ハイパーバイザ全体の割り当て(vCPU とメモリ) */
   get hvCapacity(): { hosts: number; vcpu: number; vcpuMax: number; memGB: number; memMax: number } {
-    let hosts = 0;
-    let vcpu = 0;
-    let vcpuMax = 0;
-    let memGB = 0;
-    let memMax = 0;
-    for (const d of this.facility.devices.values()) {
-      if (!d.hv) continue;
-      const sp = specOf(d);
-      const use = this.facility.hostUsage(d.id);
-      hosts++;
-      vcpu += use.vcpu;
-      vcpuMax += sp.cores * VIRT.vcpuOvercommit;
-      memGB += use.memGB;
-      memMax += sp.memGB - VIRT.hostMemGB;
-    }
-    return { hosts, vcpu, vcpuMax, memGB, memMax };
+    return virt.hvCapacity(this);
   }
 
   /** VM を置くホストを選ぶ: 載せられるホストのうち、メモリの空きが一番多いもの(止まっているホストは除く) */
   pickHost(size: VmSize): number | null {
-    const down = this.downDevices;
-    let best: { id: number; free: number } | null = null;
-    for (const d of this.facility.devices.values()) {
-      if (!d.hv || down.has(d.id) || this.facility.vmPlaceError(d.id, size)) continue;
-      const free = specOf(d).memGB - this.facility.hostUsage(d.id).memGB;
-      if (!best || free > best.free) best = { id: d.id, free };
-    }
-    return best?.id ?? null;
+    return virt.pickHost(this, size);
   }
 
   /**
    * ホストを選ばずに VM を作る(クラスタの画面から)。役割・ディスク・Kubernetes のワーカーにするかも一緒に決められる
    */
   createVmAuto(size: VmSize, opts: { roles?: RoleKey[]; disk?: DiskKind; k8s?: boolean } = {}): ActionResult {
-    if (!this.unlocks.has('virtualization')) return { ok: false, message: `投資の「${UNLOCK_BY_ID.virtualization.name}」が必要です` };
-    const host = this.pickHost(size);
-    if (host === null) return { ok: false, message: `${VIRT.sizes[size].label} の VM を載せられるホストがありません(ホストを増やすか、小さくする)` };
-    for (const r of opts.roles ?? []) {
-      const err = this.roleUnlockError(r);
-      if (err) return { ok: false, message: err };
-    }
-    if (opts.disk === 'shared' && !this.unlocks.has('storage')) return { ok: false, message: `投資の「${UNLOCK_BY_ID.storage.name}」が必要です` };
-    if (opts.k8s && !this.unlocks.has('kubernetes')) return { ok: false, message: `投資の「${UNLOCK_BY_ID.kubernetes.name}」が必要です` };
-    const vm = this.facility.createVm(host, size, { roles: opts.k8s ? [] : opts.roles, disk: opts.disk, k8s: opts.k8s });
-    if (opts.k8s) this.schedule();
-    this.refreshFlow();
-    const where = this.facility.devices.get(host)!.name;
-    return { ok: true, id: vm.id, message: `${vm.name}(${VIRT.sizes[size].label})を ${where} に作りました${opts.k8s ? '(Kubernetes のワーカー)' : ''}` };
+    return virt.createVmAuto(this, size, opts);
   }
 
   createVm(host: number, size: VmSize): ActionResult {
-    const err = this.facility.vmPlaceError(host, size);
-    if (err) return { ok: false, message: err };
-    const vm = this.facility.createVm(host, size);
-    this.refreshFlow();
-    return { ok: true, id: vm.id, message: `${vm.name}(${VIRT.sizes[size].label})を作りました` };
+    return virt.createVm(this, host, size);
   }
 
   deleteVm(id: number): ActionResult {
-    const vm = this.facility.vms.get(id);
-    if (!vm) return { ok: false, message: 'VM が見つかりません' };
-    this.facility.removeVm(id);
-    if (vm.k8s) this.schedule();
-    this.refreshFlow();
-    return { ok: true, message: `${vm.name} を消しました` };
+    return virt.deleteVm(this, id);
   }
 
   /** 別のホストへの移し方: 共有ストレージなら止めずに(ライブマイグレーション)、ローカルディスクならコピーの間止まる */
   vmMoveInfo(id: number, host: number): { error: string | null; downtimeMs: number } {
-    const vm = this.facility.vms.get(id);
-    if (!vm) return { error: 'VM が見つかりません', downtimeMs: 0 };
-    if (vm.host === host) return { error: 'すでにそのホストにいます', downtimeMs: 0 };
-    if (vm.downUntil > this.time) return { error: '移している途中です', downtimeMs: 0 };
-    return {
-      error: this.facility.vmPlaceError(host, vm.size, id),
-      downtimeMs: vm.disk === 'shared' ? 0 : VIRT.migrateDowntimeMs,
-    };
+    return virt.vmMoveInfo(this, id, host);
   }
 
   moveVm(id: number, host: number): ActionResult {
-    const { error, downtimeMs } = this.vmMoveInfo(id, host);
-    if (error) return { ok: false, message: error };
-    const vm = this.facility.vms.get(id)!;
-    this.facility.moveVm(id, host, this.time + downtimeMs);
-    this.refreshFlow();
-    const to = this.facility.devices.get(host)!.name;
-    return {
-      ok: true,
-      message: downtimeMs
-        ? `${vm.name} を ${to} へ移しています(ディスクのコピーで ${downtimeMs / 1000} 秒止まります)`
-        : `${vm.name} を ${to} へライブマイグレーションしました`,
-    };
+    return virt.moveVm(this, id, host);
   }
 
   vmRoleError(id: number, role: RoleKey): string | null {
-    const vm = this.facility.vms.get(id);
-    if (!vm) return 'VM が見つかりません';
-    if (vm.k8s) return 'Kubernetes のワーカーには役割を付けられません(Pod が自動で置かれます)';
-    return this.roleUnlockError(role);
+    return virt.vmRoleError(this, id, role);
   }
 
   toggleVmRole(id: number, role: RoleKey): ActionResult {
-    const vm = this.facility.vms.get(id);
-    const err = this.vmRoleError(id, role);
-    if (!vm || err) return { ok: false, message: err ?? 'VM が見つかりません' };
-    this.facility.setVmRoles(id, vm.roles.includes(role) ? vm.roles.filter((r) => r !== role) : [...vm.roles, role]);
-    this.refreshFlow();
-    return { ok: true };
+    return virt.toggleVmRole(this, id, role);
   }
 
   setVmDisk(id: number, disk: DiskKind): ActionResult {
-    const vm = this.facility.vms.get(id);
-    if (!vm) return { ok: false, message: 'VM が見つかりません' };
-    if (disk === 'shared' && !this.unlocks.has('storage')) {
-      return { ok: false, message: `投資の「${UNLOCK_BY_ID.storage.name}」が必要です` };
-    }
-    this.facility.setVmDisk(id, disk);
-    this.refreshFlow();
-    return {
-      ok: true,
-      message: disk === 'shared' ? `${vm.name} のディスクを共有ストレージへ移しました` : `${vm.name} のディスクをローカルへ戻しました`,
-    };
+    return virt.setVmDisk(this, id, disk);
   }
 
   // ---------------------------------------------------------------- 投資
@@ -1057,6 +681,7 @@ export class Simulation {
    * 今の構成で捌けるページビュー/秒の見積もり(成功率 METRICS.capacitySuccess を保てる最大)。
    *  - capacityPv: すべてのサービスの流量を同じ倍率で増やしたときの、合計の上限
    *  - capacityOf: そのサービスだけを増やしたとき(ほかは今の流量のまま)の、そのサービスの上限
+   * Kubernetes の Pod は、オートスケールでワーカーを使い切るまで増えた前提で見積もる。
    * 流量を変えて計算し直す二分探索なので、数秒ごとにだけ更新する
    */
   capacityPv = 0;
@@ -1085,28 +710,22 @@ export class Simulation {
   }
 
   estimateCapacity(): number {
-    const now = Object.fromEntries(this.activeServices.map((id) => [id, this.trafficOf(id, this.time)])) as Partial<
-      Record<ServiceId, number>
-    >;
-    const success = (pv: Partial<Record<ServiceId, number>>) => this.computeFlow(pv);
+    const now = Object.fromEntries(this.activeServices.map((id) => [id, this.trafficOf(id, this.time)])) as Partial<Record<ServiceId, number>>;
+    // Pod はオートスケールで増えるので、ワーカーを使い切った置き方で見積もる
+    const full = k8s.podsAtFullScale(this);
+    const success = (pv: Partial<Record<ServiceId, number>>) => this.computeFlow(pv, full);
     const target = METRICS.capacitySuccess;
     // 合計: 今の割合のまま全体を増やす(まだ流量がなければ均等に)
     const total = Object.values(now).reduce((a, b) => a + b!, 0);
     const ids = this.activeServices;
     const share = (id: ServiceId) => (total > 0 ? now[id]! / total : 1 / ids.length);
-    this.capacityPv = Simulation.searchMax(
-      (x) => success(Object.fromEntries(ids.map((id) => [id, x * share(id)]))).success >= target,
-      Math.max(1, total) * 2,
-    );
+    this.capacityPv = Simulation.searchMax((x) => success(Object.fromEntries(ids.map((id) => [id, x * share(id)]))).success >= target, Math.max(1, total) * 2);
     for (const id of SERVICE_IDS) {
       if (!this.isServiceActive(id)) {
         delete this.capacityBy[id];
         continue;
       }
-      this.capacityBy[id] = Simulation.searchMax(
-        (x) => (success({ ...now, [id]: x }).services[id]?.success ?? 0) >= target,
-        Math.max(1, now[id] ?? 0) * 2,
-      );
+      this.capacityBy[id] = Simulation.searchMax((x) => (success({ ...now, [id]: x }).services[id]?.success ?? 0) >= target, Math.max(1, now[id] ?? 0) * 2);
     }
     // 見積もりの計算で共有の経路データを使い回すので、今の流量で計算し直しておく
     this.refreshFlow();
@@ -1128,7 +747,7 @@ export class Simulation {
   }
 
   /** 流量を計算する。pv を与えればそのページビュー/秒で(キャパシティの見積もり用) */
-  private computeFlow(pv?: Partial<Record<ServiceId, number>>): FlowResult {
+  private computeFlow(pv?: Partial<Record<ServiceId, number>>, pods: PodGroup[] = this.pods): FlowResult {
     const services: ServiceLoad[] = this.activeServices.map((id) => ({
       id,
       pv: pv ? (pv[id] ?? 0) : this.trafficOf(id, this.time),
@@ -1136,7 +755,7 @@ export class Simulation {
     }));
     const flow = computeFlow(this.facility, {
       services,
-      pods: this.pods,
+      pods,
       uplinkGbps: this.uplinkGbps,
       roles: this.availableRoles,
       now: this.time,
@@ -1179,14 +798,12 @@ export class Simulation {
     const pv = flow.pv * dt;
     this.money += revenue - this.upkeepPerSec * dt;
     this.lifetimeEarned += revenue;
-    this.metrics.record(
-      { dtMs: TICK_MS, pv, errors: Math.max(0, pv - served), latencyMs: flow.latencyMs, p99Ms: flow.p99Ms, revenue },
-      parts,
-    );
+    this.metrics.record({ dtMs: TICK_MS, pv, errors: Math.max(0, pv - served), latencyMs: flow.latencyMs, p99Ms: flow.p99Ms, revenue }, parts);
     if (!this.fixedTraffic) this.updateUsers(dt);
+    this.updateGoal(TICK_MS);
     if (this.deployments.size && this.time - this.scaleAt >= K8S.scaleEveryMs) {
       this.scaleAt = this.time;
-      this.autoscale();
+      k8s.autoscale(this);
       this.refreshFlow();
     }
     if (this.time - this.capacityAt >= METRICS.capacityEveryMs) this.estimateCapacity();
