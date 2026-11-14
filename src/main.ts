@@ -1,17 +1,7 @@
 import './style.css';
 import { RowRenderer } from './render/row';
 import { DIFFICULTY, DIFFICULTY_IDS, OFFLINE, type DifficultyId } from './sim/config';
-import {
-  createSave,
-  decodeSave,
-  encodeSave,
-  loadSave,
-  newGame,
-  applyAbsence,
-  parseSave,
-  tutorialGame,
-  type SaveData,
-} from './sim/save';
+import { createSave, decodeSave, encodeSave, loadSave, newGame, applyAbsence, parseSave, tutorialGame, type SaveData } from './sim/save';
 import type { Simulation } from './sim/simulation';
 import { Dashboard } from './ui/dashboard';
 import { compact, duration, money, rate } from './ui/format';
@@ -99,17 +89,21 @@ const info = new InfoPanel(ui.info, () => state.sim, {
   },
 });
 
-const tutorial = new Tutorial(ui.board, (skipped) => {
-  // スキップしたら、チュートリアルで作るものが最初からある状態にする
-  if (skipped) {
-    switchTo(newGame());
-    toast('サーバを置いた状態から始めます');
-  }
-  state.highlight = null;
-  select(null);
-  setSpeed(1);
-  saveGame();
-}, () => refreshTutorial());
+const tutorial = new Tutorial(
+  ui.board,
+  (skipped) => {
+    // スキップしたら、チュートリアルで作るものが最初からある状態にする
+    if (skipped) {
+      switchTo(newGame());
+      toast('サーバを置いた状態から始めます');
+    }
+    state.highlight = null;
+    select(null);
+    setSpeed(1);
+    saveGame();
+  },
+  () => refreshTutorial(),
+);
 
 // ------------------------------------------------------------------ 起動
 
@@ -252,12 +246,7 @@ function onTool(id: ToolId): void {
 function updateToolbar(): void {
   for (const b of ui.toolbar.querySelectorAll<HTMLButtonElement>('button')) {
     const t = b.dataset.tool as ToolId;
-    const active =
-      t === 'invest'
-        ? invest.isOpen
-        : t === 'cluster'
-          ? cluster.isOpen
-          : state.selected?.kind === 'service';
+    const active = t === 'invest' ? invest.isOpen : t === 'cluster' ? cluster.isOpen : state.selected?.kind === 'service';
     b.classList.toggle('active', active);
     // クラスタは仮想化か Kubernetes を解放してから
     if (t === 'cluster') b.hidden = !cluster.available(state.sim);

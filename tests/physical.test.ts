@@ -63,8 +63,16 @@ describe('物理層', () => {
     f.rent(0);
     f.rent(1);
     f.place('handoff', 0, RACK.units, 0);
-    const peers = (id: number) => f.cablesOf(id).map((c) => f.otherEnd(c, id).device).sort((x, y) => x - y);
-    const speeds = (id: number) => f.cablesOf(id).filter((c) => f.portDef(c.a)!.label !== 'HA').map((c) => Math.min(f.portDef(c.a)!.speedGbps, f.portDef(c.b)!.speedGbps));
+    const peers = (id: number) =>
+      f
+        .cablesOf(id)
+        .map((c) => f.otherEnd(c, id).device)
+        .sort((x, y) => x - y);
+    const speeds = (id: number) =>
+      f
+        .cablesOf(id)
+        .filter((c) => f.portDef(c.a)!.label !== 'HA')
+        .map((c) => Math.min(f.portDef(c.a)!.speedGbps, f.portDef(c.b)!.speedGbps));
     const agg1 = s.buyDevice('agg-10g', 0, 38).id!;
     const tor = s.buyDevice('sw-48', 1, 40).id!;
     // ラック 2 の ToR の 10G のポートは 2 本しか残っていないが、LB はラック 1 の集約スイッチにも届くので 4 本とも 10G
@@ -73,7 +81,11 @@ describe('物理層', () => {
     expect(speeds(lb)).toEqual([10, 10, 10, 10]);
     // 1G の LB は、同じラックの ToR の 1G のポートへ(10G のポートを潰さない)
     const old = s.buyDevice('lb-1u', 1, 28).id!;
-    expect(peers(old).filter((x) => x !== lb).every((x) => x === tor)).toBe(true);
+    expect(
+      peers(old)
+        .filter((x) => x !== lb)
+        .every((x) => x === tor),
+    ).toBe(true);
     // 集約スイッチ 3 台: sw-48 の 10G は 4 ポートなので、1 本ずつ(2・1・1 にはしない)
     const agg2 = s.buyDevice('agg-10g', 0, 36).id!;
     const agg3 = s.buyDevice('agg-10g', 0, 34).id!;
@@ -88,13 +100,17 @@ describe('物理層', () => {
     f.rent(1);
     const isp = f.place('handoff', 0, RACK.units, 0).id;
     const sw1 = s.buyDevice('sw-24', 0, 40).id!;
-    const peers = (id: number) => f.cablesOf(id).map((c) => f.otherEnd(c, id).device).sort((x, y) => x - y);
+    const peers = (id: number) =>
+      f
+        .cablesOf(id)
+        .map((c) => f.otherEnd(c, id).device)
+        .sort((x, y) => x - y);
     // 10G のポートを持つスイッチを置くと、それがコアになる: 回線は 10G で受け、ほかのスイッチは決まった本数ずつつなぐ
     const t1 = s.buyDevice('sw-48', 1, 40).id!;
     const t2 = s.buyDevice('sw-48', 1, 39).id!;
     expect(peers(isp)).toEqual([t1]);
     expect(f.portDef(f.otherEnd(f.cablesOf(isp)[0], isp))!.speedGbps).toBe(10);
-    expect(peers(sw1)).toEqual(new Array(WIRING.uplinksPerCore).fill(t1));
+    expect(peers(sw1)).toEqual(Array.from({ length: WIRING.uplinksPerCore }, () => t1));
     expect(peers(t2).filter((x) => x === t1).length).toBeGreaterThan(0);
     const srv = s.buyServer('2u-ssd', 1, 20).id!;
     expect(peers(srv)).toEqual([t1, t2]);

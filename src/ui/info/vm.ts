@@ -14,7 +14,10 @@ export function vmContent(sim: Simulation, vm: Vm, base: string): Content {
         'Kubernetes のワーカー',
         `<div class="desc small">役割は付けず、Deployment の Pod が自動で置かれます。</div><div class="actions"><button type="button" data-act="vmk8s" data-id="${vm.id}" data-on="0">ワーカーから外す</button></div>`,
       )
-    : section('役割', roleButtons(sim, vm.roles, 'vmrole', vm.id, (r) => sim.vmRoleError(vm.id, r))) +
+    : section(
+        '役割',
+        roleButtons(sim, vm.roles, 'vmrole', vm.id, (r) => sim.vmRoleError(vm.id, r)),
+      ) +
       (sim.unlocks.has('kubernetes')
         ? `<div class="actions"><button type="button" data-act="vmk8s" data-id="${vm.id}" data-on="1">Kubernetes のワーカーにする</button></div>`
         : '');
@@ -35,14 +38,10 @@ export function vmContent(sim: Simulation, vm: Vm, base: string): Content {
       return `<button type="button" data-act="movevm" data-id="${vm.id}" data-host="${h.id}" ${info.error ? `disabled title="${info.error}"` : ''}>→ ${h.name}(${note})</button>`;
     })
     .join('');
-  fixed += section(
-    '別のホストへ移す',
-    `<div class="role-buttons">${moves || '<span class="muted small">ほかにハイパーバイザがありません</span>'}</div>`,
-  );
+  fixed += section('別のホストへ移す', `<div class="role-buttons">${moves || '<span class="muted small">ほかにハイパーバイザがありません</span>'}</div>`);
   fixed += `<div class="actions"><button type="button" data-act="device" data-id="${vm.host}">${host?.name ?? '?'} の詳細</button><button type="button" class="danger" data-act="deletevm" data-id="${vm.id}">VM を消す</button></div>`;
 
-  const state =
-    vm.downUntil > sim.time ? `<span class="warn">移行中(あと ${Math.ceil((vm.downUntil - sim.time) / 1000)} 秒)</span>` : '動いています';
+  const state = vm.downUntil > sim.time ? `<span class="warn">移行中(あと ${Math.ceil((vm.downUntil - sim.time) / 1000)} 秒)</span>` : '動いています';
   const hostLoad = sim.flow.devices.get(vm.host);
   const live =
     section(
@@ -54,13 +53,7 @@ export function vmContent(sim: Simulation, vm: Vm, base: string): Content {
         ['ホストの CPU', hostLoad ? load(hostLoad.cpu) : '-'],
       ]),
     ) +
-    section(
-      '負荷',
-      rows([
-        ...nodeRows(sim, vm.roles, sim.flow.nodeLoads.get(-vm.id), 'vCPU'),
-        ...(vm.k8s ? podRows(sim, -vm.id, size.vcpu, size.memGB) : []),
-      ]),
-    );
+    section('負荷', rows([...nodeRows(sim, vm.roles, sim.flow.nodeLoads.get(-vm.id), 'vCPU'), ...(vm.k8s ? podRows(sim, -vm.id, size.vcpu, size.memGB) : [])]));
   return {
     key: `vm${vm.id}@${base}`,
     title: vm.name,

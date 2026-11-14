@@ -13,8 +13,31 @@ export type ServicePlan = ReturnType<typeof planService>;
 
 export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) {
   const {
-    nodeList, nodes, name, loads, handoffs, isActive, path, send, linesTo, fromNet, fromNetAlong, addCpu, addWork,
-    addGpuWork, hasGpu, addIo, missOf, activeLbs, deadLbs, lbMs, along, nodePass, cpuMs, ioMs, transferMs,
+    nodeList,
+    nodes,
+    name,
+    loads,
+    handoffs,
+    isActive,
+    path,
+    send,
+    linesTo,
+    fromNet,
+    fromNetAlong,
+    addCpu,
+    addWork,
+    addGpuWork,
+    hasGpu,
+    addIo,
+    missOf,
+    activeLbs,
+    deadLbs,
+    lbMs,
+    along,
+    nodePass,
+    cpuMs,
+    ioMs,
+    transferMs,
   } = ledger;
   const W = svc.work;
   const key = (r: RoleId) => roleKey(svc.id, r);
@@ -310,9 +333,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         let sMs = 0;
         if (reach.length) {
           sOk = avg(reach.map((x) => along(path(w, x))[0] * nodeOk(x)));
-          sMs = avg(
-            reach.map((x) => along(path(w, x))[1] + cpuMs(x, W.search!.cpuMs) + (loads.get(x)!.miss[key('search')] ?? 1) * ioMs(x)),
-          );
+          sMs = avg(reach.map((x) => along(path(w, x))[1] + cpuMs(x, W.search!.cpuMs) + (loads.get(x)!.miss[key('search')] ?? 1) * ioMs(x)));
         } else if (primary !== undefined) {
           sOk = primaryOk;
           sMs = primaryMs + cpuMs(primary, W.search.dbCpuMs) + W.search.dbIo * (loads.get(primary)!.miss[key('db')] ?? 1) * ioMs(primary);

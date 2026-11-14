@@ -135,10 +135,7 @@ export function podsAtFullScale(sim: Simulation): PodGroup[] {
   const counts = [...sim.deployments].filter(([key]) => !sim.deploymentError(key));
   const total = counts.reduce((n, [, c]) => n + c, 0);
   if (!total) return sim.pods;
-  const slots = k8sWorkers(sim).reduce(
-    (n, w) => n + Math.max(0, Math.min(Math.floor(w.vcpu / K8S.pod.vcpu), Math.floor(w.memGB / K8S.pod.memGB))),
-    0,
-  );
+  const slots = k8sWorkers(sim).reduce((n, w) => n + Math.max(0, Math.min(Math.floor(w.vcpu / K8S.pod.vcpu), Math.floor(w.memGB / K8S.pod.memGB))), 0);
   const factor = Math.max(1, slots / total);
   return placePods(sim, new Map(counts.map(([key, c]) => [key, Math.min(K8S.maxPods, Math.floor(c * factor))]))).pods;
 }

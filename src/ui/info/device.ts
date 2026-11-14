@@ -19,7 +19,10 @@ export function deviceContent(sim: Simulation, d: Device, base: string): Content
     // ハイパーバイザ: VM の一覧と、VM を作るボタン
     const vms = f.vmsOn(d.id).sort((a, b) => a.id - b.id);
     const list = vms
-      .map((v) => `<button type="button" data-act="vm" data-id="${v.id}">${v.name}(${VIRT.sizes[v.size].label})${v.roles.length ? ` ${rolesText(v.roles)}` : ''}</button>`)
+      .map(
+        (v) =>
+          `<button type="button" data-act="vm" data-id="${v.id}">${v.name}(${VIRT.sizes[v.size].label})${v.roles.length ? ` ${rolesText(v.roles)}` : ''}</button>`,
+      )
       .join('');
     const create = (['s', 'm', 'l'] as const)
       .map((size) => {
@@ -37,7 +40,10 @@ export function deviceContent(sim: Simulation, d: Device, base: string): Content
       `<div class="desc small">役割は付けず、Deployment の Pod が自動で置かれます(Deployment はサービスの詳細で)。</div><div class="actions"><button type="button" data-act="k8s" data-id="${d.id}" data-on="0">ワーカーから外す</button></div>`,
     );
   } else if (m.category === 'server') {
-    fixed += section('役割', roleButtons(sim, d.roles, 'role', d.id, (r) => sim.roleError(d.id, r)));
+    fixed += section(
+      '役割',
+      roleButtons(sim, d.roles, 'role', d.id, (r) => sim.roleError(d.id, r)),
+    );
     const hvErr = sim.hvError(d.id, true);
     const k8sErr = sim.k8sWorkerError({ device: d.id }, true);
     fixed += `<div class="actions"><button type="button" data-act="hv" data-id="${d.id}" data-on="1" ${hvErr ? `disabled title="${hvErr}"` : ''}>ハイパーバイザにする</button>${
@@ -164,8 +170,7 @@ function partsSection(sim: Simulation, d: Device): string {
     line(
       p.backplane === 'lff' ? '前面(3.5 インチ)' : '前面(2.5 インチ)',
       driveText,
-      drivesHere.map((t) => button({ kind: 'drive-add', type: t.id }, `+ ${t.name}×2 `)).join('') +
-        button({ kind: 'drive-remove' }, '− 2 本 '),
+      drivesHere.map((t) => button({ kind: 'drive-add', type: t.id }, `+ ${t.name}×2 `)).join('') + button({ kind: 'drive-remove' }, '− 2 本 '),
     );
   if (CHASSIS[model].bays.lff && CHASSIS[model].bays.sff) {
     const to = p.backplane === 'lff' ? 'sff' : 'lff';
@@ -173,17 +178,10 @@ function partsSection(sim: Simulation, d: Device): string {
   }
   if (CHASSIS[model].gpuSlots && sim.unlocks.has('gpu')) {
     const gpus = p.gpus ?? 0;
-    html += line(
-      'GPU',
-      `${gpus} / ${CHASSIS[model].gpuSlots} 枚`,
-      step('gpu', -1, (x) => `${x.gpus ?? 0} 枚`) + step('gpu', 1, (x) => `${x.gpus ?? 0} 枚`),
-    );
+    html += line('GPU', `${gpus} / ${CHASSIS[model].gpuSlots} 枚`, step('gpu', -1, (x) => `${x.gpus ?? 0} 枚`) + step('gpu', 1, (x) => `${x.gpus ?? 0} 枚`));
   }
   const nicTo = p.nic === 'none' ? 'sfp10' : 'none';
   html += line('増設 NIC', NICS[p.nic].name, button({ kind: 'nic', to: nicTo }, nicTo === 'none' ? 'NIC を外す ' : '10G NIC を付ける '));
   const rear = CHASSIS[model].rearSsd ? `背面に OS 用の SSD ${CHASSIS[model].rearSsd} 本(ミラー)。` : '';
-  return section(
-    '構成',
-    `<div class="desc small">ドライブは 2 本ずつのミラー。${rear}外したパーツは半額で下取り。</div>${html}`,
-  );
+  return section('構成', `<div class="desc small">ドライブは 2 本ずつのミラー。${rear}外したパーツは半額で下取り。</div>${html}`);
 }

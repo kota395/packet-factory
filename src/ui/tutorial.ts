@@ -43,8 +43,7 @@ const freeUnit = (sim: Simulation, height: number) => {
   }
   return [];
 };
-const selectedIs = (ctx: TutorialContext, d: Device | undefined) =>
-  !!d && ctx.selected?.kind === 'device' && ctx.selected.id === d.id;
+const selectedIs = (ctx: TutorialContext, d: Device | undefined) => !!d && ctx.selected?.kind === 'device' && ctx.selected.id === d.id;
 
 const STEPS: readonly Step[] = [
   {
@@ -55,8 +54,7 @@ const STEPS: readonly Step[] = [
   },
   {
     title: 'web サーバを置く',
-    body: () =>
-      'ラックの<b>空いている U(光っている所)</b>をタップすると、買える機器の一覧が出ます。<b>「1U 小型」</b>を買ってください。',
+    body: () => 'ラックの<b>空いている U(光っている所)</b>をタップすると、買える機器の一覧が出ます。<b>「1U 小型」</b>を買ってください。',
     done: (c) => !!web(c.sim),
     glow: () => ['button[data-preset="1u-small"]'],
     highlight: (c) => (c.selected?.kind === 'unit' ? null : { units: freeUnit(c.sim, 1) }),
@@ -71,8 +69,7 @@ const STEPS: readonly Step[] = [
   },
   {
     title: 'db サーバを置く',
-    body: () =>
-      'もう一度空いている U をタップし、<b>「2U HDD 小型」</b>を買ってください。2U の機器は、タップした U から上に 2U ぶん使います。',
+    body: () => 'もう一度空いている U をタップし、<b>「2U HDD 小型」</b>を買ってください。2U の機器は、タップした U から上に 2U ぶん使います。',
     done: (c) => !!db(c.sim),
     glow: () => ['button[data-preset="2u-hdd-small"]'],
     highlight: (c) => (c.selected?.kind === 'unit' ? null : { units: freeUnit(c.sim, 2) }),

@@ -259,10 +259,7 @@ export class Dashboard {
     this.scopeBox.hidden = active.length < 2;
     const scopes: Scope[] = ['all', ...active];
     this.scopeBox.innerHTML = scopes
-      .map(
-        (s) =>
-          `<button type="button" data-scope="${s}" class="${s === this.scope ? 'active' : ''}">${s === 'all' ? '全体' : SERVICES[s].name}</button>`,
-      )
+      .map((s) => `<button type="button" data-scope="${s}" class="${s === this.scope ? 'active' : ''}">${s === 'all' ? '全体' : SERVICES[s].name}</button>`)
       .join('');
   }
 
@@ -288,7 +285,7 @@ export class Dashboard {
       .slice(0, TOP_RESOURCES);
     // 色は資源についていく: 上位から外れた資源の色だけを空け、新しく入った資源に渡す
     const keep = new Set(ranked.map((r) => r.key));
-    for (const key of [...this.resourceSlots.keys()]) if (!keep.has(key)) this.resourceSlots.delete(key);
+    for (const key of this.resourceSlots.keys()) if (!keep.has(key)) this.resourceSlots.delete(key);
     for (const r of ranked) {
       if (this.resourceSlots.has(r.key)) continue;
       const used = new Set(this.resourceSlots.values());
@@ -339,8 +336,7 @@ export class Dashboard {
           scales: {
             x: { time: false },
             y: {
-              range: (_u, _min, max) =>
-                yRange ? [yRange.min, Math.max(yRange.max, (max ?? 0) * 1.05)] : [0, Math.max(1e-6, (max ?? 0) * 1.15)],
+              range: (_u, _min, max) => (yRange ? [yRange.min, Math.max(yRange.max, (max ?? 0) * 1.05)] : [0, Math.max(1e-6, (max ?? 0) * 1.15)]),
             },
           },
           series: [
@@ -379,7 +375,8 @@ export class Dashboard {
     const market = all ? sim.marketSize : sim.marketOf(this.scope as ServiceId);
     const headroom = cap > 0 ? 1 - r.pv / cap : 0;
     const sat = all ? sim.secondsToSaturation() : sim.secondsToSaturation(this.scope as ServiceId);
-    const satText = sat === null ? '届かない' : sat === 0 ? '超えている' : `あと ${duration(sat * 1000) === '0 分' ? `${Math.round(sat)} 秒` : duration(sat * 1000)}`;
+    const satText =
+      sat === null ? '届かない' : sat === 0 ? '超えている' : `あと ${duration(sat * 1000) === '0 分' ? `${Math.round(sat)} 秒` : duration(sat * 1000)}`;
     const satClass = sat === 0 ? 'bad' : sat !== null && sat < 300 ? 'warn' : '';
     const satNote =
       sat === null ? `市場規模 ${compact(market)} 人で頭打ち` : all && sim.activeServices.length > 1 ? 'いちばん早いサービス・広告なし' : '広告を買わない場合';

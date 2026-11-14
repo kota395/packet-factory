@@ -109,10 +109,7 @@ export function serviceContent(sim: Simulation, base: string, tab: Scope): Conte
       if (!sim.deployments.has(key)) continue;
       const placed = sim.pods.filter((p) => p.role === key).reduce((n, p) => n + p.count, 0);
       const pending = sim.podsPending.get(key) ?? 0;
-      podList.push([
-        role,
-        `Pod ${placed}${pending ? ` <span class="bad">(待ち ${pending})</span>` : ''} / 目標 ${sim.deployments.get(key)}`,
-      ]);
+      podList.push([role, `Pod ${placed}${pending ? ` <span class="bad">(待ち ${pending})</span>` : ''} / 目標 ${sim.deployments.get(key)}`]);
     }
     if (podList.length) k8s = section('Pod', rows(podList));
   }
@@ -130,8 +127,7 @@ export function serviceContent(sim: Simulation, base: string, tab: Scope): Conte
   chain.push(`web ×${count('web')}`);
   if (count('cache')) chain.push(`cache ×${count('cache')}`);
   if (W.search) chain.push(count('search') ? `search ×${count('search')}` : 'search(db が肩代わり)');
-  const dbMode =
-    count('db') > 1 ? (sim.unlocks.has('sharding') ? '(シャーディング)' : sim.unlocks.has('partition') ? '(機能分割)' : '') : '';
+  const dbMode = count('db') > 1 ? (sim.unlocks.has('sharding') ? '(シャーディング)' : sim.unlocks.has('partition') ? '(機能分割)' : '') : '';
   chain.push(`db ×${count('db')}${dbMode}`);
   if (count('replica')) chain.push(`replica ×${count('replica')}`);
   const side: string[] = [];
@@ -187,10 +183,7 @@ export function serviceContent(sim: Simulation, base: string, tab: Scope): Conte
     live:
       campaign +
       k8s +
-      section(
-        '流れ',
-        `<div class="chain">${chain.join(' → ')}</div>` + (side.length ? `<div class="chain">${side.join('・')}</div>` : ''),
-      ) +
+      section('流れ', `<div class="chain">${chain.join(' → ')}</div>` + (side.length ? `<div class="chain">${side.join('・')}</div>` : '')) +
       (problems ? section('警告', `<ul class="problems">${problems}</ul>`) : '') +
       section('一番詰まっている所(全体)', b ? rows([[b.label, load(b.rho)]]) : '<div class="muted small">なし</div>') +
       section('役割ごとのサーバ', rows(roleRows)) +

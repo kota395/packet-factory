@@ -203,9 +203,7 @@ export function routeOf(facility: Facility, g: Graph, input: FlowInput, src: num
       if (u === dst) continue;
       const f = frac.get(u)!;
       if (u !== src) transit.push({ id: u, frac: f });
-      const hops = [...(g.adj.get(u)?.keys() ?? [])].filter(
-        (v) => dist.get(v) === dist.get(u)! - 1 && (v === dst || isSwitch(v)) && canStep(u, v),
-      );
+      const hops = [...(g.adj.get(u)?.keys() ?? [])].filter((v) => dist.get(v) === dist.get(u)! - 1 && (v === dst || isSwitch(v)) && canStep(u, v));
       for (const v of hops) {
         const link = g.adj.get(u)!.get(v)!;
         edges.push({ link, forward: link.a === u, frac: f / hops.length });

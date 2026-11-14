@@ -79,9 +79,7 @@ export class InvestPanel {
     } catch {
       // 保存できない環境では毎回最初のタブ
     }
-    this.tabs.innerHTML = LINES.map(
-      (l) => `<button type="button" role="tab" data-tab="${l.id}">${l.name}<span class="badge" hidden></span></button>`,
-    ).join('');
+    this.tabs.innerHTML = LINES.map((l) => `<button type="button" role="tab" data-tab="${l.id}">${l.name}<span class="badge" hidden></span></button>`).join('');
     this.tabs.addEventListener('click', (e) => {
       const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-tab]');
       if (!button) return;
@@ -103,10 +101,10 @@ export class InvestPanel {
         button.dataset.type === 'campaign'
           ? sim.startCampaign()
           : button.dataset.type === 'unlock'
-          ? sim.unlock(id as UnlockId)
-          : button.dataset.type === 'feature'
-            ? sim.setFeatureEnabled(id as UnlockId, !sim.isFeatureActive(id as UnlockId))
-            : sim.buyUpgrade(id as UpgradeId);
+            ? sim.unlock(id as UnlockId)
+            : button.dataset.type === 'feature'
+              ? sim.setFeatureEnabled(id as UnlockId, !sim.isFeatureActive(id as UnlockId))
+              : sim.buyUpgrade(id as UpgradeId);
       this.onResult(r.message, r.ok);
       this.update();
     });
@@ -253,16 +251,7 @@ export class InvestPanel {
   }
 }
 
-function row(p: {
-  stage: StageDef | null;
-  tag: string;
-  title: string;
-  desc: string;
-  effect: string;
-  cost: number;
-  type: string;
-  id: string;
-}): string {
+function row(p: { stage: StageDef | null; tag: string; title: string; desc: string; effect: string; cost: number; type: string; id: string }): string {
   const stage = !p.stage ? '' : `<span class="inv-stage" title="${p.stage.name}">段階 ${p.stage.id}</span>`;
   return `
     <div class="inv-item">

@@ -2,7 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { PRESET_BY_ID } from '../src/sim/catalog';
 import { RACK } from '../src/sim/config';
 import { upgradeCost } from '../src/sim/economy';
-import { CHASSIS_PRICES, CPU_PRICES, DRIVE_PRICES, MARKETING_REVENUE, MEMORY_PRICE_PER_GB, MODEL_PRICES, PRICE_SCALE, START_MONEY, UNLOCK_PRICES } from '../src/sim/pricing';
+import {
+  CHASSIS_PRICES,
+  CPU_PRICES,
+  DRIVE_PRICES,
+  MARKETING_REVENUE,
+  MEMORY_PRICE_PER_GB,
+  MODEL_PRICES,
+  PRICE_SCALE,
+  START_MONEY,
+  UNLOCK_PRICES,
+} from '../src/sim/pricing';
 import { newGame } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
 import { constant, RICH, run, base } from './helpers';
@@ -45,9 +55,7 @@ describe('経済', () => {
     const b2 = s.money;
     s.buyServer('1u-web', 0, 2);
     const p = PRESET_BY_ID['1u-web'].parts;
-    expect(b2 - s.money).toBe(
-      (CHASSIS_PRICES['srv-1u'] + CPU_PRICES[p.cpu] + p.memGB * MEMORY_PRICE_PER_GB + 2 * DRIVE_PRICES.ssd) * PRICE_SCALE,
-    );
+    expect(b2 - s.money).toBe((CHASSIS_PRICES['srv-1u'] + CPU_PRICES[p.cpu] + p.memGB * MEMORY_PRICE_PER_GB + 2 * DRIVE_PRICES.ssd) * PRICE_SCALE);
     const m = s.money;
     s.unlock('lb');
     expect(m - s.money).toBe(UNLOCK_PRICES.lb * PRICE_SCALE);

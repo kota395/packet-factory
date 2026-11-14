@@ -67,8 +67,7 @@ export const UNLOCKS: readonly UnlockDef[] = [
   {
     id: 'video',
     name: `${SERVICES.video.name}を始める`,
-    description:
-      '単価は高いが、配信(media)で帯域を桁違いに使う。投稿された動画のエンコード(worker)は 1 本で CPU を何十秒も使う。',
+    description: '単価は高いが、配信(media)で帯域を桁違いに使う。投稿された動画のエンコード(worker)は 1 本で CPU を何十秒も使う。',
     requires: 'photo',
     service: 'video',
   },
@@ -94,8 +93,7 @@ export const UNLOCKS: readonly UnlockDef[] = [
   {
     id: 'slb',
     name: 'ソフトウェア LB(LVS)',
-    description:
-      'サーバや VM に役割「lb」を付けて LB にできる。専用機より安いサーバで、台数を増やして横に広げられる。',
+    description: 'サーバや VM に役割「lb」を付けて LB にできる。専用機より安いサーバで、台数を増やして横に広げられる。',
     requires: 'lb',
     role: 'lb',
   },
@@ -115,8 +113,7 @@ export const UNLOCKS: readonly UnlockDef[] = [
   {
     id: 'virtualization',
     name: '仮想化(ハイパーバイザ)',
-    description:
-      'サーバをハイパーバイザにして VM を載せられる。役割は VM に付ける。コアとメモリの多い構成にしたサーバに向く。',
+    description: 'サーバをハイパーバイザにして VM を載せられる。役割は VM に付ける。コアとメモリの多い構成にしたサーバに向く。',
   },
   {
     id: 'kubernetes',
@@ -165,26 +162,22 @@ export const UNLOCKS: readonly UnlockDef[] = [
   {
     id: 'cdn',
     name: 'CDN',
-    description:
-      'ブログの画像と、写真・動画の配信の多くを CDN が配る(オリジンの回線・サーバを通らない)。配った量に応じて従量課金がかかる。',
+    description: 'ブログの画像と、写真・動画の配信の多くを CDN が配る(オリジンの回線・サーバを通らない)。配った量に応じて従量課金がかかる。',
   },
   {
     id: 'gpu',
     name: 'GPU サーバ',
-    description:
-      'サーバに GPU を載せられるようになる(1U は 2 枚、2U は 4 枚まで)。動画のエンコードと機械学習を、CPU よりずっと速く・少ない電力で処理する。',
+    description: 'サーバに GPU を載せられるようになる(1U は 2 枚、2U は 4 枚まで)。動画のエンコードと機械学習を、CPU よりずっと速く・少ない電力で処理する。',
   },
   {
     id: 'nvme',
     name: 'NVMe SSD',
-    description:
-      'サーバの 2.5 インチのベイに NVMe SSD を入れられるようになる(SATA SSD の 5 倍の IO)。db のディスク IO の壁を越える。',
+    description: 'サーバの 2.5 インチのベイに NVMe SSD を入れられるようになる(SATA SSD の 5 倍の IO)。db のディスク IO の壁を越える。',
   },
   {
     id: 'storage',
     name: '共有ストレージ',
-    description:
-      'ストレージアプライアンスを買えるようになり、VM のディスクを共有ストレージに置ける。共有ディスクの VM はホストを止めずに移せる。',
+    description: 'ストレージアプライアンスを買えるようになり、VM のディスクを共有ストレージに置ける。共有ディスクの VM はホストを止めずに移せる。',
     requires: 'virtualization',
   },
 ];
@@ -285,8 +278,7 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 9,
     name: '複数のサービス',
-    summary:
-      'ショッピング・写真共有・動画配信を始める。同じサーバに相乗りさせても、ラックごと分けてもよい。検索・画像配信・エンコードと、詰まる所が増える。',
+    summary: 'ショッピング・写真共有・動画配信を始める。同じサーバに相乗りさせても、ラックごと分けてもよい。検索・画像配信・エンコードと、詰まる所が増える。',
     unlocks: ['shop', 'photo', 'video'],
   },
   {
@@ -311,8 +303,7 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 13,
     name: '分析基盤',
-    summary:
-      'ログを Hadoop に集めて分析し、広告とショッピングの単価を上げる。機械学習は GPU で。動画のエンコードも GPU に任せると速い。',
+    summary: 'ログを Hadoop に集めて分析し、広告とショッピングの単価を上げる。機械学習は GPU で。動画のエンコードも GPU に任せると速い。',
     unlocks: ['hadoop', 'ml', 'gpu'],
   },
 ];

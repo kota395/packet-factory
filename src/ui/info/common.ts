@@ -48,22 +48,13 @@ export function nodeRows(sim: Simulation, roles: readonly RoleKey[], l: NodeLoad
     if (!sim.isScopeActive(s) || !sim.availableRoles.has(r)) continue;
     const w = l.work[k] ?? 0;
     const miss = l.miss[k] !== undefined ? `(${pct(l.miss[k]!)} がディスクへ)` : '';
-    out.push([
-      `${SERVICE_SHORT[s]} ${r}`,
-      w > 0 ? `${compact(w, 1)} ${ROLE_UNIT[r]}${miss}` : '<span class="muted">なし(流れてきていない)</span>',
-    ]);
+    out.push([`${SERVICE_SHORT[s]} ${r}`, w > 0 ? `${compact(w, 1)} ${ROLE_UNIT[r]}${miss}` : '<span class="muted">なし(流れてきていない)</span>']);
   }
   return out;
 }
 
 /** 役割のボタン。始めているサービスごとに並べる */
-export function roleButtons(
-  sim: Simulation,
-  roles: readonly RoleKey[],
-  act: string,
-  id: number,
-  errorOf: (r: RoleKey) => string | null,
-): string {
+export function roleButtons(sim: Simulation, roles: readonly RoleKey[], act: string, id: number, errorOf: (r: RoleKey) => string | null): string {
   // サービスごと、分析基盤を解放していれば分析基盤も
   const groups: [Scope, readonly RoleId[]][] = sim.activeServices.map((s) => [s, SERVICES[s].roles]);
   if (sim.isScopeActive('data')) groups.push(['data', DATA_ROLES]);

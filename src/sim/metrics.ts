@@ -125,7 +125,7 @@ class Rolling {
 }
 
 const emptyServiceHistory = (len: number): ServiceHistory => {
-  const nulls = () => new Array<number | null>(len).fill(null);
+  const nulls = () => Array.from({ length: len }, (): number | null => null);
   return {
     pv: nulls(),
     errorRate: nulls(),
@@ -221,7 +221,7 @@ export class Metrics {
       seen.add(r.key);
       let series = this.resources.get(r.key);
       if (!series) {
-        series = { label: r.label, rho: new Array(len - 1).fill(null) };
+        series = { label: r.label, rho: Array.from({ length: len - 1 }, () => null) };
         this.resources.set(r.key, series);
       }
       series.label = r.label;

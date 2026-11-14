@@ -70,8 +70,7 @@ export class InfoPanel {
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('button[data-act="buy"]')) {
       const model = b.dataset.model as ModelId;
       const parts = b.dataset.preset ? PRESET_BY_ID[b.dataset.preset].parts : undefined;
-      const err =
-        sim.canBuyModel(model, parts) ?? sim.placeError(model, Number(b.dataset.slot), Number(b.dataset.u), undefined, parts);
+      const err = sim.canBuyModel(model, parts) ?? sim.placeError(model, Number(b.dataset.slot), Number(b.dataset.u), undefined, parts);
       const price = sim.devicePrice(model, parts);
       b.disabled = !!err || sim.money < price;
       b.title = err ?? (sim.money < price ? '資金が足りません' : '');
