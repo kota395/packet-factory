@@ -3,7 +3,8 @@ import { MODEL_BY_ID, portsOf, PRESETS, PRESET_BY_ID, START_PARTS, isServerModel
 import { ANALYTICS, WIRING, BLOG_FEATURES, DIFFICULTY, METRICS, PV_PER_USER, CAMPAIGN, CDN, DB_SPLIT, K8S, RACK, SERVICES, VIRT, WORK } from '../src/sim/config';
 import { LEGACY_SERVERS, tutorialGame, createSave, decodeSave, encodeSave, loadSave, newGame, applyAbsence, parseSave } from '../src/sim/save';
 import { lbGroups } from '../src/sim/flow';
-import { GOAL, GOALS } from '../src/sim/economy';
+import { GOAL, GOALS, upgradeCost } from '../src/sim/economy';
+import { MARKETING_REVENUE } from '../src/sim/pricing';
 import { Simulation } from '../src/sim/simulation';
 import { forecastSeries, logistic, secondsUntil } from '../src/sim/forecast';
 import {
@@ -1118,6 +1119,31 @@ describe('チュートリアル', () => {
 });
 
 describe('経済', () => {
+  it('広告は、売上が大きいほど高くなる(最初の数レベルは定価のまま)', () => {
+    const { s, server } = base({ pv: 200 });
+    server('srv-1u-e', 30, ['blog:web']);
+    server('srv-2u-db', 20, ['blog:db']);
+    run(s, 20_000);
+    const revenue = s.metrics.rolling.revenuePerSec;
+    expect(revenue).toBeGreaterThan(0);
+    // 定価だけ
+    expect(s.upgradeCost('marketing')).toBe(upgradeCost('marketing', 0));
+    // レベルが上がると、売上 × 秒数 ×(次のレベル − freeLevels)が定価を上回る
+    const level = MARKETING_REVENUE.freeLevels + 2;
+    const t = new Simulation({ startMoney: RICH, traffic: constant(200), upgrades: { marketing: level, monetize: 10, uplink: 2, rackPower: 3 } });
+    t.facility.rent(0);
+    t.facility.place('handoff', 0, RACK.units, 0);
+    t.buyDevice('sw-24', 0, 40);
+    const web = t.buyServer('1u-web', 0, 30).id!;
+    const db = t.buyServer('2u-ssd', 0, 20).id!;
+    t.toggleRole(web, 'blog:web');
+    t.toggleRole(db, 'blog:db');
+    run(t, 20_000);
+    const want = Math.round(t.metrics.rolling.revenuePerSec * MARKETING_REVENUE.secPerLevel * 3);
+    expect(want).toBeGreaterThan(upgradeCost('marketing', level));
+    expect(t.upgradeCost('marketing')).toBe(want);
+  });
+
   it('最初の資金と、解放・機器の価格は pricing.ts の値で決まる', () => {
     expect(new Simulation().money).toBe(START_MONEY);
     const s = new Simulation({ startMoney: RICH });

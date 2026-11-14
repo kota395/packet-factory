@@ -50,6 +50,7 @@ import {
   START_MONEY,
   UPKEEP,
   BACKPLANE_PRICE,
+  MARKETING_REVENUE,
   CDN_PRICE_PER_GB,
   cpuPrice,
   drivePrice,
@@ -383,7 +384,12 @@ export class Simulation {
   }
 
   upgradeCost(id: UpgradeId): number {
-    return upgradeCost(id, this.upgrades[id]);
+    const base = upgradeCost(id, this.upgrades[id]);
+    if (id !== 'marketing') return base;
+    // 広告は売上に比例して高くなる(後半にユーザーが一気に増えすぎないように)
+    const levels = Math.max(0, this.upgrades.marketing + 1 - MARKETING_REVENUE.freeLevels);
+    const byRevenue = this.metrics.rolling.revenuePerSec * MARKETING_REVENUE.secPerLevel * levels;
+    return Math.max(base, Math.round(byRevenue));
   }
 
   // ---------------------------------------------------------------- 物理層の操作

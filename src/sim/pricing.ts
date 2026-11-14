@@ -118,9 +118,9 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   images: 2500,
   comments: 6000,
   // 新しいサービス
-  shop: 10_000,
-  photo: 40_000,
-  video: 150_000,
+  shop: 60_000,
+  photo: 500_000,
+  video: 4_000_000,
   // ソフトウェア
   lb: 800,
   slb: 15_000,
@@ -136,8 +136,8 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
   cdn: 40_000,
   // 分析基盤
   gpu: 20_000,
-  hadoop: 50_000,
-  ml: 120_000,
+  hadoop: 300_000,
+  ml: 1_500_000,
   // 機器
   tenGig: 5000,
   agg: 12_000,
@@ -148,12 +148,19 @@ export const UNLOCK_PRICES: Readonly<Record<UnlockId, number>> = {
 
 export const UPGRADE_PRICES: Readonly<Record<UpgradeId, GrowingPrice>> = {
   marketing: { first: 25, growth: 2 },
-  monetize: { first: 80, growth: 2.3 },
+  monetize: { first: 80, growth: 2.5 },
   /** 回線契約: 100M → 1G → 10G */
   uplink: { first: 1500, growth: 15 },
   /** 電力契約: すべてのラックの電力上限を上げる */
   rackPower: { first: 2500, growth: 3 },
 };
+
+/**
+ * 広告は売上が大きいほど高くつく: 価格 = 上の定価と「いまの売上 × secPerLevel 秒 ×(次のレベル − freeLevels)」の高い方。
+ * secPerLevel を大きくすると後半のユーザーの増え方がゆっくりになる(手を打つ時間ができる)。0 なら定価だけ。
+ * freeLevels までは定価だけ(序盤は速く進む)
+ */
+export const MARKETING_REVENUE = { secPerLevel: 12, freeLevels: 3 } as const;
 
 /** キャンペーン 1 回の価格 = base + ショッピングのユーザー 1 人あたり perUser */
 export const CAMPAIGN_PRICE = { base: 500, perUser: 1 } as const;

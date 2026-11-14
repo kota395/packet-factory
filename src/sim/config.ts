@@ -132,8 +132,8 @@ export const SERVICES: Readonly<Record<ServiceId, ServiceDef>> = {
     name: 'ショッピング',
     roles: ['lb', 'web', 'cache', 'search', 'db', 'replica'],
     startUsers: 200,
-    baseMarket: 3000,
-    revenuePerPv: 0.15,
+    baseMarket: 2000,
+    revenuePerPv: 0.1,
     work: {
       pageKB: 40,
       webCpuMs: 18,
@@ -147,8 +147,8 @@ export const SERVICES: Readonly<Record<ServiceId, ServiceDef>> = {
     name: '写真共有',
     roles: ['lb', 'web', 'cache', 'db', 'replica', 'media', 'worker'],
     startUsers: 200,
-    baseMarket: 6000,
-    revenuePerPv: 0.08,
+    baseMarket: 4000,
+    revenuePerPv: 0.05,
     work: {
       pageKB: 25,
       webCpuMs: 10,
@@ -163,8 +163,8 @@ export const SERVICES: Readonly<Record<ServiceId, ServiceDef>> = {
     name: '動画配信',
     roles: ['lb', 'web', 'cache', 'db', 'replica', 'media', 'worker'],
     startUsers: 100,
-    baseMarket: 5000,
-    revenuePerPv: 0.6,
+    baseMarket: 3000,
+    revenuePerPv: 0.2,
     work: {
       pageKB: 40,
       webCpuMs: 15,

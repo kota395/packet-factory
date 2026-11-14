@@ -195,7 +195,7 @@ export const UPGRADES: readonly UpgradeDef[] = [
   {
     id: 'marketing',
     name: '広告',
-    description: 'すべてのサービスの潜在ユーザー数(市場規模)を増やす。',
+    description: 'すべてのサービスの潜在ユーザー数(市場規模)を増やす。売上が大きいほど高くなる。',
     effect: (l) => 1.6 ** l,
     format: (v) => `市場 ×${v.toFixed(2)}`,
   },
@@ -203,7 +203,7 @@ export const UPGRADES: readonly UpgradeDef[] = [
     id: 'monetize',
     name: '収益化の改善',
     description: 'すべてのサービスの 1 ページビューあたりの収益を増やす。',
-    effect: (l) => 1.25 ** l,
+    effect: (l) => 1.2 ** l,
     format: (v) => `×${v.toFixed(2)}`,
   },
   {
