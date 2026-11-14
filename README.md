@@ -163,6 +163,9 @@ src/
       analytics.ts   分析基盤(Hadoop・機械学習)
       math.ts        待ち時間と溢れの式
     simulation.ts  時間・お金・ユーザー・操作・キャパシティの見積もり
+    sim-hardware.ts  └ 機器を置く・動かす・売る、サーバのパーツ、役割
+    sim-k8s.ts       └ Kubernetes(ワーカー、Deployment、Pod の置き場所とオートスケール)
+    sim-virt.ts      └ 仮想化とクラスタ(ハイパーバイザ、VM)
     forecast.ts    需要予測(ロジスティック成長)
     metrics.ts     直近の集計と 1 秒ごとの推移
     economy.ts     投資・段階

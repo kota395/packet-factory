@@ -410,3 +410,12 @@ export const GOALS: readonly GoalDef[] = [
   { pv: 25_000, services: 4, reward: 2_000_000, hint: '動画配信を始める。エンコードは GPU で、db はシャーディング' },
   { pv: 40_000, services: 4, boost: 1.3, reward: 6_000_000, hint: '分析基盤(Hadoop と機械学習)で単価を上げる' },
 ];
+
+/** 役割を割り当てるのに必要な解放(web と db は最初から使える。search・media・worker はそれを使うサービスを始めれば使える) */
+export const ROLE_UNLOCK: Partial<Record<RoleId, UnlockId>> = {
+  lb: 'slb',
+  cache: 'cache',
+  replica: 'replication',
+  hadoop: 'hadoop',
+  ml: 'ml',
+};
