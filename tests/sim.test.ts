@@ -962,6 +962,29 @@ describe('分析基盤と GPU', () => {
     expect(l.cpu).toBeLessThan(cpuBefore / 10);
   });
 
+  it('VM と Pod も、載っているサーバの GPU を使える(同じサーバの中で分け合う)', () => {
+    const { s, server } = base({ traffic: { blog: 0, video: 100 }, unlocks: ['shop', 'photo', 'video', 'gpu', 'virtualization', 'kubernetes'] });
+    server('srv-2u-db', 20, ['video:web', 'video:db', 'video:media']);
+    const h = server('srv-2u-hv', 10, []);
+    s.changeParts(h, { kind: 'gpu', dir: 1 });
+    s.setHv(h, true);
+    const vm = s.createVm(h, 'l').id!;
+    s.toggleVmRole(vm, 'video:worker');
+    let flow = run(s, 1000);
+    const jobs = 100 * SERVICES.video.work.upload!.perPv;
+    const gpu = (jobs * SERVICES.video.work.upload!.workerGpuMs!) / 1000;
+    expect(flow.nodeLoads.get(-vm)!.gpu).toBeCloseTo(gpu, 6);
+    expect(flow.devices.get(h)!.gpu).toBeCloseTo(gpu, 6);
+    // 同じホストの VM をワーカーにして、Pod でエンコードする
+    s.toggleVmRole(vm, 'video:worker');
+    expect(s.setK8sWorker({ vm }, true).ok).toBe(true);
+    s.toggleDeployment('video:worker');
+    flow = run(s, 1000);
+    const pods = [...flow.nodes.values()].filter((n) => n.pods && n.roles.includes('video:worker'));
+    expect(pods.length).toBeGreaterThan(0);
+    expect(flow.devices.get(h)!.gpu).toBeCloseTo(gpu, 6);
+  });
+
   it('Hadoop にログを集めると単価が上がり、処理しきれないと上がり方が減る。機械学習は GPU で', () => {
     const { s, server } = base({ pv: 100, unlocks: ['hadoop', 'ml', 'gpu'] });
     server('srv-2u-db', 20, ['blog:web', 'blog:db']);
