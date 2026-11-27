@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PRESET_BY_ID } from '../src/sim/catalog';
-import { CAMPAIGN, SERVICES } from '../src/sim/config';
+import { CAMPAIGN, SERVICES, WORK } from '../src/sim/config';
 import { computeFlow } from '../src/sim/flow';
 import { createSave, loadSave, newGame, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
@@ -181,5 +181,18 @@ describe('複数のサービス', () => {
       down: new Set(),
     });
     expect(lowUpload.services.photo!.latencyMs).toBeGreaterThan(lowNoUpload.services.photo!.latencyMs + 1);
+  });
+
+  it('media を web が肩代わりするとき、同居する db とキャッシュメモリを分け合う', () => {
+    const { s, server } = base({ traffic: { blog: 0, photo: 10 }, unlocks: ['shop', 'photo'] });
+    // 64GB のサーバに photo:web(1GB) と photo:db(1GB) → 残り 62GB を 2 つで分け合って 31GB ずつ
+    const srv = server('db', 10, ['photo:web', 'photo:db']);
+    const shared = run(s);
+    expect(shared.nodeLoads.get(srv)!.miss['photo:db']).toBeCloseTo(WORK.dbMissPerGB / 31, 6);
+    expect(shared.nodeLoads.get(srv)!.miss['photo:web']).toBeCloseTo(SERVICES.photo.work.media!.missPerGB / 31, 6);
+    // 専用の media を置くと web は肩代わりしなくなり、db が 62GB すべて使える
+    server('db', 20, ['photo:media']);
+    const dedicated = run(s);
+    expect(dedicated.nodeLoads.get(srv)!.miss['photo:db']).toBeCloseTo(WORK.dbMissPerGB / 62, 6);
   });
 });

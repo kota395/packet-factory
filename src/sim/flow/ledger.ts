@@ -4,7 +4,7 @@
  */
 import { MODEL_BY_ID, specOf } from '../catalog';
 import { GPU, NET, ROLE_MEM_GB, SERVICES, VIRT, WORK } from '../config';
-import { splitRole } from '../types';
+import { roleKey, splitRole } from '../types';
 import type { Facility } from '../facility';
 import type { RoleId, RoleKey } from '../types';
 import type { DeviceLoad, FlowInput, LinkLoad, NodeLoad, Route } from './types';
@@ -167,6 +167,16 @@ export function createLedger(facility: Facility, input: FlowInput) {
       sendDev(n.host, l.storage, gb, gb);
     }
   };
+  /** media の役割がなく、web が画像・動画の配信を肩代わりしているサービス */
+  const webMediaServices = new Set(
+    input.services
+      .filter((s) => s.work.media && !nodeList.some((n) => n.roles.includes(roleKey(s.id, 'media')) && isActive(roleKey(s.id, 'media'))))
+      .map((s) => s.id),
+  );
+  const isCacheRole = (k: RoleKey) => {
+    const [s, r] = splitRole(k);
+    return CACHE_ROLES.has(r) || (r === 'web' && s !== 'data' && webMediaServices.has(s));
+  };
   /** メモリに乗らずディスクに行く読み込みの割合。キャッシュに使える残りのメモリは、同じノードの db・search・media などで分け合う */
   const missOf = (id: number, key: RoleKey, perGB: number) => {
     const n = nodes.get(id)!;
@@ -174,7 +184,7 @@ export function createLedger(facility: Facility, input: FlowInput) {
     if (!act.includes(key)) act.push(key);
     const pods = n.pods ?? 1;
     const used = act.reduce((s, k) => s + ROLE_MEM_GB[splitRole(k)[1]], 0) * pods;
-    const sharers = Math.max(1, act.filter((k) => CACHE_ROLES.has(splitRole(k)[1])).length);
+    const sharers = Math.max(1, act.filter(isCacheRole).length);
     const mem = Math.max(0.5, (n.memGB - used) / (pods * sharers));
     const miss = Math.min(1, Math.max(WORK.dbMissMin, perGB / mem));
     loads.get(id)!.miss[key] = miss;
