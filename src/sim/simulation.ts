@@ -857,12 +857,13 @@ export class Simulation {
       const d = this.facility.devices.get(id);
       if (d) flow.problems.push(`${d.name} はネットワークにつながっていません: ${why}`);
     }
-    for (const [key, n] of this.podsPending) {
-      const [s, r] = splitRole(key);
-      flow.problems.push(`${scopeName(s)}の ${r} の Pod が ${n} 個、置き場所がなくて待っています(ワーカーを増やす)`);
-    }
-    if (this.deployments.size && !this.pods.length && !this.podsPending.size) {
+    if (this.deployments.size && !k8s.k8sWorkers(this).length) {
       flow.problems.push('Kubernetes のワーカーがありません');
+    } else {
+      for (const [key, n] of this.podsPending) {
+        const [s, r] = splitRole(key);
+        flow.problems.push(`${scopeName(s)}の ${r} の Pod が ${n} 個、置き場所がなくて待っています(ワーカーを増やす)`);
+      }
     }
     return flow;
   }

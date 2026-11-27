@@ -132,4 +132,11 @@ describe('Kubernetes', () => {
     expect(s.pods.every((p) => p.worker === -vm2)).toBe(true);
     expect(webPods(s)).toBe(K8S.minPods);
   });
+
+  it('ワーカーが 0 台のときに Deployment があると「ワーカーがありません」の警告が出る', () => {
+    const { s, server } = base({ pv: 30, unlocks: ['kubernetes'] });
+    server('db', 10, ['blog:db']);
+    s.toggleDeployment('blog:web');
+    expect(s.flow.problems).toContain('Kubernetes のワーカーがありません');
+  });
 });
