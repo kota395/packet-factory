@@ -198,8 +198,10 @@ export class Simulation {
 
   /** 維持費の内訳($/秒)。回線は本数ぶん、CDN は配った量に応じて */
   get upkeep(): { racks: number; uplink: number; power: number; cdn: number } {
-    const racks = this.facility.racks.size * UPKEEP.rackByPowerLevel[this.upgrades.rackPower];
-    const uplink = UPKEEP.uplinkByLevel[this.upgrades.uplink] * this.lineCount;
+    const powerLv = Math.max(0, Math.min(this.upgrades.rackPower, UPKEEP.rackByPowerLevel.length - 1));
+    const uplinkLv = Math.max(0, Math.min(this.upgrades.uplink, UPKEEP.uplinkByLevel.length - 1));
+    const racks = this.facility.racks.size * UPKEEP.rackByPowerLevel[powerLv];
+    const uplink = UPKEEP.uplinkByLevel[uplinkLv] * this.lineCount;
     let watts = 0;
     for (const d of this.facility.devices.values()) watts += specOf(d).powerW;
     const cdn = this.cdnGBps * CDN_PRICE_PER_GB;

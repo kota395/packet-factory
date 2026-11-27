@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, PRESETS, isServerModel, partsError } from '../src/sim/catalog';
 import { PV_PER_USER } from '../src/sim/config';
+import { UPGRADE_BY_ID } from '../src/sim/economy';
+import { UPKEEP } from '../src/sim/pricing';
 import { applyAbsence, createSave, decodeSave, encodeSave, loadSave, newGame, parseSave } from '../src/sim/save';
+import { Simulation } from '../src/sim/simulation';
 import { base } from './helpers';
 
 describe('セーブ', () => {
@@ -51,6 +54,20 @@ describe('セーブ', () => {
     const loadedVm = [...loaded.facility.vms.values()][0]!;
     expect(loadedSrv.name).toMatch(/^srv\d+$/);
     expect(loadedVm.name).toMatch(/^vm\d+$/);
+  });
+
+  it('強化レベルが上限を超えていても最大レベルに収まり、維持費や資金が NaN にならない', () => {
+    const save = createSave(newGame(), 1000);
+    const parsed = parseSave({ ...save, upgrades: { ...save.upgrades, uplink: 99, rackPower: 99 } })!;
+    expect(parsed).not.toBeNull();
+    expect(parsed.upgrades.uplink).toBe(UPGRADE_BY_ID.uplink.maxLevel);
+    expect(parsed.upgrades.rackPower).toBe(UPGRADE_BY_ID.rackPower.maxLevel);
+    const direct = new Simulation({ upgrades: { uplink: 99, rackPower: 99 } });
+    direct.facility.rent(0);
+    expect(direct.upkeep.racks).toBe(UPKEEP.rackByPowerLevel.at(-1));
+    expect(direct.upkeep.uplink).toBe(UPKEEP.uplinkByLevel.at(-1));
+    direct.step(1000);
+    expect(Number.isFinite(direct.money)).toBe(true);
   });
 
   it('離れていた間: 直前の収支の一定割合が入り、ユーザーは市場規模と捌ける量まで増える', () => {

@@ -225,7 +225,11 @@ export function parseSave(data: unknown): SaveData | null {
   const upgrades = emptyUpgrades();
   for (const [key, v] of Object.entries(d.upgrades as Record<string, unknown>)) {
     if (!isInt(v) || v < 0 || v > 1000) return null;
-    if (key in UPGRADE_BY_ID) upgrades[key as UpgradeId] = v;
+    if (key in UPGRADE_BY_ID) {
+      const id = key as UpgradeId;
+      const max = UPGRADE_BY_ID[id].maxLevel;
+      upgrades[id] = max !== undefined ? Math.min(v, max) : v;
+    }
   }
 
   const racks: number[] = [];
