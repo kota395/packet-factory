@@ -175,4 +175,26 @@ describe('流量モデル', () => {
     expect(isp).toBeGreaterThan(0);
     expect(run(s).success).toBe(0);
   });
+
+  it('複数の LB と web・worker・media がある構成でも成功率と応答時間を正しく計算する', () => {
+    const { s, server, lb } = base({ traffic: { blog: 0, photo: 80 }, unlocks: ['lb', 'shop', 'photo'] });
+    const l1 = lb(38);
+    const l2 = lb(37);
+    const w1 = server('web', 30, ['photo:web']);
+    const w2 = server('small', 31, ['photo:web']);
+    server('db', 20, ['photo:db']);
+    server('web', 28, ['photo:worker']);
+    server('small', 29, ['photo:worker']);
+    server('db', 16, ['photo:media']);
+    server('small', 27, ['photo:media']);
+    const flow = run(s);
+    const photo = flow.services.photo!;
+    expect(photo.entries).toEqual([l1, l2]);
+    // 2 台の LB に等分され、さらに 2 台の web に等分される
+    expect(flow.nodeLoads.get(w1)!.work['photo:web']).toBeCloseTo(40 * (1 + 0.02), 3);
+    expect(flow.nodeLoads.get(w2)!.work['photo:web']).toBeCloseTo(40 * (1 + 0.02), 3);
+    expect(photo.success).toBeGreaterThan(0);
+    expect(photo.success).toBeLessThanOrEqual(1);
+    expect(photo.latencyMs).toBeGreaterThan(40);
+  });
 });

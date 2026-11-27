@@ -285,11 +285,22 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
 
   // ---------------------------------------------------------------- 成功率と応答
   const evaluate = (): { success: number; latencyMs: number } => {
+    const memo = <V>(fn: (id: number) => V) => {
+      const cache = new Map<number, V>();
+      return (id: number): V => {
+        let v = cache.get(id);
+        if (v === undefined) {
+          v = fn(id);
+          cache.set(id, v);
+        }
+        return v;
+      };
+    };
     const nodeOk = (id: number) => nodePass(id);
     /** db・レプリカで 1 回読む時間 */
     const readOn = (id: number, k: RoleKey) => cpuMs(id, WORK.dbReadCpuMs) + (loads.get(id)!.miss[k] ?? 1) * ioMs(id);
 
-    const dataPart = (w: number): [number, number] => {
+    const dataPart = memo((w: number): [number, number] => {
       if (!shards.length) return [0, 0];
       // db ごとに、読み込み(レプリカに届けばレプリカ、なければプライマリ)と書き込み(プライマリ)を見て、割合で合わせる
       let readOk = 0;
@@ -342,11 +353,11 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         ms += W.search.perPv * sMs;
       }
       return [ok, ms];
-    };
-    const webPart = (w: number): [number, number] => {
+    });
+    const webPart = memo((w: number): [number, number] => {
       const [dOk, dMs] = dataPart(w);
       return [nodeOk(w) * dOk, cpuMs(w, W.webCpuMs) + dMs];
-    };
+    });
 
     // ページ
     let pageOk = 0;
@@ -400,14 +411,14 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
 
     // 投稿: 入口 → web → worker → media がすべて通れば成功(応答には含めない。裏で加工する)
     if (W.upload) {
-      const storeOk = (k: number) => {
+      const storeOk = memo((k: number) => {
         const reach = media.filter((m) => path(k, m));
         return reach.length ? avg(reach.map((m) => along(path(k, m))[0] * nodeOk(m))) : 0;
-      };
-      const workOk = (w: number) => {
+      });
+      const workOk = memo((w: number) => {
         const reach = workers.filter((k) => path(w, k));
         return nodeOk(w) * (reach.length ? avg(reach.map((k) => along(path(w, k))[0] * nodeOk(k) * storeOk(k))) : 0);
-      };
+      });
       let upOk = 0;
       for (const e of entries) {
         const [inOk] = fromNetAlong(e);
