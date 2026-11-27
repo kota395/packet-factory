@@ -112,4 +112,24 @@ describe('Kubernetes', () => {
     expect(b.deployments.get('blog:web')).toBe(s.deployments.get('blog:web'));
     expect(b.flow.success).toBe(1);
   });
+
+  it('ローカルディスクのワーカー VM を移して止めると、Pod はすぐ別のワーカーへ置き直される', () => {
+    const { s, lb, server } = base({ pv: 30, unlocks: ['kubernetes', 'virtualization', 'lb'] });
+    server('db', 10, ['blog:db']);
+    lb(30);
+    const h1 = server('big', 20, []);
+    const h2 = server('big', 22, []);
+    s.setHv(h1, true);
+    s.setHv(h2, true);
+    const vm1 = s.createVm(h1, 'l').id!;
+    const vm2 = s.createVm(h2, 'l').id!;
+    s.setK8sWorker({ vm: vm1 }, true);
+    s.setK8sWorker({ vm: vm2 }, true);
+    s.toggleDeployment('blog:web');
+    expect(s.pods.some((p) => p.worker === -vm1)).toBe(true);
+    expect(s.moveVm(vm1, h2).ok).toBe(true);
+    // オートスケールを待たずに即座に vm2 へ置き直される
+    expect(s.pods.every((p) => p.worker === -vm2)).toBe(true);
+    expect(webPods(s)).toBe(K8S.minPods);
+  });
 });
