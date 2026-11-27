@@ -88,7 +88,7 @@ export const UNLOCKS: readonly UnlockDef[] = [
     id: 'lb',
     name: 'ロードバランサ(アプライアンス)',
     description:
-      'LB の専用機を買えるようになる(空き U から)。置くと、すべてのサービスのリクエストを受けて web に振り分ける。LB がないとインターネットから届くのは web 1 台だけ。2 台を HA ポートで直結すると冗長化できる。',
+      'LB の専用機を買えるようになる(空き U から)。置くと、すべてのサービスのリクエストを受けて web に振り分ける。LB がないとインターネットから届くのは web 1 台だけ。2 台置くと自動で HA のペアになり冗長化できる。',
   },
   {
     id: 'slb',
@@ -266,7 +266,7 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 7,
     name: '共有ストレージ',
-    summary: 'VM のディスクを共有ストレージへ。止めずに移せるが、IO がネットワークを通るのでストレージ用の経路を分けたい。',
+    summary: 'VM のディスクを共有ストレージへ。止めずに移せるが、IO がネットワークを通るのでホストの 10G NIC や配置で帯域を確保する。',
     unlocks: ['storage'],
   },
   {
@@ -303,7 +303,7 @@ export const STAGES: readonly StageDef[] = [
   {
     id: 13,
     name: '分析基盤',
-    summary: 'ログを Hadoop に集めて分析し、広告とショッピングの単価を上げる。機械学習は GPU で。動画のエンコードも GPU に任せると速い。',
+    summary: 'ログを Hadoop に集めて分析し、すべてのサービスの単価を上げる。機械学習は GPU で。動画のエンコードも GPU に任せると速い。',
     unlocks: ['hadoop', 'ml', 'gpu'],
   },
 ];
