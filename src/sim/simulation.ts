@@ -768,14 +768,27 @@ export class Simulation {
     return this.capacityBy[id] ?? 0;
   }
 
-  /** f(x) が成り立つ最大の x(start から倍々に広げてから二分探索) */
+  /** f(x) が成り立つ最大の x(start から上下に広げてから二分探索) */
   private static searchMax(ok: (x: number) => boolean, start: number): number {
-    if (!ok(start / 1000)) return 0;
-    let lo = start / 1000;
-    let hi = Math.max(start, lo * 2);
-    while (ok(hi) && hi < 1e8) {
-      lo = hi;
-      hi *= 2;
+    const floor = 1e-3;
+    if (!ok(floor)) return 0;
+    const s = Math.max(start, 1);
+    let lo: number;
+    let hi: number;
+    if (ok(s)) {
+      lo = s;
+      hi = s * 2;
+      while (ok(hi) && hi < 1e8) {
+        lo = hi;
+        hi *= 2;
+      }
+    } else {
+      hi = s;
+      lo = s / 2;
+      while (lo > floor && !ok(lo)) {
+        hi = lo;
+        lo = Math.max(floor, lo / 2);
+      }
     }
     for (let i = 0; i < 14; i++) {
       const mid = (lo + hi) / 2;

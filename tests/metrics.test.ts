@@ -18,6 +18,17 @@ describe('メトリクスと需要予測', () => {
     expect(s.flow.pv).toBeCloseTo(s.trafficAt(s.time), 6);
   });
 
+  it('需要がキャパシティの 1000 倍を超えていても、捌ける量を 0 にせず見積もれる', () => {
+    const s = newGame();
+    const baseCap = s.estimateCapacity();
+    expect(baseCap).toBeGreaterThan(10);
+    s.serviceUsers.blog = baseCap * 2000 * 100; // 需要がキャパシティの 2000 倍
+    const cap = s.estimateCapacity();
+    expect(cap).toBeGreaterThan(baseCap * 0.95);
+    expect(cap).toBeLessThan(baseCap * 1.05);
+    expect(s.capacityOf('blog')).toBeGreaterThan(baseCap * 0.95);
+  });
+
   it('ロジスティック成長の予測と、ある量に届くまでの時間', () => {
     expect(logistic(100, 1000, 0.03, 0)).toBeCloseTo(100);
     expect(logistic(100, 1000, 0.03, 10_000)).toBeCloseTo(1000, 0);
