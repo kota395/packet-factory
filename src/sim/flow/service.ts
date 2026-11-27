@@ -123,26 +123,22 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
   const perEntry = entries.length ? (pv * lbShare) / entries.length : 0;
   const upPerEntry = entries.length ? (uploads * lbShare) / entries.length : 0;
   const upKB = W.upload?.kb ?? 0;
-  for (const e of entries) {
-    fromNet(e, (perEntry * WORK.requestKB + upPerEntry * upKB) * GB_PER_KB, perEntry * W.pageKB * GB_PER_KB);
-  }
   const pvOf = new Map<number, number>();
   const upOf = new Map<number, number>();
-  if (useLb) {
-    for (const e of entries) {
+  for (const e of entries) {
+    if (!fromNet(e, (perEntry * WORK.requestKB + upPerEntry * upKB) * GB_PER_KB, perEntry * W.pageKB * GB_PER_KB)) continue;
+    if (useLb) {
       addWork(e, lbKey, perEntry + upPerEntry, lbMs(e));
       for (const w of webs) {
         const p = perEntry / webs.length;
         const u = upPerEntry / webs.length;
-        send(e, w, (p * WORK.requestKB + u * upKB) * GB_PER_KB, p * W.pageKB * GB_PER_KB);
+        if (!send(e, w, (p * WORK.requestKB + u * upKB) * GB_PER_KB, p * W.pageKB * GB_PER_KB)) continue;
         pvOf.set(w, (pvOf.get(w) ?? 0) + p);
         upOf.set(w, (upOf.get(w) ?? 0) + u);
       }
-    }
-  } else {
-    for (const w of webs) {
-      pvOf.set(w, perEntry);
-      upOf.set(w, upPerEntry);
+    } else {
+      pvOf.set(e, perEntry);
+      upOf.set(e, upPerEntry);
     }
   }
 
@@ -157,6 +153,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
   for (const w of webs) {
     const wpv = pvOf.get(w) ?? 0;
     const up = upOf.get(w) ?? 0;
+    if (!wpv && !up) continue;
     addWork(w, key('web'), wpv + up, W.webCpuMs);
     const reads = wpv * W.dbReads;
     // 届く memcached に読み込みを振り分け、外れた分は db 層へ
@@ -173,7 +170,6 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
     for (const sh of shards) {
       const rd = toDb * sh.read;
       const wrs = wr * sh.write;
-      writesOn.set(sh.primary, (writesOn.get(sh.primary) ?? 0) + wrs);
       // 読み込みはその db のレプリカ(届くもの)に分け、なければプライマリ
       const repReach = sh.replicas.filter((r) => path(w, r));
       for (const r of repReach) {
@@ -182,8 +178,10 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         readsOn.set(r, (readsOn.get(r) ?? 0) + n);
       }
       const toPrimary = repReach.length ? 0 : rd;
-      send(w, sh.primary, (toPrimary * WORK.queryKB + wrs * WORK.queryKB * 2) * GB_PER_KB, toPrimary * WORK.dbReadKB * GB_PER_KB);
-      readsOn.set(sh.primary, (readsOn.get(sh.primary) ?? 0) + toPrimary);
+      if (send(w, sh.primary, (toPrimary * WORK.queryKB + wrs * WORK.queryKB * 2) * GB_PER_KB, toPrimary * WORK.dbReadKB * GB_PER_KB)) {
+        writesOn.set(sh.primary, (writesOn.get(sh.primary) ?? 0) + wrs);
+        readsOn.set(sh.primary, (readsOn.get(sh.primary) ?? 0) + toPrimary);
+      }
     }
     // 検索: 届く search に分け、なければ db(プライマリ)が肩代わり
     if (W.search) {
@@ -195,8 +193,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
           send(w, x, n * WORK.queryKB * GB_PER_KB, n * W.search.resultKB * GB_PER_KB);
           searchOn.set(x, (searchOn.get(x) ?? 0) + n);
         }
-      } else if (primary !== undefined) {
-        send(w, primary, qs * WORK.queryKB * GB_PER_KB, qs * W.search.resultKB * GB_PER_KB);
+      } else if (primary !== undefined && send(w, primary, qs * WORK.queryKB * GB_PER_KB, qs * W.search.resultKB * GB_PER_KB)) {
         dbSearches += qs;
       }
     }
@@ -267,12 +264,12 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
     const fetchOn = new Map<number, number>();
     const perE = mediaEntries.length ? (fetches * lbShare) / mediaEntries.length : 0;
     for (const e of mediaEntries) {
-      fromNet(e, perE * WORK.requestKB * GB_PER_KB, perE * W.media.kb * GB_PER_KB);
+      if (!fromNet(e, perE * WORK.requestKB * GB_PER_KB, perE * W.media.kb * GB_PER_KB)) continue;
       if (useLb) {
         addWork(e, lbKey, perE, lbMs(e));
         for (const m of media) {
           const n = perE / media.length;
-          send(e, m, n * WORK.requestKB * GB_PER_KB, n * W.media.kb * GB_PER_KB);
+          if (!send(e, m, n * WORK.requestKB * GB_PER_KB, n * W.media.kb * GB_PER_KB)) continue;
           fetchOn.set(m, (fetchOn.get(m) ?? 0) + n);
         }
       } else fetchOn.set(e, (fetchOn.get(e) ?? 0) + perE);

@@ -87,10 +87,11 @@ export function createLedger(facility: Facility, input: FlowInput) {
   const send = (a: number, b: number, fwdGbps: number, backGbps: number) => sendDev(hostOf(a), hostOf(b), fwdGbps, backGbps);
   /** そのノードに届く回線 */
   const linesTo = (id: number) => handoffs.filter((h) => route(h.id, hostOf(id)));
-  /** 回線から(へ)の通信。届く回線に均等に分ける */
+  /** 回線から(へ)の通信。届く回線に均等に分ける。回線から届かなければ false */
   const fromNet = (id: number, inGbps: number, outGbps: number) => {
     const lines = linesTo(id);
     for (const h of lines) sendDev(h.id, hostOf(id), inGbps / lines.length, outGbps / lines.length);
+    return lines.length > 0;
   };
   /** 回線からノードまでを通って溢れない割合と時間(届く回線の平均) */
   const fromNetAlong = (id: number): [number, number] => {

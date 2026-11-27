@@ -216,4 +216,53 @@ describe('流量モデル', () => {
     expect(first.links.map((l) => ({ a: l.a, b: l.b, ab: l.ab, ba: l.ba }))).toEqual(snapshot);
     expect(second.links[0].ab + second.links[0].ba).toBeCloseTo((snapshot[0].ab + snapshot[0].ba) * 10, 6);
   });
+
+  it('回線や LB から届かない入口・web・media には負荷が積まれず、下流にも流れない', () => {
+    // 1. 回線から孤立した web+db には負荷がかからない
+    const { s: s1, server: server1 } = base({ pv: 100 });
+    const iso = server1('db', 20, ['blog:web', 'blog:db'], 0, -1);
+    const f1 = run(s1);
+    expect(f1.success).toBe(0);
+    expect(f1.devices.get(iso)!.cpu).toBe(0);
+    expect(f1.nodeLoads.get(iso)!.ioOps).toBe(0);
+
+    // 2. LB から届かない web・media と、web から届かない db には負荷が積まれない
+    const { s: s2, server: server2, lb } = base({ traffic: { blog: 0, photo: 100 }, unlocks: ['lb', 'shop', 'photo', 'cache'] });
+    lb(38);
+    const wOk = server2('web', 30, ['photo:web']);
+    const wIso = server2('web', 31, ['photo:web'], 0, -1);
+    const db = server2('db', 20, ['photo:db']);
+    const cache = server2('small', 32, ['photo:cache']);
+    const worker = server2('web', 33, ['photo:worker']);
+    const mOk = server2('db', 16, ['photo:media']);
+    const mIso = server2('db', 12, ['photo:media'], 0, -1);
+    const f2 = run(s2);
+    expect(f2.nodeLoads.get(wOk)!.work['photo:web']).toBeCloseTo(50 * (1 + 0.02), 3);
+    expect(f2.nodeLoads.get(wIso)!.cpu).toBe(0);
+    expect(f2.nodeLoads.get(mOk)!.work['photo:media']).toBeCloseTo(50 * SERVICES.photo.work.media!.perPv, 3);
+    expect(f2.nodeLoads.get(mIso)!.cpu).toBe(0);
+    expect(f2.nodeLoads.get(mIso)!.ioOps).toBe(0);
+    // cache・worker・db にも wOk の半分ぶんしか流れない
+    expect(f2.nodeLoads.get(cache)!.work['photo:cache']).toBeCloseTo(50 * SERVICES.photo.work.dbReads, 3);
+    expect(f2.nodeLoads.get(worker)!.work['photo:worker']).toBeCloseTo(50 * SERVICES.photo.work.upload!.perPv, 3);
+    expect(f2.nodeLoads.get(db)!.work['photo:db']).toBeCloseTo(
+      50 * SERVICES.photo.work.dbReads * (1 - WORK.cacheHitRate) + 50 * (SERVICES.photo.work.dbWrites + SERVICES.photo.work.upload!.perPv),
+      3,
+    );
+
+    // 3. 回線から届かない LB にも負荷が積まれず、下流にも流れない
+    const { s: s3, server: server3 } = base({ pv: 100, unlocks: ['lb'] });
+    const isoSw = s3.buyDevice('sw-24', 0, 35).id!;
+    const isoLb = s3.buyDevice('lb-1u', 0, 34).id!;
+    const isoWeb = server3('web', 30, ['blog:web'], 0, -1);
+    const isoDb = server3('db', 20, ['blog:db'], 0, -1);
+    wire(s3, { device: isoLb, port: 0 }, { device: isoSw, port: 0 });
+    wire(s3, { device: isoWeb, port: 0 }, { device: isoSw, port: 1 });
+    wire(s3, { device: isoDb, port: 0 }, { device: isoSw, port: 2 });
+    const f3 = run(s3);
+    expect(f3.success).toBe(0);
+    expect(f3.devices.get(isoLb)!.cpu).toBe(0);
+    expect(f3.devices.get(isoWeb)!.cpu).toBe(0);
+    expect(f3.devices.get(isoDb)!.cpu).toBe(0);
+  });
 });
