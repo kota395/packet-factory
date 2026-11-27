@@ -28,6 +28,31 @@ describe('セーブ', () => {
     expect(parseSave(JSON.parse(JSON.stringify(save)))).toEqual(save);
   });
 
+  it('セーブの機器名・VM 名に HTML が紛れていれば捨てて付け直す', () => {
+    const baseSim = newGame();
+    baseSim.unlocks.add('virtualization');
+    const srv = [...baseSim.facility.devices.values()].find((d) => d.model === 'srv-2u')!;
+    baseSim.facility.setRoles(srv.id, []);
+    baseSim.facility.setHv(srv.id, true);
+    baseSim.facility.createVm(srv.id, 's');
+    const save = createSave(baseSim, 1000);
+    const bad = '<img src=x onerror=alert(1)>';
+    const tampered = {
+      ...save,
+      devices: save.devices.map((d) => (d[1] === 'srv-1u' ? [d[0], d[1], d[2], d[3], d[4], d[5], bad, d[7], d[8], d[9], d[10], d[11]] : d)),
+      vms: save.vms.map((v) => [v[0], bad, v[2], v[3], v[4], v[5], v[6]]),
+    };
+    const parsed = parseSave(tampered)!;
+    expect(parsed).not.toBeNull();
+    expect(parsed.devices.every((d) => !d[6].includes('<'))).toBe(true);
+    expect(parsed.vms.every((v) => !v[1].includes('<'))).toBe(true);
+    const loaded = loadSave(parsed);
+    const loadedSrv = [...loaded.facility.devices.values()].find((d) => d.model === 'srv-1u')!;
+    const loadedVm = [...loaded.facility.vms.values()][0]!;
+    expect(loadedSrv.name).toMatch(/^srv\d+$/);
+    expect(loadedVm.name).toMatch(/^vm\d+$/);
+  });
+
   it('離れていた間: 直前の収支の一定割合が入り、ユーザーは市場規模と捌ける量まで増える', () => {
     const s = newGame();
     expect(applyAbsence(s, 10_000, 2)).toEqual({ elapsedMs: 10_000, gained: 0, users: 0 });

@@ -174,7 +174,7 @@ export class Facility {
       down: false,
       failedUntil: 0,
       paid,
-      name: opts.name ?? this.newName(model),
+      name: opts.name || this.newName(model),
     };
     this.devices.set(id, device);
     this.version++;
