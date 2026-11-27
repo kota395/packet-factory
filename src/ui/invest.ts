@@ -79,10 +79,13 @@ export class InvestPanel {
     } catch {
       // 保存できない環境では毎回最初のタブ
     }
-    this.tabs.innerHTML = LINES.map((l) => `<button type="button" role="tab" data-tab="${l.id}">${l.name}<span class="badge" hidden></span></button>`).join('');
-    this.tabs.addEventListener('click', (e) => {
+    this.tabs.innerHTML = LINES.map(
+      (l) => `<button type="button" role="tab" id="invest-tab-${l.id}" data-tab="${l.id}">${l.name}<span class="badge" hidden></span></button>`,
+    ).join('');
+    // 矢印キーでタブを移り、移った先を選ぶ(selection follows focus)。クリックでも選ぶ
+    const choose = (e: Event) => {
       const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-tab]');
-      if (!button) return;
+      if (!button || button.dataset.tab === this.tab) return;
       this.tab = button.dataset.tab!;
       try {
         localStorage.setItem(TAB_KEY, this.tab);
@@ -91,7 +94,14 @@ export class InvestPanel {
       }
       this.list.scrollTop = 0;
       this.update();
-    });
+    };
+    this.tabs.addEventListener('click', choose);
+    this.tabs.addEventListener('focusin', choose);
+    this.selectTab();
+    // focusgroup(矢印キーでの移動)が無いブラウザでだけポリフィルを読む
+    if (!Object.hasOwn(HTMLElement.prototype, 'focusGroup')) {
+      void import('@microsoft/focusgroup-polyfill/shadowless').then(({ polyfill }) => polyfill(this.tabs));
+    }
     this.list.addEventListener('click', (e) => {
       const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-type]');
       if (!button || button.disabled) return;
@@ -171,11 +181,7 @@ export class InvestPanel {
     this.stageBox.innerHTML = `
       <div class="inv-stage-now">段階 ${now.id} / ${STAGES.length}: ${now.name}</div>
       <div class="inv-stage-note">${now.summary}${next ? ` 次は「${next.name}」。` : ''}</div>`;
-    for (const b of this.tabs.querySelectorAll<HTMLButtonElement>('button[data-tab]')) {
-      const on = b.dataset.tab === this.tab;
-      b.classList.toggle('active', on);
-      b.setAttribute('aria-selected', String(on));
-    }
+    this.selectTab();
 
     const line = LINES.find((l) => l.id === this.tab) ?? LINES[0];
     const html: string[] = [`<div class="inv-line-note">${line.summary}</div>`];
@@ -200,6 +206,17 @@ export class InvestPanel {
 
     for (const item of lineItems(sim, line)) html.push(this.itemHtml(sim, item));
     this.list.innerHTML = html.join('');
+  }
+
+  /** 選んでいるタブの表示。focusgroupstart を移して、Tab でタブ列に入ったときに選んでいるタブへ止まるようにする */
+  private selectTab(): void {
+    for (const b of this.tabs.querySelectorAll<HTMLButtonElement>('button[data-tab]')) {
+      const on = b.dataset.tab === this.tab;
+      b.classList.toggle('active', on);
+      b.ariaSelected = String(on);
+      b.toggleAttribute('focusgroupstart', on);
+    }
+    this.list.setAttribute('aria-labelledby', `invest-tab-${this.tab}`);
   }
 
   private itemHtml(sim: Simulation, item: Item): string {

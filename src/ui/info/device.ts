@@ -56,7 +56,7 @@ export function deviceContent(sim: Simulation, d: Device, base: string): Content
   if (m.category === 'server' && !d.hv && sim.unlocks.has('bgp')) {
     fixed += section(
       'BGP',
-      `<div class="role-buttons"><button type="button" class="toggle ${d.bgp ? 'on' : ''}" data-act="bgp" data-id="${d.id}" data-on="${d.bgp ? '0' : '1'}">BGP を使う</button></div>`,
+      `<div class="role-buttons"><button type="button" class="toggle ${d.bgp ? 'on' : ''}" aria-pressed="${!!d.bgp}" data-act="bgp" data-id="${d.id}" data-on="${d.bgp ? '0' : '1'}">BGP を使う</button></div>`,
     );
   }
   if (!sim.isMainLine(d.id)) {

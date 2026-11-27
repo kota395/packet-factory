@@ -26,7 +26,7 @@
             <button type="button" data-speed="4" aria-label="4倍速">▶▶▶</button>
           </div>
           <div class="menu">
-            <button type="button" id="btn-chart">メトリクス</button>
+            <button type="button" id="btn-chart" aria-pressed="false">メトリクス</button>
             <button type="button" id="btn-save">セーブ</button>
           </div>
         </div>
@@ -46,8 +46,8 @@
             <button type="button" id="invest-close" aria-label="閉じる">✕</button>
           </header>
           <div id="invest-stage"></div>
-          <div id="invest-tabs" role="tablist" aria-label="系統"></div>
-          <div id="invest-list"></div>
+          <div id="invest-tabs" role="tablist" aria-label="系統" focusgroup="tablist nomemory"></div>
+          <div id="invest-list" role="tabpanel"></div>
         </section>
         <section id="cluster" class="sheet" hidden aria-label="クラスタ"></section>
         <section id="dash" hidden aria-label="メトリクス"></section>
@@ -58,7 +58,7 @@
       <nav id="toolbar" aria-label="ツール"></nav>
     </div>
 
-    <div id="modal" hidden><div class="modal-card" id="modal-card"></div></div>
+    <dialog id="modal" aria-labelledby="modal-title"><div class="modal-card" id="modal-card"></div></dialog>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

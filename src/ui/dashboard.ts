@@ -147,7 +147,9 @@ export class Dashboard {
       this.lastSim = sim;
     }
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('button[data-range]')) {
-      b.classList.toggle('active', b.dataset.range === this.range);
+      const on = b.dataset.range === this.range;
+      b.classList.toggle('active', on);
+      b.ariaPressed = String(on);
     }
     this.renderScope(sim);
     this.renderTiles(sim);
