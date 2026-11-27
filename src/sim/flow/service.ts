@@ -32,6 +32,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
     missOf,
     activeLbs,
     deadLbs,
+    deadSlbs,
     lbMs,
     along,
     nodePass,
@@ -70,10 +71,14 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         ]
       : inst.db.map((id) => ({ primary: id, read: 1 / inst.db.length, write: 1 / inst.db.length, data: 1 / inst.db.length, replicas: [] }));
   // LB: アプライアンス(HA ペアならアクティブの 1 台)と、SLB の役割を付けたノード。
-  // すべて止まっている LB(ペアの両方が止まっているなど)にも DNS でリクエストが来て、その分は失敗する
+  // すべて止まっている LB(ペアの両方や SLB が止まっているなど)にも DNS でリクエストが来て、その分は失敗する
+  const lbKey = key('lb');
+  const stoppedSlbs = deadSlbs(lbKey);
+  for (const n of stoppedSlbs) sp.push(`LB(${n})が止まっていて、そこに来たリクエストが失敗しています`);
   const lbNodes = [...activeLbs, ...inst.lb];
-  const useLb = lbNodes.length + deadLbs > 0;
-  const lbShare = useLb ? lbNodes.length / (lbNodes.length + deadLbs) : 1;
+  const dead = deadLbs + stoppedSlbs.length;
+  const useLb = lbNodes.length + dead > 0;
+  const lbShare = useLb ? lbNodes.length / (lbNodes.length + dead) : 1;
   // LB がなければ、BGP で広報している Pod(MetalLB)がそれぞれ受ける。それもなければ web 1 台だけ
   const advertised = inst.web.filter((n) => nodes.get(n)!.advertised);
   const entries = useLb ? lbNodes : advertised.length ? advertised : inst.web.slice(0, 1);
@@ -91,7 +96,6 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
   const primary: number | undefined = inst.db[0];
   const caches = inst.cache;
   const pv = svc.pv;
-  const lbKey = key('lb');
 
   // media・worker がなければ web が肩代わりする
   const ownMedia = inst.media.length > 0;
@@ -99,7 +103,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
   const mediaKey = ownMedia ? key('media') : key('web');
   const workers = W.upload ? (inst.worker.length ? inst.worker : webs) : [];
   const workerKey = inst.worker.length ? key('worker') : key('web');
-  const mediaEntries = !W.media ? [] : useLb ? entries : media.slice(0, 1);
+  const mediaEntries = !W.media ? [] : useLb ? entries : ownMedia ? media.slice(0, 1) : entries;
   if (W.media && !useLb && inst.media.length > 1) {
     sp.push(`LB がないので、画像・動画を配るのは ${name(inst.media[0])} だけです`);
   }

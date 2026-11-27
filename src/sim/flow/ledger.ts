@@ -201,6 +201,23 @@ export function createLedger(facility: Facility, input: FlowInput) {
     else if (gr.members.length > 1 && gr.active !== gr.members[0])
       problems.push(`${name(gr.members[0])} が止まり、HA で ${name(gr.active)} が引き継いでいます`);
   }
+  /** 止まっている SLB(役割 lb を持つ物理サーバ・VM)の名前 */
+  const deadSlbs = (lbKey: RoleKey): string[] => {
+    if (!isActive(lbKey)) return [];
+    const out: string[] = [];
+    for (const d of facility.devices.values()) {
+      if (MODEL_BY_ID[d.model].category === 'server' && !d.hv && d.roles.includes(lbKey) && input.down.has(d.id)) {
+        out.push(d.name);
+      }
+    }
+    for (const v of facility.vms.values()) {
+      const host = facility.devices.get(v.host);
+      if (host?.hv && v.roles.includes(lbKey) && (v.downUntil > input.now || input.down.has(host.id))) {
+        out.push(v.name);
+      }
+    }
+    return out;
+  };
   /** LB で 1 リクエストを振り分ける重さ(アプライアンスは処理能力から) */
   const lbMs = (id: number) => {
     const rps = nodes.get(id)?.lbRps;
@@ -305,6 +322,7 @@ export function createLedger(facility: Facility, input: FlowInput) {
     missOf,
     activeLbs,
     deadLbs,
+    deadSlbs,
     lbMs,
     settle,
     linkRho,

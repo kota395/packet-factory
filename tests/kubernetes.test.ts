@@ -135,4 +135,23 @@ describe('Kubernetes', () => {
     const spreadIo = workers.reduce((sum, _, i) => sum + spread.nodeLoads.get(POD_ID_BASE + i)!.ioOps, 0);
     expect(packedIo).toBeCloseTo(spreadIo, 6);
   });
+
+  it('LB なし + MetalLB で media を web Pod が肩代わりするとき、画像・動画も全 Pod グループに分散する', () => {
+    const { s, server } = base({ traffic: { blog: 0, photo: 20 }, unlocks: ['kubernetes', 'bgp', 'shop', 'photo'] });
+    server('db', 10, ['photo:db']);
+    const w1 = server('web', 20, []);
+    const w2 = server('web', 22, []);
+    expect(s.setK8sWorker({ device: w1 }, true).ok).toBe(true);
+    expect(s.setK8sWorker({ device: w2 }, true).ok).toBe(true);
+    expect(s.setBgp(w1, true).ok).toBe(true);
+    expect(s.setBgp(w2, true).ok).toBe(true);
+    expect(s.toggleDeployment('photo:web').ok).toBe(true);
+    const flow = run(s, 1000);
+    const entries = flow.services.photo!.entries;
+    expect(entries).toHaveLength(2);
+    // HTML も画像・動画の配信も 2 つの Pod グループに半分ずつ流れる
+    expect(flow.nodeLoads.get(entries[0])!.ioOps).toBeGreaterThan(0);
+    expect(flow.nodeLoads.get(entries[1])!.ioOps).toBeCloseTo(flow.nodeLoads.get(entries[0])!.ioOps, 6);
+    expect(flow.nodeLoads.get(entries[1])!.work['photo:web']).toBeCloseTo(flow.nodeLoads.get(entries[0])!.work['photo:web']!, 6);
+  });
 });

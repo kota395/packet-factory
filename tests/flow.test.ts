@@ -265,4 +265,22 @@ describe('流量モデル', () => {
     expect(f3.devices.get(isoWeb)!.cpu).toBe(0);
     expect(f3.devices.get(isoDb)!.cpu).toBe(0);
   });
+
+  it('止まった SLB はアプライアンスと同じく deadLbs として扱い、web 直結に切り替わらない', () => {
+    const { s, server } = base({ pv: 50, unlocks: ['lb', 'slb'] });
+    server('db', 20, ['blog:db']);
+    server('web', 30, ['blog:web']);
+    const slb1 = server('small', 32, ['blog:lb']);
+    expect(run(s, 1000).success).toBe(1);
+    // 1 台だけの SLB が止まると web 直結にはならず失敗する
+    s.setMaintenance(slb1, true);
+    let flow = run(s, 1000);
+    expect(flow.success).toBe(0);
+    expect(flow.services.blog!.entries).toEqual([]);
+    // SLB が 2 台あり 1 台止まると、止まった側の半分が失敗する
+    const slb2 = server('small', 33, ['blog:lb']);
+    flow = run(s, 1000);
+    expect(flow.services.blog!.entries).toEqual([slb2]);
+    expect(flow.success).toBeCloseTo(0.5, 6);
+  });
 });
