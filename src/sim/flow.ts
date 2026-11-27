@@ -90,7 +90,8 @@ export function computeFlow(facility: Facility, input: FlowInput): FlowResult {
     services,
     analytics,
     devices,
-    links: g.links,
+    // g.links はトポロジキャッシュと共有しているので、次の computeFlow で書き換わらないよう複製して返す
+    links: g.links.map((l) => ({ ...l })),
     nodes,
     nodeLoads: loads,
     problems,

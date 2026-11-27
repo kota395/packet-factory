@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, START_PARTS, portsOf, specOf } from '../src/sim/catalog';
-import { WORK } from '../src/sim/config';
+import { SERVICES, WORK } from '../src/sim/config';
+import { computeFlow } from '../src/sim/flow';
 import { newGame } from '../src/sim/save';
 import { wire, run, base, buy } from './helpers';
 
@@ -196,5 +197,23 @@ describe('流量モデル', () => {
     expect(photo.success).toBeGreaterThan(0);
     expect(photo.success).toBeLessThanOrEqual(1);
     expect(photo.latencyMs).toBeGreaterThan(40);
+  });
+
+  it('同じトポロジで computeFlow を続けて呼んでも前の FlowResult.links が書き換わらない', () => {
+    const { s, server } = base();
+    server('db', 20, ['blog:web', 'blog:db']);
+    const input = (pv: number) => ({
+      services: [{ id: 'blog' as const, pv, work: SERVICES.blog.work }],
+      uplinkGbps: 10,
+      roles: s.availableRoles,
+      now: 0,
+      bgp: false,
+      down: new Set<number>(),
+    });
+    const first = computeFlow(s.facility, input(10));
+    const snapshot = first.links.map((l) => ({ a: l.a, b: l.b, ab: l.ab, ba: l.ba }));
+    const second = computeFlow(s.facility, input(100));
+    expect(first.links.map((l) => ({ a: l.a, b: l.b, ab: l.ab, ba: l.ba }))).toEqual(snapshot);
+    expect(second.links[0].ab + second.links[0].ba).toBeCloseTo((snapshot[0].ab + snapshot[0].ba) * 10, 6);
   });
 });
