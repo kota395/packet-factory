@@ -317,8 +317,26 @@ export class Simulation {
     if (id !== 'marketing') return base;
     // 広告は売上に比例して高くなる(後半にユーザーが一気に増えすぎないように)
     const levels = Math.max(0, this.upgrades.marketing + 1 - MARKETING_REVENUE.freeLevels);
-    const byRevenue = this.metrics.rolling.revenuePerSec * MARKETING_REVENUE.secPerLevel * levels;
+    const byRevenue = this.marketingRevenuePerSec() * MARKETING_REVENUE.secPerLevel * levels;
     return Math.max(base, Math.round(byRevenue));
+  }
+
+  /** 広告の値段の基準にする売上(/秒)。読み込み直後や一時的な停止で 0 にならないよう、現在の流量と直近の推移の最大も見る */
+  private marketingRevenuePerSec(): number {
+    let rev = this.metrics.rolling.revenuePerSec;
+    if (this.flow) {
+      let current = 0;
+      for (const sf of Object.values(this.flow.services)) current += sf.pv * sf.success * this.revenuePerPv(sf.id);
+      if (current > rev) rev = current;
+    }
+    const h = this.metrics.history;
+    if (h.t.length) {
+      const cutoff = h.t[h.t.length - 1] - 300;
+      for (let i = h.t.length - 1; i >= 0 && h.t[i] >= cutoff; i--) {
+        if (h.revenue[i] > rev) rev = h.revenue[i];
+      }
+    }
+    return rev;
   }
 
   // ---------------------------------------------------------------- 物理層の操作
