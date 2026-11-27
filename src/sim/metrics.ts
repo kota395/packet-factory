@@ -3,7 +3,7 @@
  * 1 秒ごとにダッシュボード用の推移(最大 METRICS.historySec 秒)を残す。
  */
 import { METRICS } from './config';
-import type { ServiceId } from './types';
+import { SERVICE_IDS, type ServiceId } from './types';
 
 export interface RollingStats {
   /** ページビュー/秒(成功 + 失敗) */
@@ -248,8 +248,14 @@ export class Metrics {
    */
   exportHistory(): SavedHistory {
     const h = this.history;
+    // 時刻で間引く。読み込んだ推移はすでに間引いてあるので、点の番号で飛ばすと保存のたびにさらに 1/10 になる
     const keep: number[] = [];
-    for (let i = h.t.length - 1; i >= 0; i -= METRICS.saveEverySec) keep.unshift(i);
+    let next = Infinity;
+    for (let i = h.t.length - 1; i >= 0; i--) {
+      if (h.t[i] > next) continue;
+      keep.unshift(i);
+      next = h.t[i] - METRICS.saveEverySec;
+    }
     const round = (v: number | null) => (v === null ? null : Number(v.toPrecision(4)));
     const pick = <T extends object>(src: T): Record<keyof T, (number | null)[]> =>
       Object.fromEntries(Object.entries(src).map(([k, arr]) => [k, keep.map((i) => round((arr as (number | null)[])[i]))])) as Record<
@@ -277,7 +283,9 @@ export class Metrics {
       fresh[k] = [...(d.total[k] as number[])];
     }
     const services = new Map<ServiceId, ServiceHistory>();
+    if (d.services !== undefined && (!d.services || typeof d.services !== 'object')) return false;
     for (const [id, sh] of Object.entries(d.services ?? {})) {
+      if (!SERVICE_IDS.includes(id as ServiceId) || !sh || typeof sh !== 'object') return false;
       const empty = emptyServiceHistory(0);
       for (const k of Object.keys(empty) as (keyof ServiceHistory)[]) {
         if (!okArr((sh as ServiceHistory)[k], true)) return false;
@@ -285,9 +293,9 @@ export class Metrics {
       }
       services.set(id as ServiceId, empty);
     }
-    // 最後の点が 0 秒になるように(このあとの記録は 1 秒から続く)
+    // 最後の点が今の秒になるように(このあとの記録はその次の秒から続く)
     const last = fresh.t[len - 1];
-    fresh.t = fresh.t.map((t) => t - last);
+    fresh.t = fresh.t.map((t) => t - last + this.second);
     Object.assign(this.history, fresh);
     this.services.clear();
     for (const [id, sh] of services) this.services.set(id, sh);

@@ -63,5 +63,35 @@ describe('メトリクスの保存', () => {
     // 壊れたデータは無視する
     expect(newGame().metrics.importHistory({ total: { t: [0, 1], pv: [1] } })).toBe(false);
     expect(newGame().metrics.importHistory(null)).toBe(false);
+    expect(newGame().metrics.importHistory({ ...saved, services: { blog: null } })).toBe(false);
+  });
+
+  it('保存と読み込みを繰り返しても、過去の推移は 10 秒おきのまま残る', () => {
+    let sim = newGame('peace');
+    sim.step(600_000);
+    let saved = JSON.parse(JSON.stringify(sim.metrics.exportHistory()));
+    const first = saved.total.t.length;
+    for (let i = 0; i < 3; i++) {
+      sim = loadSave(parseSave(JSON.parse(JSON.stringify(createSave(sim, 0))))!);
+      expect(sim.metrics.importHistory(saved)).toBe(true);
+      sim.step(20_000);
+      saved = JSON.parse(JSON.stringify(sim.metrics.exportHistory()));
+    }
+    // 1 回ごとに 20 秒(2 点)ずつ増えるだけで、過去の点は減らない
+    expect(saved.total.t.length).toBe(first + 6);
+    const gaps = saved.total.t.slice(1).map((t: number, i: number) => t - saved.total.t[i]);
+    expect(Math.max(...gaps)).toBe(METRICS.saveEverySec);
+  });
+
+  it('時間が進んだあとに読み込んでも、続きの秒から記録する', () => {
+    const a = newGame('peace');
+    a.step(30_000);
+    const saved = JSON.parse(JSON.stringify(a.metrics.exportHistory()));
+    const b = newGame('peace');
+    b.step(50_000);
+    expect(b.metrics.importHistory(saved)).toBe(true);
+    b.step(2000);
+    expect(b.metrics.history.t.at(-1)).toBe(52);
+    expect(b.metrics.history.t.at(-3)).toBe(50);
   });
 });
