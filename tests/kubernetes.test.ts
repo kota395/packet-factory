@@ -48,6 +48,19 @@ describe('Kubernetes', () => {
     expect(webPods(s)).toBeLessThan(many);
   });
 
+  it('ワーカーに載りきらないときは、動いている Pod の数を基準にして増やしすぎない', () => {
+    const { s, lb } = cluster(1500, ['lb']);
+    lb(30);
+    s.toggleDeployment('blog:web');
+    run(s, 60_000);
+    expect(s.podsPending.size).toBeGreaterThan(0);
+    const settled = s.deployments.get('blog:web')!;
+    run(s, 30_000);
+    // 待ちの Pod まで掛けると 5 秒ごとに倍々になり上限まで行く。動いている数が同じなら、目標も同じところで止まる
+    expect(s.deployments.get('blog:web')).toBe(settled);
+    expect(settled).toBeLessThan(K8S.maxPods);
+  });
+
   it('キャパシティは、Pod がオートスケールでワーカーを使い切った前提で見積もる', () => {
     const { s, lb } = cluster(50, ['lb']);
     lb(30);
