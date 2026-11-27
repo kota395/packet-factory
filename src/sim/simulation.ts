@@ -437,21 +437,75 @@ export class Simulation {
   /** 障害(難易度オプション): 機器がときどき壊れ、しばらくすると直る */
   /**
    * 離れていた間のユーザーの増加を反映する。サービスごとに、市場規模と今の構成で捌ける量のどちらか小さい方へ
-   * 向かって増える(減りはしない)。増えた人数の合計を返す
+   * 向かって増える(減りはしない。回線などの共有資源やキャンペーン中の倍率も考慮して溢れさせない)。増えた人数の合計を返す
    */
   growWhileAway(seconds: number): number {
     if (this.fixedTraffic || seconds <= 0) return 0;
-    this.estimateCapacity();
-    let gained = 0;
-    for (const id of this.activeServices) {
-      const u = this.serviceUsers[id];
-      const limit = Math.min(this.marketOf(id), this.capacityOf(id) / PV_PER_USER);
-      if (limit <= u) continue;
-      const next = Math.min(limit, logistic(u, this.marketOf(id), GROWTH_RATE, seconds));
-      gained += next - u;
-      this.serviceUsers[id] = next;
+    const ids = this.activeServices;
+    const full = k8s.podsAtFullScale(this);
+    const target = METRICS.capacitySuccess;
+    const wave = 1 + DIFFICULTY.dayWave * Math.sin((2 * Math.PI * this.time) / DIFFICULTY.dayCycleMs);
+    const pvOf = (users: Record<ServiceId, number>): Partial<Record<ServiceId, number>> =>
+      Object.fromEntries(ids.map((id) => [id, users[id] * PV_PER_USER * wave * (id === 'shop' && this.campaignActive ? CAMPAIGN.trafficMul : 1)]));
+
+    const cur = { ...this.serviceUsers };
+    const start = { ...this.serviceUsers };
+    const markets = Object.fromEntries(ids.map((id) => [id, this.marketOf(id)])) as Record<ServiceId, number>;
+    const f0 = this.computeFlow(pvOf(cur), full);
+    const minOk = Object.fromEntries(
+      ids.map((id) => {
+        const s0 = f0.services[id]?.success ?? 0;
+        return [id, s0 >= target ? target : Math.max(0, s0 - 1e-6)];
+      }),
+    ) as Record<ServiceId, number>;
+    const growing = new Set<ServiceId>(ids.filter((id) => cur[id] < markets[id] && (f0.services[id]?.success ?? 0) >= target));
+
+    const fits = (users: Record<ServiceId, number>): boolean => {
+      const flow = this.computeFlow(pvOf(users), full);
+      return ids.every((id) => (flow.services[id]?.success ?? 0) >= minOk[id]);
+    };
+    const advance = (base: Record<ServiceId, number>, who: Iterable<ServiceId>, dt: number): Record<ServiceId, number> => {
+      const next = { ...base };
+      for (const id of who) next[id] = Math.max(base[id], logistic(base[id], markets[id], GROWTH_RATE, dt));
+      return next;
+    };
+
+    let elapsed = 0;
+    while (growing.size > 0 && elapsed < seconds) {
+      const rem = seconds - elapsed;
+      const atEnd = advance(cur, growing, rem);
+      if (fits(atEnd)) {
+        Object.assign(cur, atEnd);
+        break;
+      }
+      let lo = 0;
+      let hi = rem;
+      for (let i = 0; i < 24; i++) {
+        const mid = (lo + hi) / 2;
+        if (fits(advance(cur, growing, mid))) lo = mid;
+        else hi = mid;
+      }
+      Object.assign(cur, advance(cur, growing, lo));
+      elapsed += lo;
+      const left = seconds - elapsed;
+      if (left <= 0) break;
+      const probe = Math.min(left, Math.max(0.05, (hi - lo) * 8));
+      let removed = 0;
+      for (const id of growing) {
+        if (cur[id] >= markets[id] * (1 - 1e-9) || !fits(advance(cur, [id], probe))) {
+          growing.delete(id);
+          removed++;
+        }
+      }
+      if (!removed) break;
     }
-    this.refreshFlow();
+
+    let gained = 0;
+    for (const id of ids) {
+      gained += cur[id] - start[id];
+      this.serviceUsers[id] = cur[id];
+    }
+    this.estimateCapacity();
     return gained;
   }
 

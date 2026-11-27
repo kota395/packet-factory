@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, PRESETS, isServerModel, partsError } from '../src/sim/catalog';
-import { PV_PER_USER } from '../src/sim/config';
+import { METRICS, PV_PER_USER, RACK } from '../src/sim/config';
 import { UPGRADE_BY_ID } from '../src/sim/economy';
 import { UPKEEP } from '../src/sim/pricing';
 import { applyAbsence, createSave, decodeSave, encodeSave, loadSave, newGame, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
-import { base } from './helpers';
+import { RICH, base } from './helpers';
 
 describe('セーブ', () => {
   it('保存 → 文字列化 → 復元で同じ構成になる', () => {
@@ -89,6 +89,40 @@ describe('セーブ', () => {
     applyAbsence(s, 8 * 3600_000, 0);
     expect(s.users * PV_PER_USER).toBeLessThanOrEqual(s.capacityOf('blog') * 1.01);
     expect(s.users).toBeLessThan(s.marketSize / 2);
+  });
+
+  it('離れていた間: 複数サービスで回線を共有していても、戻ったときに溢れない。キャンペーン中も倍率を守る', () => {
+    // 100Mbps 回線をブログとショッピングで共有
+    const s = new Simulation({ startMoney: RICH, unlocks: ['shop'], upgrades: { marketing: 10, rackPower: 3 } });
+    s.facility.rent(0);
+    s.facility.place('handoff', 0, RACK.units, 0);
+    s.buyDevice('sw-24', 0, 40);
+    const a = s.buyServer('2u-ssd', 0, 30).id!;
+    const b = s.buyServer('2u-ssd', 0, 20).id!;
+    s.toggleRole(a, 'blog:web');
+    s.toggleRole(a, 'blog:db');
+    s.toggleRole(b, 'shop:web');
+    s.toggleRole(b, 'shop:db');
+    s.toggleRole(b, 'shop:search');
+    applyAbsence(s, 8 * 3600_000, 0);
+    expect(s.serviceUsers.blog).toBeGreaterThan(300);
+    expect(s.serviceUsers.shop).toBeGreaterThan(200);
+    expect(s.flow.success).toBeGreaterThanOrEqual(METRICS.capacitySuccess);
+    expect(s.flow.services.blog!.success).toBeGreaterThanOrEqual(METRICS.capacitySuccess);
+    expect(s.flow.services.shop!.success).toBeGreaterThanOrEqual(METRICS.capacitySuccess);
+
+    // キャンペーン中: 訪問倍率(CAMPAIGN.trafficMul)を含めて溢れない範囲まで
+    const c = new Simulation({ startMoney: RICH, unlocks: ['shop'], upgrades: { marketing: 10, rackPower: 3 } });
+    c.facility.rent(0);
+    c.facility.place('handoff', 0, RACK.units, 0);
+    c.buyDevice('sw-24', 0, 40);
+    const shopSrv = c.buyServer('2u-ssd', 0, 20).id!;
+    c.toggleRole(shopSrv, 'shop:web');
+    c.toggleRole(shopSrv, 'shop:db');
+    c.toggleRole(shopSrv, 'shop:search');
+    expect(c.startCampaign().ok).toBe(true);
+    applyAbsence(c, 8 * 3600_000, 0);
+    expect(c.flow.services.shop!.success).toBeGreaterThanOrEqual(METRICS.capacitySuccess);
   });
 
   it('機種のデータが揃っている', () => {
