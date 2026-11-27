@@ -171,9 +171,10 @@ export function createLedger(facility: Facility, input: FlowInput) {
     const n = nodes.get(id)!;
     const act = n.roles.filter(isActive);
     if (!act.includes(key)) act.push(key);
-    const used = act.reduce((s, k) => s + ROLE_MEM_GB[splitRole(k)[1]], 0);
+    const pods = n.pods ?? 1;
+    const used = act.reduce((s, k) => s + ROLE_MEM_GB[splitRole(k)[1]], 0) * pods;
     const sharers = Math.max(1, act.filter((k) => CACHE_ROLES.has(splitRole(k)[1])).length);
-    const mem = Math.max(0.5, (n.memGB - used) / sharers);
+    const mem = Math.max(0.5, (n.memGB - used) / (pods * sharers));
     const miss = Math.min(1, Math.max(WORK.dbMissMin, perGB / mem));
     loads.get(id)!.miss[key] = miss;
     return miss;

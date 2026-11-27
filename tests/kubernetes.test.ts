@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { K8S, SERVICES } from '../src/sim/config';
+import { POD_ID_BASE, computeFlow } from '../src/sim/flow';
 import { createSave, decodeSave, encodeSave, loadSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
 import type { UnlockId } from '../src/sim/types';
@@ -111,5 +112,27 @@ describe('Kubernetes', () => {
     expect(b.facility.vms.get(vm)!.k8s).toBe(true);
     expect(b.deployments.get('blog:web')).toBe(s.deployments.get('blog:web'));
     expect(b.flow.success).toBe(1);
+  });
+
+  it('search Pod のキャッシュメモリは Pod 1 つあたりで計算され、1 台に集めても外れ率が変わらない', () => {
+    const { s, server } = base({ traffic: { blog: 0, shop: 20 }, unlocks: ['kubernetes', 'shop'] });
+    server('db', 10, ['shop:web', 'shop:db']);
+    const workers = [server('big', 14, []), server('big', 18, []), server('big', 22, []), server('big', 26, [])];
+    for (const w of workers) expect(s.setK8sWorker({ device: w }, true).ok).toBe(true);
+    const input = (pods: { id: number; worker: number; role: 'shop:search'; count: number }[]) => ({
+      services: [{ id: 'shop' as const, pv: 20, work: SERVICES.shop.work }],
+      pods,
+      uplinkGbps: 10,
+      roles: s.availableRoles,
+      now: 0,
+      bgp: false,
+      down: new Set<number>(),
+    });
+    const packed = computeFlow(s.facility, input([{ id: POD_ID_BASE, worker: workers[0], role: 'shop:search', count: 4 }]));
+    const spread = computeFlow(s.facility, input(workers.map((w, i) => ({ id: POD_ID_BASE + i, worker: w, role: 'shop:search' as const, count: 1 }))));
+    expect(packed.nodeLoads.get(POD_ID_BASE)!.miss['shop:search']).toBeCloseTo(spread.nodeLoads.get(POD_ID_BASE)!.miss['shop:search']!, 6);
+    const packedIo = packed.nodeLoads.get(POD_ID_BASE)!.ioOps;
+    const spreadIo = workers.reduce((sum, _, i) => sum + spread.nodeLoads.get(POD_ID_BASE + i)!.ioOps, 0);
+    expect(packedIo).toBeCloseTo(spreadIo, 6);
   });
 });
