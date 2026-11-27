@@ -129,7 +129,7 @@ export function loadSave(save: SaveData): Simulation {
   for (const [id, model, slot, u, roles, paid, name, hv, bgp, down, k8s, parts] of save.devices) {
     // 壊れた配置(重なり・ラック外)は読み飛ばす。電力は昔の上限で置いたものもそのまま戻す
     if (f.placeError(model, slot, u, Infinity, undefined, parts) !== null) continue;
-    const d = f.place(model, slot, u, paid, { id, name, parts: parts ?? undefined });
+    const d = f.place(model, slot, u, paid, { id, name: name || undefined, parts: parts ?? undefined });
     if (hv) f.setHv(d.id, true);
     if (bgp) f.setBgp(d.id, true);
     if (down) f.setDown(d.id, true);
@@ -138,7 +138,7 @@ export function loadSave(save: SaveData): Simulation {
   }
   for (const [id, name, host, size, roles, disk, k8s] of save.vms) {
     if (!f.devices.get(host)?.hv) continue;
-    f.createVm(host, size, { id, name, roles: k8s ? [] : roles, disk, k8s });
+    f.createVm(host, size, { id, name: name || undefined, roles: k8s ? [] : roles, disk, k8s });
   }
   for (const [key, count] of save.deployments) sim.deployments.set(key, count);
   sim.schedule();
@@ -225,7 +225,11 @@ export function parseSave(data: unknown): SaveData | null {
   const upgrades = emptyUpgrades();
   for (const [key, v] of Object.entries(d.upgrades as Record<string, unknown>)) {
     if (!isInt(v) || v < 0 || v > 1000) return null;
-    if (key in UPGRADE_BY_ID) upgrades[key as UpgradeId] = v;
+    if (key in UPGRADE_BY_ID) {
+      const id = key as UpgradeId;
+      const max = UPGRADE_BY_ID[id].maxLevel;
+      upgrades[id] = max !== undefined ? Math.min(v, max) : v;
+    }
   }
 
   const racks: number[] = [];
@@ -234,6 +238,7 @@ export function parseSave(data: unknown): SaveData | null {
     racks.push(s);
   }
 
+  const safeName = (s: string) => (/^[a-z0-9_-]{1,32}$/i.test(s) ? s : '');
   const devices: SaveData['devices'] = [];
   /** v4 はサービスつきの役割、v3 は役割の名前だけ(ブログの役割として読む) */
   const okRoles = (roles: unknown[]): RoleKey[] =>
@@ -253,7 +258,7 @@ export function parseSave(data: unknown): SaveData | null {
       parts = legacy?.parts ?? parseParts(rawParts) ?? null;
       if (!parts || partsError(model as 'srv-1u' | 'srv-2u', parts)) parts = model === 'srv-1u' ? START_PARTS.web : START_PARTS.db;
     }
-    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, name.slice(0, 32), hv === true, bgp === true, down === true, k8s === true, parts]);
+    devices.push([id, model as ModelId, slot, u, okRoles(roles), paid, safeName(name), hv === true, bgp === true, down === true, k8s === true, parts]);
   }
 
   const vms: SaveData['vms'] = [];
@@ -263,7 +268,7 @@ export function parseSave(data: unknown): SaveData | null {
     if (!isInt(id) || id < 1 || typeof name !== 'string' || !isInt(host) || !Array.isArray(roles)) return null;
     if (size !== 's' && size !== 'm' && size !== 'l') return null;
     if (disk !== 'local' && disk !== 'shared') return null;
-    vms.push([id, name.slice(0, 32), host, size, okRoles(roles), disk, k8s === true]);
+    vms.push([id, safeName(name), host, size, okRoles(roles), disk, k8s === true]);
   }
 
   // LB がアプライアンスになる前のセーブ: サーバに付けていた lb の役割は、SLB を解放した扱いでそのまま使えるようにする

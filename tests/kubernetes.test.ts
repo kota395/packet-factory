@@ -154,4 +154,47 @@ describe('Kubernetes', () => {
     expect(flow.nodeLoads.get(entries[1])!.ioOps).toBeCloseTo(flow.nodeLoads.get(entries[0])!.ioOps, 6);
     expect(flow.nodeLoads.get(entries[1])!.work['photo:web']).toBeCloseTo(flow.nodeLoads.get(entries[0])!.work['photo:web']!, 6);
   });
+
+  it('ローカルディスクのワーカー VM を移して止めると、Pod はすぐ別のワーカーへ置き直される', () => {
+    const { s, lb, server } = base({ pv: 30, unlocks: ['kubernetes', 'virtualization', 'lb'] });
+    server('db', 10, ['blog:db']);
+    lb(30);
+    const h1 = server('big', 20, []);
+    const h2 = server('big', 22, []);
+    s.setHv(h1, true);
+    s.setHv(h2, true);
+    const vm1 = s.createVm(h1, 'l').id!;
+    const vm2 = s.createVm(h2, 'l').id!;
+    s.setK8sWorker({ vm: vm1 }, true);
+    s.setK8sWorker({ vm: vm2 }, true);
+    s.toggleDeployment('blog:web');
+    expect(s.pods.some((p) => p.worker === -vm1)).toBe(true);
+    expect(s.moveVm(vm1, h2).ok).toBe(true);
+    // オートスケールを待たずに即座に vm2 へ置き直される
+    expect(s.pods.every((p) => p.worker === -vm2)).toBe(true);
+    expect(webPods(s)).toBe(K8S.minPods);
+  });
+
+  it('ワーカーが 0 台のときに Deployment があると「ワーカーがありません」の警告が出る', () => {
+    const { s, server } = base({ pv: 30, unlocks: ['kubernetes'] });
+    server('db', 10, ['blog:db']);
+    s.toggleDeployment('blog:web');
+    expect(s.flow.problems).toContain('Kubernetes のワーカーがありません');
+  });
+
+  it('故障したワーカーが復旧した瞬間に、オートスケールを待たず Pod を置き直す', () => {
+    const { s, server } = base({ pv: 30, unlocks: ['kubernetes'] });
+    server('db', 10, ['blog:db']);
+    const w = server('web', 20, []);
+    s.setK8sWorker({ device: w }, true);
+    s.toggleDeployment('blog:web');
+    const dev = s.facility.devices.get(w)!;
+    dev.failedUntil = s.time + 1000;
+    s.schedule();
+    expect(webPods(s)).toBe(0);
+    // 復旧の時刻まで進める(オートスケール間隔 5 秒より短い)
+    s.step(1000);
+    expect(webPods(s)).toBe(K8S.minPods);
+    expect(s.flow.success).toBe(1);
+  });
 });

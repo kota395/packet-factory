@@ -87,8 +87,12 @@ export function createVmAuto(sim: Simulation, size: VmSize, opts: { roles?: Role
   return { ok: true, id: vm.id, message: `${vm.name}(${VIRT.sizes[size].label})を ${where} に作りました${opts.k8s ? '(Kubernetes のワーカー)' : ''}` };
 }
 
+function hostDownError(sim: Simulation, host: number): string | null {
+  return sim.downDevices.has(host) ? `${sim.facility.devices.get(host)!.name} は止まっています` : null;
+}
+
 export function createVm(sim: Simulation, host: number, size: VmSize): ActionResult {
-  const err = sim.facility.vmPlaceError(host, size);
+  const err = sim.facility.vmPlaceError(host, size) ?? hostDownError(sim, host);
   if (err) return { ok: false, message: err };
   const vm = sim.facility.createVm(host, size);
   sim.refreshFlow();
@@ -110,7 +114,7 @@ export function vmMoveInfo(sim: Simulation, id: number, host: number): { error: 
   if (vm.host === host) return { error: 'すでにそのホストにいます', downtimeMs: 0 };
   if (vm.downUntil > sim.time) return { error: '移している途中です', downtimeMs: 0 };
   return {
-    error: sim.facility.vmPlaceError(host, vm.size, id),
+    error: sim.facility.vmPlaceError(host, vm.size, id) ?? hostDownError(sim, host),
     downtimeMs: vm.disk === 'shared' ? 0 : VIRT.migrateDowntimeMs,
   };
 }
@@ -120,6 +124,7 @@ export function moveVm(sim: Simulation, id: number, host: number): ActionResult 
   if (error) return { ok: false, message: error };
   const vm = sim.facility.vms.get(id)!;
   sim.facility.moveVm(id, host, sim.time + downtimeMs);
+  if (vm.k8s) sim.schedule();
   sim.refreshFlow();
   const to = sim.facility.devices.get(host)!.name;
   return {

@@ -13,7 +13,7 @@ import {
   START_MONEY,
   UNLOCK_PRICES,
 } from '../src/sim/pricing';
-import { newGame } from '../src/sim/save';
+import { createSave, loadSave, newGame } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
 import { constant, RICH, run, base } from './helpers';
 
@@ -41,6 +41,29 @@ describe('経済', () => {
     const want = Math.round(t.metrics.rolling.revenuePerSec * MARKETING_REVENUE.secPerLevel * 3);
     expect(want).toBeGreaterThan(upgradeCost('marketing', level));
     expect(t.upgradeCost('marketing')).toBe(want);
+  });
+
+  it('広告の値段は一時的な停止や読み込み直後でも定価に落ちない', () => {
+    const level = MARKETING_REVENUE.freeLevels + 2;
+    const t = new Simulation({ startMoney: RICH, startUsers: { blog: 20_000 }, upgrades: { marketing: level, monetize: 10, uplink: 2, rackPower: 3 } });
+    t.facility.rent(0);
+    t.facility.place('handoff', 0, RACK.units, 0);
+    const sw = t.buyDevice('sw-24', 0, 40).id!;
+    const web = t.buyServer('1u-web', 0, 30).id!;
+    const db = t.buyServer('2u-ssd', 0, 20).id!;
+    t.toggleRole(web, 'blog:web');
+    t.toggleRole(db, 'blog:db');
+    run(t, 10_000);
+    const runningCost = t.upgradeCost('marketing');
+    expect(runningCost).toBeGreaterThan(upgradeCost('marketing', level));
+    // 読み込み直後(rolling が 0 の状態)でも定価に落ちない
+    const loaded = loadSave(createSave(t, 1000));
+    expect(loaded.upgradeCost('marketing')).toBeGreaterThan(upgradeCost('marketing', level));
+    // スイッチを止めて移動平均の売上が 0 になっても、直近の推移の最大売上を見て定価に落ちない
+    t.setMaintenance(sw, true);
+    run(t, 10_000);
+    expect(t.metrics.rolling.revenuePerSec).toBe(0);
+    expect(t.upgradeCost('marketing')).toBeGreaterThanOrEqual(runningCost);
   });
 
   it('最初の資金と、解放・機器の価格は pricing.ts の値で決まる', () => {

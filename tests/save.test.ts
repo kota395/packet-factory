@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, PRESETS, isServerModel, partsError } from '../src/sim/catalog';
-import { PV_PER_USER } from '../src/sim/config';
+import { METRICS, PV_PER_USER, RACK } from '../src/sim/config';
+import { UPGRADE_BY_ID } from '../src/sim/economy';
+import { UPKEEP } from '../src/sim/pricing';
 import { applyAbsence, createSave, decodeSave, encodeSave, loadSave, newGame, parseSave } from '../src/sim/save';
-import { base } from './helpers';
+import { Simulation } from '../src/sim/simulation';
+import { RICH, base } from './helpers';
 
 describe('セーブ', () => {
   it('保存 → 文字列化 → 復元で同じ構成になる', () => {
@@ -28,6 +31,45 @@ describe('セーブ', () => {
     expect(parseSave(JSON.parse(JSON.stringify(save)))).toEqual(save);
   });
 
+  it('セーブの機器名・VM 名に HTML が紛れていれば捨てて付け直す', () => {
+    const baseSim = newGame();
+    baseSim.unlocks.add('virtualization');
+    const srv = [...baseSim.facility.devices.values()].find((d) => d.model === 'srv-2u')!;
+    baseSim.facility.setRoles(srv.id, []);
+    baseSim.facility.setHv(srv.id, true);
+    baseSim.facility.createVm(srv.id, 's');
+    const save = createSave(baseSim, 1000);
+    const bad = '<img src=x onerror=alert(1)>';
+    const tampered = {
+      ...save,
+      devices: save.devices.map((d) => (d[1] === 'srv-1u' ? [d[0], d[1], d[2], d[3], d[4], d[5], bad, d[7], d[8], d[9], d[10], d[11]] : d)),
+      vms: save.vms.map((v) => [v[0], bad, v[2], v[3], v[4], v[5], v[6]]),
+    };
+    const parsed = parseSave(tampered)!;
+    expect(parsed).not.toBeNull();
+    expect(parsed.devices.every((d) => !d[6].includes('<'))).toBe(true);
+    expect(parsed.vms.every((v) => !v[1].includes('<'))).toBe(true);
+    const loaded = loadSave(parsed);
+    const loadedSrv = [...loaded.facility.devices.values()].find((d) => d.model === 'srv-1u')!;
+    const loadedVm = [...loaded.facility.vms.values()][0]!;
+    expect(loadedSrv.name).toMatch(/^srv\d+$/);
+    expect(loadedVm.name).toMatch(/^vm\d+$/);
+  });
+
+  it('強化レベルが上限を超えていても最大レベルに収まり、維持費や資金が NaN にならない', () => {
+    const save = createSave(newGame(), 1000);
+    const parsed = parseSave({ ...save, upgrades: { ...save.upgrades, uplink: 99, rackPower: 99 } })!;
+    expect(parsed).not.toBeNull();
+    expect(parsed.upgrades.uplink).toBe(UPGRADE_BY_ID.uplink.maxLevel);
+    expect(parsed.upgrades.rackPower).toBe(UPGRADE_BY_ID.rackPower.maxLevel);
+    const direct = new Simulation({ upgrades: { uplink: 99, rackPower: 99 } });
+    direct.facility.rent(0);
+    expect(direct.upkeep.racks).toBe(UPKEEP.rackByPowerLevel.at(-1));
+    expect(direct.upkeep.uplink).toBe(UPKEEP.uplinkByLevel.at(-1));
+    direct.step(1000);
+    expect(Number.isFinite(direct.money)).toBe(true);
+  });
+
   it('離れていた間: 直前の収支の一定割合が入り、ユーザーは市場規模と捌ける量まで増える', () => {
     const s = newGame();
     expect(applyAbsence(s, 10_000, 2)).toEqual({ elapsedMs: 10_000, gained: 0, users: 0 });
@@ -47,6 +89,40 @@ describe('セーブ', () => {
     applyAbsence(s, 8 * 3600_000, 0);
     expect(s.users * PV_PER_USER).toBeLessThanOrEqual(s.capacityOf('blog') * 1.01);
     expect(s.users).toBeLessThan(s.marketSize / 2);
+  });
+
+  it('離れていた間: 複数サービスで回線を共有していても、戻ったときに溢れない。キャンペーン中も倍率を守る', () => {
+    // 100Mbps 回線をブログとショッピングで共有
+    const s = new Simulation({ startMoney: RICH, unlocks: ['shop'], upgrades: { marketing: 10, rackPower: 3 } });
+    s.facility.rent(0);
+    s.facility.place('handoff', 0, RACK.units, 0);
+    s.buyDevice('sw-24', 0, 40);
+    const a = s.buyServer('2u-ssd', 0, 30).id!;
+    const b = s.buyServer('2u-ssd', 0, 20).id!;
+    s.toggleRole(a, 'blog:web');
+    s.toggleRole(a, 'blog:db');
+    s.toggleRole(b, 'shop:web');
+    s.toggleRole(b, 'shop:db');
+    s.toggleRole(b, 'shop:search');
+    applyAbsence(s, 8 * 3600_000, 0);
+    expect(s.serviceUsers.blog).toBeGreaterThan(300);
+    expect(s.serviceUsers.shop).toBeGreaterThan(200);
+    expect(s.flow.success).toBeGreaterThanOrEqual(METRICS.capacitySuccess);
+    expect(s.flow.services.blog!.success).toBeGreaterThanOrEqual(METRICS.capacitySuccess);
+    expect(s.flow.services.shop!.success).toBeGreaterThanOrEqual(METRICS.capacitySuccess);
+
+    // キャンペーン中: 訪問倍率(CAMPAIGN.trafficMul)を含めて溢れない範囲まで
+    const c = new Simulation({ startMoney: RICH, unlocks: ['shop'], upgrades: { marketing: 10, rackPower: 3 } });
+    c.facility.rent(0);
+    c.facility.place('handoff', 0, RACK.units, 0);
+    c.buyDevice('sw-24', 0, 40);
+    const shopSrv = c.buyServer('2u-ssd', 0, 20).id!;
+    c.toggleRole(shopSrv, 'shop:web');
+    c.toggleRole(shopSrv, 'shop:db');
+    c.toggleRole(shopSrv, 'shop:search');
+    expect(c.startCampaign().ok).toBe(true);
+    applyAbsence(c, 8 * 3600_000, 0);
+    expect(c.flow.services.shop!.success).toBeGreaterThanOrEqual(METRICS.capacitySuccess);
   });
 
   it('機種のデータが揃っている', () => {

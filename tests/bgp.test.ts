@@ -126,4 +126,16 @@ describe('BGP による冗長化', () => {
     const { difficulty: _d, ...old } = save;
     expect(parseSave(old)!.difficulty).toBe('peace');
   });
+
+  it('メンテナンスで止めている機器には故障が起きない', () => {
+    const h = newGame('hard');
+    h.money = RICH;
+    for (let u = 1; u <= 6; u++) h.buyServer('1u-small', 0, u);
+    for (const d of h.facility.devices.values()) {
+      if (d.model !== 'handoff') h.setMaintenance(d.id, true);
+    }
+    h.step(600_000);
+    expect(h.lastFailure).toBeNull();
+    expect([...h.facility.devices.values()].every((d) => d.failedUntil === 0)).toBe(true);
+  });
 });

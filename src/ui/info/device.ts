@@ -27,7 +27,7 @@ export function deviceContent(sim: Simulation, d: Device, base: string): Content
     const create = (['s', 'm', 'l'] as const)
       .map((size) => {
         const z = VIRT.sizes[size];
-        const err = f.vmPlaceError(d.id, size);
+        const err = f.vmPlaceError(d.id, size) ?? (sim.downDevices.has(d.id) ? `${d.name} は止まっています` : null);
         return `<button type="button" data-act="createvm" data-id="${d.id}" data-size="${size}" ${err ? `disabled title="${err}"` : ''}>+ ${z.label}(${z.vcpu} vCPU・${z.memGB}GB)</button>`;
       })
       .join('');

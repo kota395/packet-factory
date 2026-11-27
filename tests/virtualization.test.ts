@@ -203,4 +203,17 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     expect(flow.nodeLoads.get(-shopVm)!.ioOps).toBe(0);
     expect(flow.services.shop!.success).toBe(1);
   });
+
+  it('止まっているホストには VM を作れず、移す先にも選べない', () => {
+    const { s, server } = base({ pv: 20, unlocks: ['virtualization'] });
+    const h1 = server('big', 20, []);
+    const h2 = server('big', 22, []);
+    s.setHv(h1, true);
+    s.setHv(h2, true);
+    const vm = s.createVm(h1, 's').id!;
+    s.setMaintenance(h2, true);
+    expect(s.createVm(h2, 's').ok).toBe(false);
+    expect(s.vmMoveInfo(vm, h2).error).not.toBeNull();
+    expect(s.moveVm(vm, h2).ok).toBe(false);
+  });
 });
