@@ -225,9 +225,9 @@ export function createLedger(facility: Facility, input: FlowInput) {
   function nodePass(id: number): number {
     const n = nodes.get(id)!;
     const l = loads.get(id)!;
-    // GPU は同じサーバの VM・Pod で分け合うので、サーバ全体の使用率で見る
-    let ok = pass(Math.max(cpuRho(id), l.io, l.gpu !== undefined ? devices.get(n.host)!.gpu : 0));
-    if (n.disk === 'shared') ok *= l.storage != null ? along(route(n.host, l.storage))[0] : 0;
+    // ディスクと GPU は同じサーバ・ストレージで分け合うが、使っていないノードは巻き込まない
+    let ok = pass(Math.max(cpuRho(id), l.ioOps > 0 ? l.io : 0, l.gpu !== undefined ? devices.get(n.host)!.gpu : 0));
+    if (n.disk === 'shared') ok *= l.storage == null ? 0 : l.ioOps > 0 ? along(route(n.host, l.storage))[0] : 1;
     return ok;
   }
   function cpuMs(id: number, ms: number): number {

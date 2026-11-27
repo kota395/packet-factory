@@ -145,4 +145,62 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     expect(b.facility.devices.get(h)!.hv).toBe(true);
     expect(b.facility.vms.get(vm)!.roles).toEqual(['blog:web']);
   });
+
+  it('ディスク IO を出さない VM は、同じホストや NAS のディスクが溢れても巻き添えにならない', () => {
+    const { s, sw, server } = base({
+      traffic: { blog: 500, shop: 10 },
+      unlocks: ['virtualization', 'storage', 'tenGig', 'shop', 'comments'],
+    });
+    // ホストのローカルディスクを HDD 2 本(150 IOPS)にして blog:db で溢れさせる
+    const hv = s.buyDevice('srv-2u', 0, 20, { cpu: 24, memGB: 256, backplane: 'lff', drives: ['hdd', 'hdd'], nic: 'sfp10' }).id!;
+    wire(s, { device: hv, port: 0 }, { device: sw, port: 20 });
+    expect(s.setHv(hv, true).ok).toBe(true);
+    const blogWeb = s.createVm(hv, 'l').id!;
+    const blogDb = s.createVm(hv, 's').id!;
+    const shopWeb = s.createVm(hv, 'm').id!;
+    s.toggleVmRole(blogWeb, 'blog:web');
+    s.toggleVmRole(blogDb, 'blog:db');
+    s.toggleVmRole(shopWeb, 'shop:web');
+    server('db', 10, ['shop:db', 'shop:search']);
+    let flow = run(s);
+    expect(flow.devices.get(hv)!.io).toBeGreaterThan(1);
+    expect(flow.nodeLoads.get(-shopWeb)!.ioOps).toBe(0);
+    expect(flow.services.blog!.success).toBeLessThan(1);
+    expect(flow.services.shop!.success).toBe(1);
+
+    // 共有ストレージでも同じ: NAS が溢れても IO を出さない VM は落ちない
+    const { s: s2, isp: isp2 } = base({
+      traffic: { blog: 20_000, shop: 10 },
+      unlocks: ['virtualization', 'storage', 'tenGig', 'agg', 'shop'],
+    });
+    // 回線から 10G で捌けるよう agg-10g につなぎ替える
+    s2.facility.clearCables();
+    const agg = s2.buyDevice('agg-10g', 0, 38).id!;
+    wire(s2, { device: isp2, port: 0 }, { device: agg, port: 0 });
+    const hvShop = s2.buyDevice('srv-2u', 0, 20, { cpu: 24, memGB: 256, backplane: 'sff', drives: ['ssd', 'ssd'], nic: 'sfp10' }).id!;
+    const hvBlog = s2.buyDevice('srv-2u', 0, 16, { cpu: 24, memGB: 256, backplane: 'sff', drives: ['ssd', 'ssd'], nic: 'sfp10' }).id!;
+    const shopDb = s2.buyDevice('srv-2u', 0, 12, { cpu: 8, memGB: 64, backplane: 'sff', drives: ['ssd', 'ssd'], nic: 'sfp10' }).id!;
+    const blogWebSrv = s2.buyDevice('srv-2u', 0, 8, { cpu: 24, memGB: 256, backplane: 'sff', drives: ['ssd', 'ssd'], nic: 'sfp10' }).id!;
+    const nas = s2.buyDevice('nas-2u', 0, 4).id!;
+    wire(s2, { device: hvShop, port: 2 }, { device: agg, port: 1 });
+    wire(s2, { device: hvBlog, port: 2 }, { device: agg, port: 2 });
+    wire(s2, { device: shopDb, port: 2 }, { device: agg, port: 3 });
+    wire(s2, { device: blogWebSrv, port: 2 }, { device: agg, port: 4 });
+    wire(s2, { device: nas, port: 0 }, { device: agg, port: 5 });
+    s2.setHv(hvShop, true);
+    s2.setHv(hvBlog, true);
+    const shopVm = s2.createVm(hvShop, 'm').id!;
+    const dbVm = s2.createVm(hvBlog, 's').id!;
+    s2.toggleVmRole(shopVm, 'shop:web');
+    s2.toggleVmRole(dbVm, 'blog:db');
+    s2.setVmDisk(shopVm, 'shared');
+    s2.setVmDisk(dbVm, 'shared');
+    s2.toggleRole(shopDb, 'shop:db');
+    s2.toggleRole(shopDb, 'shop:search');
+    s2.toggleRole(blogWebSrv, 'blog:web');
+    flow = run(s2);
+    expect(flow.devices.get(nas)!.io).toBeGreaterThan(1);
+    expect(flow.nodeLoads.get(-shopVm)!.ioOps).toBe(0);
+    expect(flow.services.shop!.success).toBe(1);
+  });
 });
