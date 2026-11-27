@@ -134,13 +134,24 @@ export function createLedger(facility: Facility, input: FlowInput) {
   };
   const hasGpu = (id: number) => (nodes.get(id)!.gpus ?? 0) > 0;
 
-  // 共有ディスクの VM は、届くストレージに IO を出す
+  // 共有ディスクの VM は、届くストレージに IO を出す。ストレージが複数あれば、載せている VM の少ない方へ振り分ける。
+  // Pod は載っている VM と同じストレージを使う
   const storages = [...facility.devices.values()].filter((d) => MODEL_BY_ID[d.model].category === 'storage');
+  const assigned = new Map<number, number>(storages.map((st) => [st.id, 0]));
   for (const n of nodeList) {
     if (n.disk !== 'shared') continue;
-    const s = storages.find((st) => !input.down.has(st.id) && route(n.host, st.id));
-    loads.get(n.id)!.storage = s?.id ?? null;
-    if (!s) problems.push(`${n.name} のディスクは共有ストレージにありますが、ストレージに届きません`);
+    const parent = n.parent !== undefined ? loads.get(n.parent)?.storage : undefined;
+    let s: number | null = null;
+    if (parent !== undefined) s = parent;
+    else {
+      for (const st of storages) {
+        if (input.down.has(st.id) || !route(n.host, st.id)) continue;
+        if (s === null || assigned.get(st.id)! < assigned.get(s)!) s = st.id;
+      }
+      if (s !== null) assigned.set(s, assigned.get(s)! + 1);
+    }
+    loads.get(n.id)!.storage = s;
+    if (s === null && parent === undefined) problems.push(`${n.name} のディスクは共有ストレージにありますが、ストレージに届きません`);
   }
   const addIo = (id: number, ops: number) => {
     if (!ops) return;

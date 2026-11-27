@@ -105,6 +105,22 @@ describe('レプリカ・仮想化・共有ストレージ', () => {
     expect(flow.devices.get(nas)!.io).toBeGreaterThan(0);
   });
 
+  it('共有ストレージが複数あれば、VM のディスクは振り分けられる', () => {
+    const { s, sw, server } = base({ pv: 20, unlocks: ['virtualization', 'storage', 'tenGig'] });
+    const h = server('big', 20, []);
+    s.setHv(h, true);
+    const a = s.buyDevice('nas-2u', 0, 10).id!;
+    const b = s.buyDevice('nas-2u', 0, 6).id!;
+    wire(s, { device: a, port: 0 }, { device: sw, port: 10 });
+    wire(s, { device: b, port: 0 }, { device: sw, port: 11 });
+    const vms = [s.createVm(h, 's').id!, s.createVm(h, 's').id!];
+    s.toggleVmRole(vms[0], 'blog:web');
+    s.toggleVmRole(vms[1], 'blog:db');
+    for (const vm of vms) s.setVmDisk(vm, 'shared');
+    const flow = run(s, 1000);
+    expect(new Set(vms.map((vm) => flow.nodeLoads.get(-vm)!.storage))).toEqual(new Set([a, b]));
+  });
+
   it('共有ストレージに届かない VM はディスクが使えず失敗する', () => {
     const { s, server } = base({ pv: 20, unlocks: ['virtualization', 'storage'] });
     const h = server('big', 20, []);
