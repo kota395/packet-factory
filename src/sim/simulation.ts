@@ -396,10 +396,12 @@ export class Simulation {
     return set;
   }
 
-  /** その機器が BGP で経路を交換しているか(物理サーバはオンにしたもの、ハイパーバイザは自動) */
+  /** その機器が BGP で経路を交換しているか(物理サーバはオンにしたもの、ハイパーバイザ・LB アプライアンス・共有ストレージは自動) */
   usesBgp(id: number): boolean {
     const d = this.facility.devices.get(id);
-    return !!d && this.unlocks.has('bgp') && (d.bgp || d.hv);
+    if (!d || !this.unlocks.has('bgp')) return false;
+    const cat = MODEL_BY_ID[d.model].category;
+    return cat === 'lb' || cat === 'storage' || d.bgp || d.hv;
   }
 
   bgpError(id: number): string | null {

@@ -52,6 +52,43 @@ describe('BGP による冗長化', () => {
     expect(flow.devices.get(t2)!.gbps).toBeCloseTo(a * 2, 6);
   });
 
+  it('BGP を使うと共有ストレージも両方の ToR を使い、片方が止まっても共有ディスクの VM は続く', () => {
+    const s = new Simulation({
+      startMoney: RICH,
+      manualWiring: true,
+      traffic: constant(20),
+      unlocks: ['bgp', 'virtualization', 'storage', 'tenGig'],
+      upgrades: { uplink: 2, rackPower: 3 },
+    });
+    const f = s.facility;
+    f.rent(0);
+    const isp = f.place('handoff', 0, RACK.units, 0).id;
+    const core = s.buyDevice('sw-48', 0, 40).id!;
+    const t1 = s.buyDevice('sw-48', 0, 38).id!;
+    const t2 = s.buyDevice('sw-48', 0, 37).id!;
+    wire(s, { device: isp, port: 0 }, { device: core, port: 0 });
+    wire(s, { device: core, port: 48 }, { device: t1, port: 48 });
+    wire(s, { device: core, port: 49 }, { device: t2, port: 48 });
+    const h = buy(s, 'big', 0, 20).id!;
+    expect(s.setHv(h, true).ok).toBe(true);
+    wire(s, { device: h, port: 2 }, { device: t1, port: 49 });
+    wire(s, { device: h, port: 3 }, { device: t2, port: 49 });
+    const nas = s.buyDevice('nas-2u', 0, 10).id!;
+    wire(s, { device: nas, port: 0 }, { device: t1, port: 50 });
+    wire(s, { device: nas, port: 1 }, { device: t2, port: 50 });
+    const vm = s.createVm(h, 'l').id!;
+    s.toggleVmRole(vm, 'blog:web');
+    s.toggleVmRole(vm, 'blog:db');
+    s.setVmDisk(vm, 'shared');
+    let flow = run(s);
+    expect(flow.success).toBe(1);
+    expect(s.usesBgp(nas)).toBe(true);
+    s.setMaintenance(t1, true);
+    flow = run(s);
+    expect(flow.nodeLoads.get(-vm)!.storage).toBe(nas);
+    expect(flow.success).toBe(1);
+  });
+
   it('BGP は解放が必要で、ハイパーバイザは自動で使う', () => {
     const { s, srv } = dual();
     expect(s.setBgp(srv, true).ok).toBe(false);
