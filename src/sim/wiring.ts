@@ -10,7 +10,7 @@
  *  4. LB・ストレージ・サーバの順に(速いポートを LB に先に回す)、同じラックのスイッチへ(なければ一番近いラックのスイッチへ)。
  *     スイッチが複数あれば、一番速くつながるスイッチへ(速すぎるポートは残す)。同じなら別々のスイッチに分けてつなぐ(BGP で冗長化できる)。
  *     集約スイッチも、同じラックにあればつなぐ先になる。LB だけは、別のラックのコアにもつなげる
- *  5. LB アプライアンスは、置いた順に 2 台ずつ HA ポートを直結する
+ *  5. LB アプライアンスは、同じ機種どうしで置いた順に 2 台ずつ HA ポートを直結する
  * つなぐ先のポートが空いていなければつながらず、unwired に理由が残る。
  */
 import { MODEL_BY_ID, portsOf } from './catalog';
@@ -124,11 +124,19 @@ export function autoWire(f: Facility): Map<number, string> {
     if (!n) unwired.set(d.id, `${targets.map((s) => s.name).join('・')} のポートが空いていません(スイッチを足す)`);
   }
 
-  // 5. LB アプライアンスの HA: 置いた順に 2 台ずつ
-  const lbs = devices.filter((d) => cat(d) === 'lb');
-  for (let i = 0; i + 1 < lbs.length; i += 2) {
-    const ha = (d: Device) => portsOf(d).find((p) => p.label === 'HA')!.index;
-    f.connect({ device: lbs[i].id, port: ha(lbs[i]) }, { device: lbs[i + 1].id, port: ha(lbs[i + 1]) });
+  // 5. LB アプライアンスの HA: 同じ機種どうしで置いた順に 2 台ずつ
+  const ha = (d: Device) => portsOf(d).find((p) => p.label === 'HA')!.index;
+  const lbsByModel = new Map<string, Device[]>();
+  for (const d of devices) {
+    if (cat(d) !== 'lb') continue;
+    const list = lbsByModel.get(d.model) ?? [];
+    list.push(d);
+    lbsByModel.set(d.model, list);
+  }
+  for (const lbs of lbsByModel.values()) {
+    for (let i = 0; i + 1 < lbs.length; i += 2) {
+      f.connect({ device: lbs[i].id, port: ha(lbs[i]) }, { device: lbs[i + 1].id, port: ha(lbs[i + 1]) });
+    }
   }
   return unwired;
 }
