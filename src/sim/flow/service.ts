@@ -32,6 +32,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
     missOf,
     activeLbs,
     deadLbs,
+    deadSlbs,
     lbMs,
     along,
     nodePass,
@@ -70,10 +71,14 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         ]
       : inst.db.map((id) => ({ primary: id, read: 1 / inst.db.length, write: 1 / inst.db.length, data: 1 / inst.db.length, replicas: [] }));
   // LB: アプライアンス(HA ペアならアクティブの 1 台)と、SLB の役割を付けたノード。
-  // すべて止まっている LB(ペアの両方が止まっているなど)にも DNS でリクエストが来て、その分は失敗する
+  // すべて止まっている LB(ペアの両方や SLB が止まっているなど)にも DNS でリクエストが来て、その分は失敗する
+  const lbKey = key('lb');
+  const stoppedSlbs = deadSlbs(lbKey);
+  for (const n of stoppedSlbs) sp.push(`LB(${n})が止まっていて、そこに来たリクエストが失敗しています`);
   const lbNodes = [...activeLbs, ...inst.lb];
-  const useLb = lbNodes.length + deadLbs > 0;
-  const lbShare = useLb ? lbNodes.length / (lbNodes.length + deadLbs) : 1;
+  const dead = deadLbs + stoppedSlbs.length;
+  const useLb = lbNodes.length + dead > 0;
+  const lbShare = useLb ? lbNodes.length / (lbNodes.length + dead) : 1;
   // LB がなければ、BGP で広報している Pod(MetalLB)がそれぞれ受ける。それもなければ web 1 台だけ
   const advertised = inst.web.filter((n) => nodes.get(n)!.advertised);
   const entries = useLb ? lbNodes : advertised.length ? advertised : inst.web.slice(0, 1);
@@ -91,7 +96,6 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
   const primary: number | undefined = inst.db[0];
   const caches = inst.cache;
   const pv = svc.pv;
-  const lbKey = key('lb');
 
   // media・worker がなければ web が肩代わりする
   const ownMedia = inst.media.length > 0;
@@ -99,7 +103,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
   const mediaKey = ownMedia ? key('media') : key('web');
   const workers = W.upload ? (inst.worker.length ? inst.worker : webs) : [];
   const workerKey = inst.worker.length ? key('worker') : key('web');
-  const mediaEntries = !W.media ? [] : useLb ? entries : media.slice(0, 1);
+  const mediaEntries = !W.media ? [] : useLb ? entries : ownMedia ? media.slice(0, 1) : entries;
   if (W.media && !useLb && inst.media.length > 1) {
     sp.push(`LB がないので、画像・動画を配るのは ${name(inst.media[0])} だけです`);
   }
@@ -123,26 +127,22 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
   const perEntry = entries.length ? (pv * lbShare) / entries.length : 0;
   const upPerEntry = entries.length ? (uploads * lbShare) / entries.length : 0;
   const upKB = W.upload?.kb ?? 0;
-  for (const e of entries) {
-    fromNet(e, (perEntry * WORK.requestKB + upPerEntry * upKB) * GB_PER_KB, perEntry * W.pageKB * GB_PER_KB);
-  }
   const pvOf = new Map<number, number>();
   const upOf = new Map<number, number>();
-  if (useLb) {
-    for (const e of entries) {
+  for (const e of entries) {
+    if (!fromNet(e, (perEntry * WORK.requestKB + upPerEntry * upKB) * GB_PER_KB, perEntry * W.pageKB * GB_PER_KB)) continue;
+    if (useLb) {
       addWork(e, lbKey, perEntry + upPerEntry, lbMs(e));
       for (const w of webs) {
         const p = perEntry / webs.length;
         const u = upPerEntry / webs.length;
-        send(e, w, (p * WORK.requestKB + u * upKB) * GB_PER_KB, p * W.pageKB * GB_PER_KB);
+        if (!send(e, w, (p * WORK.requestKB + u * upKB) * GB_PER_KB, p * W.pageKB * GB_PER_KB)) continue;
         pvOf.set(w, (pvOf.get(w) ?? 0) + p);
         upOf.set(w, (upOf.get(w) ?? 0) + u);
       }
-    }
-  } else {
-    for (const w of webs) {
-      pvOf.set(w, perEntry);
-      upOf.set(w, upPerEntry);
+    } else {
+      pvOf.set(e, perEntry);
+      upOf.set(e, upPerEntry);
     }
   }
 
@@ -157,6 +157,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
   for (const w of webs) {
     const wpv = pvOf.get(w) ?? 0;
     const up = upOf.get(w) ?? 0;
+    if (!wpv && !up) continue;
     addWork(w, key('web'), wpv + up, W.webCpuMs);
     const reads = wpv * W.dbReads;
     // 届く memcached に読み込みを振り分け、外れた分は db 層へ
@@ -173,7 +174,6 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
     for (const sh of shards) {
       const rd = toDb * sh.read;
       const wrs = wr * sh.write;
-      writesOn.set(sh.primary, (writesOn.get(sh.primary) ?? 0) + wrs);
       // 読み込みはその db のレプリカ(届くもの)に分け、なければプライマリ
       const repReach = sh.replicas.filter((r) => path(w, r));
       for (const r of repReach) {
@@ -182,8 +182,10 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         readsOn.set(r, (readsOn.get(r) ?? 0) + n);
       }
       const toPrimary = repReach.length ? 0 : rd;
-      send(w, sh.primary, (toPrimary * WORK.queryKB + wrs * WORK.queryKB * 2) * GB_PER_KB, toPrimary * WORK.dbReadKB * GB_PER_KB);
-      readsOn.set(sh.primary, (readsOn.get(sh.primary) ?? 0) + toPrimary);
+      if (send(w, sh.primary, (toPrimary * WORK.queryKB + wrs * WORK.queryKB * 2) * GB_PER_KB, toPrimary * WORK.dbReadKB * GB_PER_KB)) {
+        writesOn.set(sh.primary, (writesOn.get(sh.primary) ?? 0) + wrs);
+        readsOn.set(sh.primary, (readsOn.get(sh.primary) ?? 0) + toPrimary);
+      }
     }
     // 検索: 届く search に分け、なければ db(プライマリ)が肩代わり
     if (W.search) {
@@ -195,8 +197,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
           send(w, x, n * WORK.queryKB * GB_PER_KB, n * W.search.resultKB * GB_PER_KB);
           searchOn.set(x, (searchOn.get(x) ?? 0) + n);
         }
-      } else if (primary !== undefined) {
-        send(w, primary, qs * WORK.queryKB * GB_PER_KB, qs * W.search.resultKB * GB_PER_KB);
+      } else if (primary !== undefined && send(w, primary, qs * WORK.queryKB * GB_PER_KB, qs * W.search.resultKB * GB_PER_KB)) {
         dbSearches += qs;
       }
     }
@@ -267,12 +268,12 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
     const fetchOn = new Map<number, number>();
     const perE = mediaEntries.length ? (fetches * lbShare) / mediaEntries.length : 0;
     for (const e of mediaEntries) {
-      fromNet(e, perE * WORK.requestKB * GB_PER_KB, perE * W.media.kb * GB_PER_KB);
+      if (!fromNet(e, perE * WORK.requestKB * GB_PER_KB, perE * W.media.kb * GB_PER_KB)) continue;
       if (useLb) {
         addWork(e, lbKey, perE, lbMs(e));
         for (const m of media) {
           const n = perE / media.length;
-          send(e, m, n * WORK.requestKB * GB_PER_KB, n * W.media.kb * GB_PER_KB);
+          if (!send(e, m, n * WORK.requestKB * GB_PER_KB, n * W.media.kb * GB_PER_KB)) continue;
           fetchOn.set(m, (fetchOn.get(m) ?? 0) + n);
         }
       } else fetchOn.set(e, (fetchOn.get(e) ?? 0) + perE);
@@ -285,12 +286,23 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
 
   // ---------------------------------------------------------------- 成功率と応答
   const evaluate = (): { success: number; latencyMs: number } => {
+    const memo = <V>(fn: (id: number) => V) => {
+      const cache = new Map<number, V>();
+      return (id: number): V => {
+        let v = cache.get(id);
+        if (v === undefined) {
+          v = fn(id);
+          cache.set(id, v);
+        }
+        return v;
+      };
+    };
     const nodeOk = (id: number) => nodePass(id);
     /** db・レプリカで 1 回読む時間 */
     const readOn = (id: number, k: RoleKey) => cpuMs(id, WORK.dbReadCpuMs) + (loads.get(id)!.miss[k] ?? 1) * ioMs(id);
 
-    const dataPart = (w: number): [number, number] => {
-      if (!shards.length) return [0, 0];
+    const dataPart = memo((w: number): [number, number, number] => {
+      if (!shards.length) return [0, 0, 0];
       // db ごとに、読み込み(レプリカに届けばレプリカ、なければプライマリ)と書き込み(プライマリ)を見て、割合で合わせる
       let readOk = 0;
       let readMs = 0;
@@ -322,10 +334,10 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         const cacheMs = avg(cacheReach.map((c) => along(path(w, c))[1] + cpuMs(c, WORK.cacheCpuMs)));
         readMs = cacheMs + (1 - WORK.cacheHitRate) * readMs;
       }
-      // 書き込みはプライマリだけ。書き込むページの分だけ、プライマリが溢れると失敗する
+      // 書き込みはプライマリだけ。ページの書き込みの失敗はここで、投稿の書き込みの失敗は投稿(upOk)で数える
       const writeShare = Math.min(1, W.dbWrites);
       let ok = readOk * (1 - writeShare * (1 - writeOk));
-      let ms = W.dbReads * readMs + W.dbWrites * writeMs;
+      let ms = W.dbReads * readMs + (W.dbWrites + (W.upload?.perPv ?? 0)) * writeMs;
       // 検索
       if (W.search) {
         const reach = inst.search.filter((x) => path(w, x));
@@ -341,12 +353,12 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         ok *= 1 - Math.min(1, W.search.perPv) * (1 - sOk);
         ms += W.search.perPv * sMs;
       }
-      return [ok, ms];
-    };
-    const webPart = (w: number): [number, number] => {
+      return [ok, ms, writeOk];
+    });
+    const webPart = memo((w: number): [number, number] => {
       const [dOk, dMs] = dataPart(w);
       return [nodeOk(w) * dOk, cpuMs(w, W.webCpuMs) + dMs];
-    };
+    });
 
     // ページ
     let pageOk = 0;
@@ -398,16 +410,17 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
       latency += mMs + transferMs(mw.kb);
     }
 
-    // 投稿: 入口 → web → worker → media がすべて通れば成功(応答には含めない。裏で加工する)
+    // 投稿: 入口 → web → (db 登録 と worker → media) がすべて通れば成功(加工は応答には含めない)
     if (W.upload) {
-      const storeOk = (k: number) => {
+      const storeOk = memo((k: number) => {
         const reach = media.filter((m) => path(k, m));
         return reach.length ? avg(reach.map((m) => along(path(k, m))[0] * nodeOk(m))) : 0;
-      };
-      const workOk = (w: number) => {
+      });
+      const workOk = memo((w: number) => {
         const reach = workers.filter((k) => path(w, k));
-        return nodeOk(w) * (reach.length ? avg(reach.map((k) => along(path(w, k))[0] * nodeOk(k) * storeOk(k))) : 0);
-      };
+        const writeOk = dataPart(w)[2];
+        return nodeOk(w) * writeOk * (reach.length ? avg(reach.map((k) => along(path(w, k))[0] * nodeOk(k) * storeOk(k))) : 0);
+      });
       let upOk = 0;
       for (const e of entries) {
         const [inOk] = fromNetAlong(e);

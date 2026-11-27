@@ -159,8 +159,8 @@ export function routeOf(facility: Facility, g: Graph, input: FlowInput, src: num
     const cat = MODEL_BY_ID[d.model].category;
     const live = [...(g.adj.get(id)?.keys() ?? [])];
     if (cat === 'switch' || cat === 'handoff') return live;
-    // LB アプライアンスは BGP を解放していれば、つないだリンクすべてを使う
-    if (cat === 'lb' && input.bgp) return live;
+    // LB アプライアンスと共有ストレージは BGP を解放していれば、つないだリンクすべてを使う
+    if ((cat === 'lb' || cat === 'storage') && input.bgp) return live;
     if (input.bgp && (d.bgp || d.hv)) return live;
     const hop = staticHop(facility, id, other);
     return hop !== null && live.includes(hop) ? [hop] : [];

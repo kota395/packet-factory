@@ -4,7 +4,7 @@ import { RACK, WIRING } from '../src/sim/config';
 import { lbGroups } from '../src/sim/flow';
 import { serverPrice } from '../src/sim/pricing';
 import { Simulation } from '../src/sim/simulation';
-import { constant, RICH, run, base, buy, SERVERS } from './helpers';
+import { constant, RICH, run, base, buy, wire, SERVERS } from './helpers';
 
 describe('物理層', () => {
   it('U が重なる場所やラックの外には置けない', () => {
@@ -152,5 +152,17 @@ describe('物理層', () => {
     const id = server('small', 30, ['blog:web']);
     expect(s.toggleRole(id, 'blog:cache').ok).toBe(false);
     expect(s.toggleRole(s.facility.devices.values().next().value!.id, 'blog:web').ok).toBe(false); // 回線終端
+  });
+
+  it('手動配線で増設 NIC を外すと、無くなったポートのケーブルも外れて落ちない', () => {
+    const { s, f, sw, server } = base({ unlocks: ['tenGig'] });
+    const id = server('big', 20, ['blog:web', 'blog:db']);
+    expect(wire(s, { device: id, port: 2 }, { device: sw, port: 10 }).ok).toBe(true);
+    expect(f.cablesOf(id)).toHaveLength(2);
+    expect(s.changeParts(id, { kind: 'nic', to: 'none' }).ok).toBe(true);
+    expect(f.cablesOf(id)).toHaveLength(1);
+    expect(f.cableAt({ device: id, port: 2 })).toBeUndefined();
+    expect(f.cableAt({ device: sw, port: 10 })).toBeUndefined();
+    expect(run(s, 1000).success).toBe(1);
   });
 });

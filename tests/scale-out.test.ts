@@ -66,4 +66,18 @@ describe('DB の分割・回線の多重化・CDN', () => {
     expect(Math.max(after.ab, after.ba) / outBefore).toBeCloseTo((page + img * (1 - CDN.hitRate)) / (page + img), 1);
     expect(s.upkeep.cdn).toBeCloseTo((100 * img * CDN.hitRate * CDN_PRICE_PER_GB) / 1e6, 6);
   });
+
+  it('CDN の従量課金は実際に成功したページビュー分だけかかる', () => {
+    const { s, server } = base({ pv: 100, unlocks: ['images', 'cdn'] });
+    const srv = server('db', 20, ['blog:web', 'blog:db']);
+    run(s, 1000);
+    const full = s.upkeep.cdn;
+    expect(full).toBeGreaterThan(0);
+    // サーバを止めて全部エラーになると CDN の課金も 0
+    s.setMaintenance(srv, true);
+    run(s, 1000);
+    expect(s.flow.success).toBe(0);
+    expect(s.cdnGBps).toBe(0);
+    expect(s.upkeep.cdn).toBe(0);
+  });
 });

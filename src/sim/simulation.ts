@@ -198,8 +198,10 @@ export class Simulation {
 
   /** 維持費の内訳($/秒)。回線は本数ぶん、CDN は配った量に応じて */
   get upkeep(): { racks: number; uplink: number; power: number; cdn: number } {
-    const racks = this.facility.racks.size * UPKEEP.rackByPowerLevel[this.upgrades.rackPower];
-    const uplink = UPKEEP.uplinkByLevel[this.upgrades.uplink] * this.lineCount;
+    const powerLv = Math.max(0, Math.min(this.upgrades.rackPower, UPKEEP.rackByPowerLevel.length - 1));
+    const uplinkLv = Math.max(0, Math.min(this.upgrades.uplink, UPKEEP.uplinkByLevel.length - 1));
+    const racks = this.facility.racks.size * UPKEEP.rackByPowerLevel[powerLv];
+    const uplink = UPKEEP.uplinkByLevel[uplinkLv] * this.lineCount;
     let watts = 0;
     for (const d of this.facility.devices.values()) watts += specOf(d).powerW;
     const cdn = this.cdnGBps * CDN_PRICE_PER_GB;
@@ -213,9 +215,13 @@ export class Simulation {
 
   /** CDN が配っている量(GB/秒) */
   get cdnGBps(): number {
-    if (!this.unlocks.has('cdn')) return 0;
+    if (!this.unlocks.has('cdn') || !this.flow) return 0;
     let kb = 0;
-    for (const id of this.activeServices) kb += this.trafficOf(id, this.time) * this.cdnKBPerPv(id);
+    for (const id of this.activeServices) {
+      const sf = this.flow.services[id];
+      if (!sf) continue;
+      kb += sf.pv * sf.success * this.cdnKBPerPv(id);
+    }
     return kb / 1e6;
   }
 
@@ -315,8 +321,26 @@ export class Simulation {
     if (id !== 'marketing') return base;
     // 広告は売上に比例して高くなる(後半にユーザーが一気に増えすぎないように)
     const levels = Math.max(0, this.upgrades.marketing + 1 - MARKETING_REVENUE.freeLevels);
-    const byRevenue = this.metrics.rolling.revenuePerSec * MARKETING_REVENUE.secPerLevel * levels;
+    const byRevenue = this.marketingRevenuePerSec() * MARKETING_REVENUE.secPerLevel * levels;
     return Math.max(base, Math.round(byRevenue));
+  }
+
+  /** 広告の値段の基準にする売上(/秒)。読み込み直後や一時的な停止で 0 にならないよう、現在の流量と直近の推移の最大も見る */
+  private marketingRevenuePerSec(): number {
+    let rev = this.metrics.rolling.revenuePerSec;
+    if (this.flow) {
+      let current = 0;
+      for (const sf of Object.values(this.flow.services)) current += sf.pv * sf.success * this.revenuePerPv(sf.id);
+      if (current > rev) rev = current;
+    }
+    const h = this.metrics.history;
+    if (h.t.length) {
+      const cutoff = h.t[h.t.length - 1] - 300;
+      for (let i = h.t.length - 1; i >= 0 && h.t[i] >= cutoff; i--) {
+        if (h.revenue[i] > rev) rev = h.revenue[i];
+      }
+    }
+    return rev;
   }
 
   // ---------------------------------------------------------------- 物理層の操作
@@ -396,10 +420,12 @@ export class Simulation {
     return set;
   }
 
-  /** その機器が BGP で経路を交換しているか(物理サーバはオンにしたもの、ハイパーバイザは自動) */
+  /** その機器が BGP で経路を交換しているか(物理サーバはオンにしたもの、ハイパーバイザ・LB アプライアンス・共有ストレージは自動) */
   usesBgp(id: number): boolean {
     const d = this.facility.devices.get(id);
-    return !!d && this.unlocks.has('bgp') && (d.bgp || d.hv);
+    if (!d || !this.unlocks.has('bgp')) return false;
+    const cat = MODEL_BY_ID[d.model].category;
+    return cat === 'lb' || cat === 'storage' || d.bgp || d.hv;
   }
 
   bgpError(id: number): string | null {
@@ -433,21 +459,75 @@ export class Simulation {
   /** 障害(難易度オプション): 機器がときどき壊れ、しばらくすると直る */
   /**
    * 離れていた間のユーザーの増加を反映する。サービスごとに、市場規模と今の構成で捌ける量のどちらか小さい方へ
-   * 向かって増える(減りはしない)。増えた人数の合計を返す
+   * 向かって増える(減りはしない。回線などの共有資源やキャンペーン中の倍率も考慮して溢れさせない)。増えた人数の合計を返す
    */
   growWhileAway(seconds: number): number {
     if (this.fixedTraffic || seconds <= 0) return 0;
-    this.estimateCapacity();
-    let gained = 0;
-    for (const id of this.activeServices) {
-      const u = this.serviceUsers[id];
-      const limit = Math.min(this.marketOf(id), this.capacityOf(id) / PV_PER_USER);
-      if (limit <= u) continue;
-      const next = Math.min(limit, logistic(u, this.marketOf(id), GROWTH_RATE, seconds));
-      gained += next - u;
-      this.serviceUsers[id] = next;
+    const ids = this.activeServices;
+    const full = k8s.podsAtFullScale(this);
+    const target = METRICS.capacitySuccess;
+    const wave = 1 + DIFFICULTY.dayWave * Math.sin((2 * Math.PI * this.time) / DIFFICULTY.dayCycleMs);
+    const pvOf = (users: Record<ServiceId, number>): Partial<Record<ServiceId, number>> =>
+      Object.fromEntries(ids.map((id) => [id, users[id] * PV_PER_USER * wave * (id === 'shop' && this.campaignActive ? CAMPAIGN.trafficMul : 1)]));
+
+    const cur = { ...this.serviceUsers };
+    const start = { ...this.serviceUsers };
+    const markets = Object.fromEntries(ids.map((id) => [id, this.marketOf(id)])) as Record<ServiceId, number>;
+    const f0 = this.computeFlow(pvOf(cur), full);
+    const minOk = Object.fromEntries(
+      ids.map((id) => {
+        const s0 = f0.services[id]?.success ?? 0;
+        return [id, s0 >= target ? target : Math.max(0, s0 - 1e-6)];
+      }),
+    ) as Record<ServiceId, number>;
+    const growing = new Set<ServiceId>(ids.filter((id) => cur[id] < markets[id] && (f0.services[id]?.success ?? 0) >= target));
+
+    const fits = (users: Record<ServiceId, number>): boolean => {
+      const flow = this.computeFlow(pvOf(users), full);
+      return ids.every((id) => (flow.services[id]?.success ?? 0) >= minOk[id]);
+    };
+    const advance = (base: Record<ServiceId, number>, who: Iterable<ServiceId>, dt: number): Record<ServiceId, number> => {
+      const next = { ...base };
+      for (const id of who) next[id] = Math.max(base[id], logistic(base[id], markets[id], GROWTH_RATE, dt));
+      return next;
+    };
+
+    let elapsed = 0;
+    while (growing.size > 0 && elapsed < seconds) {
+      const rem = seconds - elapsed;
+      const atEnd = advance(cur, growing, rem);
+      if (fits(atEnd)) {
+        Object.assign(cur, atEnd);
+        break;
+      }
+      let lo = 0;
+      let hi = rem;
+      for (let i = 0; i < 24; i++) {
+        const mid = (lo + hi) / 2;
+        if (fits(advance(cur, growing, mid))) lo = mid;
+        else hi = mid;
+      }
+      Object.assign(cur, advance(cur, growing, lo));
+      elapsed += lo;
+      const left = seconds - elapsed;
+      if (left <= 0) break;
+      const probe = Math.min(left, Math.max(0.05, (hi - lo) * 8));
+      let removed = 0;
+      for (const id of growing) {
+        if (cur[id] >= markets[id] * (1 - 1e-9) || !fits(advance(cur, [id], probe))) {
+          growing.delete(id);
+          removed++;
+        }
+      }
+      if (!removed) break;
     }
-    this.refreshFlow();
+
+    let gained = 0;
+    for (const id of ids) {
+      gained += cur[id] - start[id];
+      this.serviceUsers[id] = cur[id];
+    }
+    this.estimateCapacity();
     return gained;
   }
 
@@ -483,19 +563,27 @@ export class Simulation {
   }
 
   private rollFailures(dt: number): void {
-    const f = DIFFICULTY.levels[this.difficulty].failures;
-    if (!f || this.facility.devices.size < f.fromDevices) return;
-    let failed = false;
+    const prev = this.time - TICK_MS;
+    let changed = false;
     for (const d of this.facility.devices.values()) {
-      if (MODEL_BY_ID[d.model].category === 'handoff' || d.failedUntil > this.time) continue;
-      if (this.random() < dt / f.mtbfSec) {
-        d.failedUntil = this.time + f.repairSec * 1000;
-        this.lastFailure = { id: d.id, name: d.name, at: this.time, repairSec: f.repairSec };
-        failed = true;
+      if (d.failedUntil > prev && d.failedUntil <= this.time) changed = true;
+    }
+    for (const v of this.facility.vms.values()) {
+      if (v.k8s && v.downUntil > prev && v.downUntil <= this.time) changed = true;
+    }
+    const f = DIFFICULTY.levels[this.difficulty].failures;
+    if (f && this.facility.devices.size >= f.fromDevices) {
+      for (const d of this.facility.devices.values()) {
+        if (MODEL_BY_ID[d.model].category === 'handoff' || d.down || d.failedUntil > this.time) continue;
+        if (this.random() < dt / f.mtbfSec) {
+          d.failedUntil = this.time + f.repairSec * 1000;
+          this.lastFailure = { id: d.id, name: d.name, at: this.time, repairSec: f.repairSec };
+          changed = true;
+        }
       }
     }
-    // 止まったワーカーの Pod はすぐ置き直す
-    if (failed) this.schedule();
+    // 止まった・復旧したワーカーの Pod はすぐ置き直す
+    if (changed) this.schedule();
   }
 
   private seed = 0x9e3779b9;
@@ -692,14 +780,27 @@ export class Simulation {
     return this.capacityBy[id] ?? 0;
   }
 
-  /** f(x) が成り立つ最大の x(start から倍々に広げてから二分探索) */
+  /** f(x) が成り立つ最大の x(start から上下に広げてから二分探索) */
   private static searchMax(ok: (x: number) => boolean, start: number): number {
-    if (!ok(start / 1000)) return 0;
-    let lo = start / 1000;
-    let hi = Math.max(start, lo * 2);
-    while (ok(hi) && hi < 1e8) {
-      lo = hi;
-      hi *= 2;
+    const floor = 1e-3;
+    if (!ok(floor)) return 0;
+    const s = Math.max(start, 1);
+    let lo: number;
+    let hi: number;
+    if (ok(s)) {
+      lo = s;
+      hi = s * 2;
+      while (ok(hi) && hi < 1e8) {
+        lo = hi;
+        hi *= 2;
+      }
+    } else {
+      hi = s;
+      lo = s / 2;
+      while (lo > floor && !ok(lo)) {
+        hi = lo;
+        lo = Math.max(floor, lo / 2);
+      }
     }
     for (let i = 0; i < 14; i++) {
       const mid = (lo + hi) / 2;
@@ -768,12 +869,13 @@ export class Simulation {
       const d = this.facility.devices.get(id);
       if (d) flow.problems.push(`${d.name} はネットワークにつながっていません: ${why}`);
     }
-    for (const [key, n] of this.podsPending) {
-      const [s, r] = splitRole(key);
-      flow.problems.push(`${scopeName(s)}の ${r} の Pod が ${n} 個、置き場所がなくて待っています(ワーカーを増やす)`);
-    }
-    if (this.deployments.size && !this.pods.length && !this.podsPending.size) {
+    if (this.deployments.size && !k8s.k8sWorkers(this).length) {
       flow.problems.push('Kubernetes のワーカーがありません');
+    } else {
+      for (const [key, n] of this.podsPending) {
+        const [s, r] = splitRole(key);
+        flow.problems.push(`${scopeName(s)}の ${r} の Pod が ${n} 個、置き場所がなくて待っています(ワーカーを増やす)`);
+      }
     }
     return flow;
   }

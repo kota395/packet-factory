@@ -4,7 +4,7 @@
  */
 import { MODEL_BY_ID, specOf } from '../catalog';
 import { GPU, NET, ROLE_MEM_GB, SERVICES, VIRT, WORK } from '../config';
-import { splitRole } from '../types';
+import { roleKey, splitRole } from '../types';
 import type { Facility } from '../facility';
 import type { RoleId, RoleKey } from '../types';
 import type { DeviceLoad, FlowInput, LinkLoad, NodeLoad, Route } from './types';
@@ -87,10 +87,11 @@ export function createLedger(facility: Facility, input: FlowInput) {
   const send = (a: number, b: number, fwdGbps: number, backGbps: number) => sendDev(hostOf(a), hostOf(b), fwdGbps, backGbps);
   /** そのノードに届く回線 */
   const linesTo = (id: number) => handoffs.filter((h) => route(h.id, hostOf(id)));
-  /** 回線から(へ)の通信。届く回線に均等に分ける */
+  /** 回線から(へ)の通信。届く回線に均等に分ける。回線から届かなければ false */
   const fromNet = (id: number, inGbps: number, outGbps: number) => {
     const lines = linesTo(id);
     for (const h of lines) sendDev(h.id, hostOf(id), inGbps / lines.length, outGbps / lines.length);
+    return lines.length > 0;
   };
   /** 回線からノードまでを通って溢れない割合と時間(届く回線の平均) */
   const fromNetAlong = (id: number): [number, number] => {
@@ -134,13 +135,24 @@ export function createLedger(facility: Facility, input: FlowInput) {
   };
   const hasGpu = (id: number) => (nodes.get(id)!.gpus ?? 0) > 0;
 
-  // 共有ディスクの VM は、届くストレージに IO を出す
+  // 共有ディスクの VM は、届くストレージに IO を出す。ストレージが複数あれば、載せている VM の少ない方へ振り分ける。
+  // Pod は載っている VM と同じストレージを使う
   const storages = [...facility.devices.values()].filter((d) => MODEL_BY_ID[d.model].category === 'storage');
+  const assigned = new Map<number, number>(storages.map((st) => [st.id, 0]));
   for (const n of nodeList) {
     if (n.disk !== 'shared') continue;
-    const s = storages.find((st) => !input.down.has(st.id) && route(n.host, st.id));
-    loads.get(n.id)!.storage = s?.id ?? null;
-    if (!s) problems.push(`${n.name} のディスクは共有ストレージにありますが、ストレージに届きません`);
+    const parent = n.parent !== undefined ? loads.get(n.parent)?.storage : undefined;
+    let s: number | null = null;
+    if (parent !== undefined) s = parent;
+    else {
+      for (const st of storages) {
+        if (input.down.has(st.id) || !route(n.host, st.id)) continue;
+        if (s === null || assigned.get(st.id)! < assigned.get(s)!) s = st.id;
+      }
+      if (s !== null) assigned.set(s, assigned.get(s)! + 1);
+    }
+    loads.get(n.id)!.storage = s;
+    if (s === null && parent === undefined) problems.push(`${n.name} のディスクは共有ストレージにありますが、ストレージに届きません`);
   }
   const addIo = (id: number, ops: number) => {
     if (!ops) return;
@@ -155,14 +167,25 @@ export function createLedger(facility: Facility, input: FlowInput) {
       sendDev(n.host, l.storage, gb, gb);
     }
   };
+  /** media の役割がなく、web が画像・動画の配信を肩代わりしているサービス */
+  const webMediaServices = new Set(
+    input.services
+      .filter((s) => s.work.media && !nodeList.some((n) => n.roles.includes(roleKey(s.id, 'media')) && isActive(roleKey(s.id, 'media'))))
+      .map((s) => s.id),
+  );
+  const isCacheRole = (k: RoleKey) => {
+    const [s, r] = splitRole(k);
+    return CACHE_ROLES.has(r) || (r === 'web' && s !== 'data' && webMediaServices.has(s));
+  };
   /** メモリに乗らずディスクに行く読み込みの割合。キャッシュに使える残りのメモリは、同じノードの db・search・media などで分け合う */
   const missOf = (id: number, key: RoleKey, perGB: number) => {
     const n = nodes.get(id)!;
     const act = n.roles.filter(isActive);
     if (!act.includes(key)) act.push(key);
-    const used = act.reduce((s, k) => s + ROLE_MEM_GB[splitRole(k)[1]], 0);
-    const sharers = Math.max(1, act.filter((k) => CACHE_ROLES.has(splitRole(k)[1])).length);
-    const mem = Math.max(0.5, (n.memGB - used) / sharers);
+    const pods = n.pods ?? 1;
+    const used = act.reduce((s, k) => s + ROLE_MEM_GB[splitRole(k)[1]], 0) * pods;
+    const sharers = Math.max(1, act.filter(isCacheRole).length);
+    const mem = Math.max(0.5, (n.memGB - used) / (pods * sharers));
     const miss = Math.min(1, Math.max(WORK.dbMissMin, perGB / mem));
     loads.get(id)!.miss[key] = miss;
     return miss;
@@ -178,6 +201,23 @@ export function createLedger(facility: Facility, input: FlowInput) {
     else if (gr.members.length > 1 && gr.active !== gr.members[0])
       problems.push(`${name(gr.members[0])} が止まり、HA で ${name(gr.active)} が引き継いでいます`);
   }
+  /** 止まっている SLB(役割 lb を持つ物理サーバ・VM)の名前 */
+  const deadSlbs = (lbKey: RoleKey): string[] => {
+    if (!isActive(lbKey)) return [];
+    const out: string[] = [];
+    for (const d of facility.devices.values()) {
+      if (MODEL_BY_ID[d.model].category === 'server' && !d.hv && d.roles.includes(lbKey) && input.down.has(d.id)) {
+        out.push(d.name);
+      }
+    }
+    for (const v of facility.vms.values()) {
+      const host = facility.devices.get(v.host);
+      if (host?.hv && v.roles.includes(lbKey) && (v.downUntil > input.now || input.down.has(host.id))) {
+        out.push(v.name);
+      }
+    }
+    return out;
+  };
   /** LB で 1 リクエストを振り分ける重さ(アプライアンスは処理能力から) */
   const lbMs = (id: number) => {
     const rps = nodes.get(id)?.lbRps;
@@ -214,9 +254,9 @@ export function createLedger(facility: Facility, input: FlowInput) {
   function nodePass(id: number): number {
     const n = nodes.get(id)!;
     const l = loads.get(id)!;
-    // GPU は同じサーバの VM・Pod で分け合うので、サーバ全体の使用率で見る
-    let ok = pass(Math.max(cpuRho(id), l.io, l.gpu !== undefined ? devices.get(n.host)!.gpu : 0));
-    if (n.disk === 'shared') ok *= l.storage != null ? along(route(n.host, l.storage))[0] : 0;
+    // ディスクと GPU は同じサーバ・ストレージで分け合うが、使っていないノードは巻き込まない
+    let ok = pass(Math.max(cpuRho(id), l.ioOps > 0 ? l.io : 0, l.gpu !== undefined ? devices.get(n.host)!.gpu : 0));
+    if (n.disk === 'shared') ok *= l.storage == null ? 0 : l.ioOps > 0 ? along(route(n.host, l.storage))[0] : 1;
     return ok;
   }
   function cpuMs(id: number, ms: number): number {
@@ -282,6 +322,7 @@ export function createLedger(facility: Facility, input: FlowInput) {
     missOf,
     activeLbs,
     deadLbs,
+    deadSlbs,
     lbMs,
     settle,
     linkRho,

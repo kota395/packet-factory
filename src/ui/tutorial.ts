@@ -212,8 +212,10 @@ export class Tutorial {
     else this.onAdvance();
   }
 
-  private end(skipped: boolean): void {
+  /** チュートリアルを途中で止める(セーブの読み込み・やり直しなど。onEnd は呼ばない) */
+  stop(): void {
     this.step = -1;
+    this.shown = '';
     this.card.hidden = true;
     this.clearGlow();
     try {
@@ -221,6 +223,10 @@ export class Tutorial {
     } catch {
       // 覚えておけなくても終わる
     }
+  }
+
+  private end(skipped: boolean): void {
+    this.stop();
     this.onEnd(skipped);
   }
 

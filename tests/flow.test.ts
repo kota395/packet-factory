@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MODEL_BY_ID, START_PARTS, portsOf, specOf } from '../src/sim/catalog';
-import { WORK } from '../src/sim/config';
+import { SERVICES, WORK } from '../src/sim/config';
+import { computeFlow } from '../src/sim/flow';
 import { newGame } from '../src/sim/save';
 import { wire, run, base, buy } from './helpers';
 
@@ -174,5 +175,112 @@ describe('流量モデル', () => {
     wire(s, { device: a, port: 1 }, { device: b, port: 0 });
     expect(isp).toBeGreaterThan(0);
     expect(run(s).success).toBe(0);
+  });
+
+  it('複数の LB と web・worker・media がある構成でも成功率と応答時間を正しく計算する', () => {
+    const { s, server, lb } = base({ traffic: { blog: 0, photo: 80 }, unlocks: ['lb', 'shop', 'photo'] });
+    const l1 = lb(38);
+    const l2 = lb(37);
+    const w1 = server('web', 30, ['photo:web']);
+    const w2 = server('small', 31, ['photo:web']);
+    server('db', 20, ['photo:db']);
+    server('web', 28, ['photo:worker']);
+    server('small', 29, ['photo:worker']);
+    server('db', 16, ['photo:media']);
+    server('small', 27, ['photo:media']);
+    const flow = run(s);
+    const photo = flow.services.photo!;
+    expect(photo.entries).toEqual([l1, l2]);
+    // 2 台の LB に等分され、さらに 2 台の web に等分される
+    expect(flow.nodeLoads.get(w1)!.work['photo:web']).toBeCloseTo(40 * (1 + 0.02), 3);
+    expect(flow.nodeLoads.get(w2)!.work['photo:web']).toBeCloseTo(40 * (1 + 0.02), 3);
+    expect(photo.success).toBeGreaterThan(0);
+    expect(photo.success).toBeLessThanOrEqual(1);
+    expect(photo.latencyMs).toBeGreaterThan(40);
+  });
+
+  it('同じトポロジで computeFlow を続けて呼んでも前の FlowResult.links が書き換わらない', () => {
+    const { s, server } = base();
+    server('db', 20, ['blog:web', 'blog:db']);
+    const input = (pv: number) => ({
+      services: [{ id: 'blog' as const, pv, work: SERVICES.blog.work }],
+      uplinkGbps: 10,
+      roles: s.availableRoles,
+      now: 0,
+      bgp: false,
+      down: new Set<number>(),
+    });
+    const first = computeFlow(s.facility, input(10));
+    const snapshot = first.links.map((l) => ({ a: l.a, b: l.b, ab: l.ab, ba: l.ba }));
+    const second = computeFlow(s.facility, input(100));
+    expect(first.links.map((l) => ({ a: l.a, b: l.b, ab: l.ab, ba: l.ba }))).toEqual(snapshot);
+    expect(second.links[0].ab + second.links[0].ba).toBeCloseTo((snapshot[0].ab + snapshot[0].ba) * 10, 6);
+  });
+
+  it('回線や LB から届かない入口・web・media には負荷が積まれず、下流にも流れない', () => {
+    // 1. 回線から孤立した web+db には負荷がかからない
+    const { s: s1, server: server1 } = base({ pv: 100 });
+    const iso = server1('db', 20, ['blog:web', 'blog:db'], 0, -1);
+    const f1 = run(s1);
+    expect(f1.success).toBe(0);
+    expect(f1.devices.get(iso)!.cpu).toBe(0);
+    expect(f1.nodeLoads.get(iso)!.ioOps).toBe(0);
+
+    // 2. LB から届かない web・media と、web から届かない db には負荷が積まれない
+    const { s: s2, server: server2, lb } = base({ traffic: { blog: 0, photo: 100 }, unlocks: ['lb', 'shop', 'photo', 'cache'] });
+    lb(38);
+    const wOk = server2('web', 30, ['photo:web']);
+    const wIso = server2('web', 31, ['photo:web'], 0, -1);
+    const db = server2('db', 20, ['photo:db']);
+    const cache = server2('small', 32, ['photo:cache']);
+    const worker = server2('web', 33, ['photo:worker']);
+    const mOk = server2('db', 16, ['photo:media']);
+    const mIso = server2('db', 12, ['photo:media'], 0, -1);
+    const f2 = run(s2);
+    expect(f2.nodeLoads.get(wOk)!.work['photo:web']).toBeCloseTo(50 * (1 + 0.02), 3);
+    expect(f2.nodeLoads.get(wIso)!.cpu).toBe(0);
+    expect(f2.nodeLoads.get(mOk)!.work['photo:media']).toBeCloseTo(50 * SERVICES.photo.work.media!.perPv, 3);
+    expect(f2.nodeLoads.get(mIso)!.cpu).toBe(0);
+    expect(f2.nodeLoads.get(mIso)!.ioOps).toBe(0);
+    // cache・worker・db にも wOk の半分ぶんしか流れない
+    expect(f2.nodeLoads.get(cache)!.work['photo:cache']).toBeCloseTo(50 * SERVICES.photo.work.dbReads, 3);
+    expect(f2.nodeLoads.get(worker)!.work['photo:worker']).toBeCloseTo(50 * SERVICES.photo.work.upload!.perPv, 3);
+    expect(f2.nodeLoads.get(db)!.work['photo:db']).toBeCloseTo(
+      50 * SERVICES.photo.work.dbReads * (1 - WORK.cacheHitRate) + 50 * (SERVICES.photo.work.dbWrites + SERVICES.photo.work.upload!.perPv),
+      3,
+    );
+
+    // 3. 回線から届かない LB にも負荷が積まれず、下流にも流れない
+    const { s: s3, server: server3 } = base({ pv: 100, unlocks: ['lb'] });
+    const isoSw = s3.buyDevice('sw-24', 0, 35).id!;
+    const isoLb = s3.buyDevice('lb-1u', 0, 34).id!;
+    const isoWeb = server3('web', 30, ['blog:web'], 0, -1);
+    const isoDb = server3('db', 20, ['blog:db'], 0, -1);
+    wire(s3, { device: isoLb, port: 0 }, { device: isoSw, port: 0 });
+    wire(s3, { device: isoWeb, port: 0 }, { device: isoSw, port: 1 });
+    wire(s3, { device: isoDb, port: 0 }, { device: isoSw, port: 2 });
+    const f3 = run(s3);
+    expect(f3.success).toBe(0);
+    expect(f3.devices.get(isoLb)!.cpu).toBe(0);
+    expect(f3.devices.get(isoWeb)!.cpu).toBe(0);
+    expect(f3.devices.get(isoDb)!.cpu).toBe(0);
+  });
+
+  it('止まった SLB はアプライアンスと同じく deadLbs として扱い、web 直結に切り替わらない', () => {
+    const { s, server } = base({ pv: 50, unlocks: ['lb', 'slb'] });
+    server('db', 20, ['blog:db']);
+    server('web', 30, ['blog:web']);
+    const slb1 = server('small', 32, ['blog:lb']);
+    expect(run(s, 1000).success).toBe(1);
+    // 1 台だけの SLB が止まると web 直結にはならず失敗する
+    s.setMaintenance(slb1, true);
+    let flow = run(s, 1000);
+    expect(flow.success).toBe(0);
+    expect(flow.services.blog!.entries).toEqual([]);
+    // SLB が 2 台あり 1 台止まると、止まった側の半分が失敗する
+    const slb2 = server('small', 33, ['blog:lb']);
+    flow = run(s, 1000);
+    expect(flow.services.blog!.entries).toEqual([slb2]);
+    expect(flow.success).toBeCloseTo(0.5, 6);
   });
 });

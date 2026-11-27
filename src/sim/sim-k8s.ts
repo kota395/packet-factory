@@ -140,19 +140,27 @@ export function podsAtFullScale(sim: Simulation): PodGroup[] {
   return placePods(sim, new Map(counts.map(([key, c]) => [key, Math.min(K8S.maxPods, Math.floor(c * factor))]))).pods;
 }
 
-/** オートスケール(HPA): Deployment ごとに、Pod の CPU 使用率が目標になるよう数を変える */
+/**
+ * オートスケール(HPA): Deployment ごとに、Pod の使用率が目標になるよう数を変える。
+ * 使用率は CPU と、GPU で処理する Pod ならホストの GPU の高い方。
+ * 数は動いている(ワーカーに載った)Pod を基準にする。載らずに待っている Pod まで掛けると、空きがないまま倍々に増え続ける
+ */
 export function autoscale(sim: Simulation): void {
   for (const [key, current] of sim.deployments) {
     let used = 0;
     let cores = 0;
+    let running = 0;
     for (const n of sim.flow.nodes.values()) {
       if (n.pods === undefined || !n.roles.includes(key)) continue;
-      used += sim.flow.nodeLoads.get(n.id)!.cpu * n.cores;
+      const l = sim.flow.nodeLoads.get(n.id)!;
+      const gpu = l.gpu !== undefined ? (sim.flow.devices.get(n.host)?.gpu ?? 0) : 0;
+      used += Math.max(l.cpu, gpu) * n.cores;
       cores += n.cores;
+      running += n.pods;
     }
     if (!cores) continue;
     const util = used / cores;
-    let desired = Math.ceil((current * util) / K8S.targetCpu);
+    let desired = Math.ceil((running * util) / K8S.targetCpu);
     if (desired < current) desired = Math.max(desired, current - Math.max(1, Math.floor(current * K8S.scaleDownRate)));
     sim.deployments.set(key, Math.min(K8S.maxPods, Math.max(K8S.minPods, desired)));
   }

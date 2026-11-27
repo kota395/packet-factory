@@ -204,6 +204,14 @@ function startTutorial(resume = false): void {
   refreshTutorial();
 }
 
+/** セーブ読み込み・やり直しでチュートリアルを中断する */
+function stopTutorial(): void {
+  if (!tutorial.active) return;
+  tutorial.stop();
+  state.highlight = null;
+  if (state.speed === 0) setSpeed(savedSpeed());
+}
+
 // ------------------------------------------------------------------ ツールバー
 
 type ToolId = 'service' | 'cluster' | 'invest';
@@ -405,7 +413,10 @@ function restoreGame(): boolean {
     // 推移が読めなくても、ゲームは続けられる
   }
   switchTo(sim);
-  welcomeBack(applyAbsence(state.sim, Math.max(0, Date.now() - save.savedAt), save.incomePerSec));
+  // チュートリアルの続きから再開するときは離れていた分を進めない(タブを裏に回したときと同じ)
+  if (!Tutorial.pending()) {
+    welcomeBack(applyAbsence(state.sim, Math.max(0, Date.now() - save.savedAt), save.incomePerSec));
+  }
   return true;
 }
 
@@ -451,6 +462,7 @@ function showSaveMenu(): void {
       return;
     }
     if (!confirm('今の進行状況を上書きして読み込みますか?')) return;
+    stopTutorial();
     switchTo(loadSave(save));
     saveGame();
     closeModal();
@@ -472,6 +484,7 @@ function showSaveMenu(): void {
   }
   el('sv-reset').addEventListener('click', () => {
     if (!confirm('すべての進行状況を消して最初からやり直しますか?')) return;
+    stopTutorial();
     switchTo(newGame(state.sim.difficulty));
     saveGame();
     closeModal();
