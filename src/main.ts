@@ -38,7 +38,7 @@ const ui = {
   toast: el('toast'),
   hint: el('hint'),
   toolbar: el('toolbar'),
-  modal: el('modal'),
+  modal: el<HTMLDialogElement>('modal'),
   modalCard: el('modal-card'),
 };
 
@@ -56,6 +56,11 @@ const state = {
   /** チュートリアルで光らせる機器・U */
   highlight: null as ViewState['highlight'],
 };
+
+// トーストの状態(起動中の updateHud からも呼ばれるので、先に宣言しておく)
+let toastTimer = 0;
+/** モーダルを開いている間に届いたトースト(閉じてから出す) */
+let pendingToast = '';
 
 const renderer = new RowRenderer();
 const dashboard = new Dashboard(el('dash'), () => state.sim);
@@ -119,6 +124,14 @@ el('btn-zoom-in').addEventListener('click', () => renderer.zoomBy(1.25));
 el('btn-zoom-out').addEventListener('click', () => renderer.zoomBy(0.8));
 el('btn-fit').addEventListener('click', () => renderer.fit());
 bindControls();
+ui.modal.addEventListener('close', () => {
+  // close イベントは後から届くので、その間に開き直していたら中身を残す
+  if (ui.modal.open) return;
+  ui.modalCard.replaceChildren();
+  // モーダルの間は外側が inert で読み上げられないので、閉じてから知らせる
+  if (pendingToast) toast(pendingToast);
+  pendingToast = '';
+});
 const restored = restoreGame();
 updateHint();
 updateToolbar();
@@ -172,12 +185,12 @@ window.addEventListener('pagehide', saveGame);
 function welcomeBack(a: { elapsedMs: number; gained: number; users: number }): void {
   if (a.gained <= 0 && a.users < 1) return;
   showModal(`
-    <h2>おかえりなさい</h2>
+    <h1 id="modal-title">おかえりなさい</h1>
     <p class="lead">離れていた ${duration(a.elapsedMs)} の間に</p>
     <div class="big">+${money(a.gained)}</div>
     ${a.users >= 1 ? `<p class="lead">ユーザー +${compact(a.users)}</p>` : ''}
     <p class="note">離れている間は、直前の収支の ${OFFLINE.efficiency * 100}% が入り、ユーザーも ${OFFLINE.efficiency * 100}% の速さで増えます(市場規模と、今の構成で捌ける量まで。最大 ${OFFLINE.maxMs / 3_600_000} 時間分)。</p>
-    <div class="actions"><button type="button" class="primary" data-close>受け取る</button></div>`);
+    <div class="actions"><button type="button" class="primary" data-close autofocus>受け取る</button></div>`);
 }
 
 // ------------------------------------------------------------------ 選択
@@ -222,7 +235,7 @@ function buildToolbar(): void {
     { id: 'cluster', html: '<span>クラスタ</span><small>VM・k8s</small>' },
     { id: 'invest', html: '投資<span class="badge" hidden></span>' },
   ];
-  ui.toolbar.innerHTML = '';
+  ui.toolbar.replaceChildren();
   for (const item of items) {
     const b = document.createElement('button');
     b.type = 'button';
@@ -429,11 +442,13 @@ function switchTo(sim: Simulation): void {
 
 function showSaveMenu(): void {
   showModal(`
-    <h2>セーブ</h2>
+    <h1 id="modal-title">セーブ</h1>
     <p class="note">進行状況はこのブラウザに自動保存されています。別の端末へ移すときは、セーブコードをコピーして移動先で読み込んでください。</p>
     <div class="stack">
       <button type="button" id="sv-export">セーブコードをコピー</button>
-      <textarea id="sv-code" rows="3" placeholder="ここにセーブコードを貼り付け"></textarea>
+      <label for="sv-code" class="note">セーブコード</label>
+      <textarea id="sv-code" rows="3" placeholder="ここに貼り付け" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+      <p class="note" id="sv-status" role="status"></p>
       <button type="button" id="sv-import">貼り付けたコードを読み込む</button>
       <div class="difficulty">
         <div class="note">難易度(いつでも変えられます)</div>
@@ -449,16 +464,16 @@ function showSaveMenu(): void {
     const code = encodeSave(createSave(state.sim));
     try {
       await navigator.clipboard.writeText(code);
-      toast('セーブコードをコピーしました');
+      saveStatus('セーブコードをコピーしました');
     } catch {
       el<HTMLTextAreaElement>('sv-code').value = code;
-      toast('コードを下の欄に表示しました。手動でコピーしてください');
+      saveStatus('コードを上の欄に表示しました。手動でコピーしてください');
     }
   });
   el('sv-import').addEventListener('click', () => {
     const save = decodeSave(el<HTMLTextAreaElement>('sv-code').value);
     if (!save) {
-      toast('セーブコードを読み込めませんでした');
+      saveStatus('セーブコードを読み込めませんでした');
       return;
     }
     if (!confirm('今の進行状況を上書きして読み込みますか?')) return;
@@ -493,7 +508,7 @@ function showSaveMenu(): void {
 
 function showWelcome(): void {
   showModal(`
-    <h2>packet-factory</h2>
+    <h1 id="modal-title">packet-factory</h1>
     <p class="note">コロケーションの 1 ラックから、ブログサービスのインフラを育てるゲームです。サーバを置き、役割を付け、詰まった所に手を打って、増えていくユーザーを捌きます。</p>
     <ul class="howto">
       <li><b>チュートリアル</b>: サーバを 2 台置いて、役割を付け、強化するまでを実際に操作しながら覚えます(数分)</li>
@@ -502,7 +517,7 @@ function showWelcome(): void {
     </ul>
     <div class="actions">
       <button type="button" id="wel-skip">スキップ</button>
-      <button type="button" class="primary" id="wel-tutorial">チュートリアル</button>
+      <button type="button" class="primary" id="wel-tutorial" autofocus>チュートリアル</button>
     </div>`);
   el('wel-tutorial').addEventListener('click', () => {
     closeModal();
@@ -516,19 +531,29 @@ function showWelcome(): void {
 
 // ------------------------------------------------------------------ ユーティリティ
 
+/** モーダルを開く(開いていれば中身を差し替える)。Esc や戻るジェスチャーでも閉じる */
 function showModal(html: string): void {
+  // 開いたまま showModal() はできないので、一度閉じてから開き直す(autofocus を効かせる)
+  if (ui.modal.open) ui.modal.close();
   ui.modalCard.innerHTML = html;
-  ui.modal.hidden = false;
   for (const b of ui.modalCard.querySelectorAll('[data-close]')) b.addEventListener('click', closeModal);
+  ui.modal.showModal();
 }
 
 function closeModal(): void {
-  ui.modal.hidden = true;
-  ui.modalCard.innerHTML = '';
+  ui.modal.close();
 }
 
-let toastTimer = 0;
+/** セーブ画面の中の結果表示(モーダルの間はトーストが見えない・読み上げられないため) */
+function saveStatus(message: string): void {
+  el('sv-status').textContent = message;
+}
+
 function toast(message: string): void {
+  if (ui.modal.open) {
+    pendingToast = message;
+    return;
+  }
   ui.toast.textContent = message;
   ui.toast.classList.add('show');
   clearTimeout(toastTimer);

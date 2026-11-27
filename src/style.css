@@ -448,15 +448,17 @@ button.danger {
   bottom: 12px;
   z-index: 3;
   transform: translate(-50%, 8px);
+  /* 長い知らせは省略せず折り返す(狭い画面や文字の拡大でも全文が読めるように) */
+  width: max-content;
   max-width: calc(100% - 24px);
   padding: 8px 14px;
   background: rgba(24, 34, 46, 0.96);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 16px;
   font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.5;
+  text-align: center;
+  overflow-wrap: anywhere;
   opacity: 0;
   pointer-events: none;
   transition:
@@ -467,6 +469,12 @@ button.danger {
 #toast.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #toast {
+    transform: translate(-50%, 0);
+  }
 }
 
 /* ---- 投資パネル ---------------------------------------------------- */
@@ -892,22 +900,29 @@ button.primary {
 
 /* ---- モーダル ------------------------------------------------------ */
 
+/* ネイティブの <dialog>(showModal)。外側を inert にし、Esc・戻るジェスチャーで閉じる。見た目は中の .modal-card */
 #modal {
-  position: fixed;
-  inset: 0;
-  z-index: 10;
-  display: grid;
-  place-items: center;
-  padding: 16px;
-  background: rgba(5, 8, 12, 0.7);
+  width: min(360px, 100% - 32px);
+  max-height: calc(100% - 32px);
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
 }
 
-#modal[hidden] {
-  display: none;
+/* 2 つそろえないと、背景やダイアログの中のスクロールが後ろのページに伝わる */
+#modal:modal {
+  overscroll-behavior: contain;
+}
+
+#modal::backdrop {
+  background: rgba(5, 8, 12, 0.7);
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 .modal-card {
-  width: min(360px, 100%);
+  width: 100%;
   padding: 20px;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -915,7 +930,7 @@ button.primary {
   text-align: center;
 }
 
-.modal-card h2 {
+.modal-card h1 {
   margin: 0 0 4px;
   font-size: 20px;
 }
@@ -1378,4 +1393,8 @@ button.part .cost {
     display: block;
     margin-left: 0;
   }
+}
+
+#sv-status {
+  margin: 0;
 }
