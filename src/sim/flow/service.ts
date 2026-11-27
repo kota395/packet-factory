@@ -297,8 +297,8 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
     /** db・レプリカで 1 回読む時間 */
     const readOn = (id: number, k: RoleKey) => cpuMs(id, WORK.dbReadCpuMs) + (loads.get(id)!.miss[k] ?? 1) * ioMs(id);
 
-    const dataPart = memo((w: number): [number, number] => {
-      if (!shards.length) return [0, 0];
+    const dataPart = memo((w: number): [number, number, number] => {
+      if (!shards.length) return [0, 0, 0];
       // db ごとに、読み込み(レプリカに届けばレプリカ、なければプライマリ)と書き込み(プライマリ)を見て、割合で合わせる
       let readOk = 0;
       let readMs = 0;
@@ -330,10 +330,10 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         const cacheMs = avg(cacheReach.map((c) => along(path(w, c))[1] + cpuMs(c, WORK.cacheCpuMs)));
         readMs = cacheMs + (1 - WORK.cacheHitRate) * readMs;
       }
-      // 書き込みはプライマリだけ。書き込むページの分だけ、プライマリが溢れると失敗する
+      // 書き込みはプライマリだけ。ページの書き込みの失敗はここで、投稿の書き込みの失敗は投稿(upOk)で数える
       const writeShare = Math.min(1, W.dbWrites);
       let ok = readOk * (1 - writeShare * (1 - writeOk));
-      let ms = W.dbReads * readMs + W.dbWrites * writeMs;
+      let ms = W.dbReads * readMs + (W.dbWrites + (W.upload?.perPv ?? 0)) * writeMs;
       // 検索
       if (W.search) {
         const reach = inst.search.filter((x) => path(w, x));
@@ -349,7 +349,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
         ok *= 1 - Math.min(1, W.search.perPv) * (1 - sOk);
         ms += W.search.perPv * sMs;
       }
-      return [ok, ms];
+      return [ok, ms, writeOk];
     });
     const webPart = memo((w: number): [number, number] => {
       const [dOk, dMs] = dataPart(w);
@@ -406,7 +406,7 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
       latency += mMs + transferMs(mw.kb);
     }
 
-    // 投稿: 入口 → web → worker → media がすべて通れば成功(応答には含めない。裏で加工する)
+    // 投稿: 入口 → web → (db 登録 と worker → media) がすべて通れば成功(加工は応答には含めない)
     if (W.upload) {
       const storeOk = memo((k: number) => {
         const reach = media.filter((m) => path(k, m));
@@ -414,7 +414,8 @@ export function planService(ledger: Ledger, input: FlowInput, svc: ServiceLoad) 
       });
       const workOk = memo((w: number) => {
         const reach = workers.filter((k) => path(w, k));
-        return nodeOk(w) * (reach.length ? avg(reach.map((k) => along(path(w, k))[0] * nodeOk(k) * storeOk(k))) : 0);
+        const writeOk = dataPart(w)[2];
+        return nodeOk(w) * writeOk * (reach.length ? avg(reach.map((k) => along(path(w, k))[0] * nodeOk(k) * storeOk(k))) : 0);
       });
       let upOk = 0;
       for (const e of entries) {

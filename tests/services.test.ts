@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { PRESET_BY_ID } from '../src/sim/catalog';
 import { CAMPAIGN, SERVICES } from '../src/sim/config';
+import { computeFlow } from '../src/sim/flow';
 import { createSave, loadSave, newGame, parseSave } from '../src/sim/save';
 import { Simulation } from '../src/sim/simulation';
-import { RICH, run, base } from './helpers';
+import { RICH, run, base, wire } from './helpers';
 
 describe('複数のサービス', () => {
   it('サービスの役割は、そのサービスを始めるまで付けられない', () => {
@@ -120,5 +121,65 @@ describe('複数のサービス', () => {
     expect(parsed.users.blog).toBe(500);
     expect(parsed.devices.flatMap((d) => d[4])).toEqual(['blog:web', 'blog:db']);
     expect(loadSave(parsed).flow.services.blog!.success).toBe(1);
+  });
+
+  it('投稿の DB 書き込みが失敗率と応答時間に反映される', () => {
+    const { s, sw, server } = base({
+      traffic: { blog: 0, photo: 200 },
+      unlocks: ['shop', 'photo', 'replication', 'tenGig', 'agg'],
+    });
+    // 回線・スイッチを 10G にしてネットワーク詰まりを避ける
+    s.facility.clearCables();
+    const agg = s.buyDevice('agg-10g', 0, 38).id!;
+    const isp = [...s.facility.devices.values()].find((d) => d.model === 'handoff')!.id;
+    wire(s, { device: isp, port: 0 }, { device: agg, port: 0 });
+    const web = server('big', 30, ['photo:web'], 0, -1);
+    const worker = server('big', 26, ['photo:worker'], 0, -1);
+    const media = server('big', 22, ['photo:media'], 0, -1);
+    const replica = server('big', 18, ['photo:replica'], 0, -1);
+    // プライマリだけ HDD 2 本(150 IOPS)にして書き込みで溢れさせる
+    const db = s.buyDevice('srv-2u', 0, 14, { cpu: 8, memGB: 64, backplane: 'lff', drives: ['hdd', 'hdd'], nic: 'sfp10' }).id!;
+    s.toggleRole(db, 'photo:db');
+    for (const [i, id] of [web, worker, media, replica, db].entries()) {
+      wire(s, { device: id, port: 2 }, { device: agg, port: i + 1 });
+    }
+    expect(sw).toBeGreaterThan(0);
+
+    // 読み込みはすべてレプリカが捌き、プライマリは投稿の書き込みだけで溢れる構成(worker は余裕あり)
+    const uploadOnlyWork = { ...SERVICES.photo.work, dbWrites: 0, upload: { ...SERVICES.photo.work.upload!, perPv: 0.4, workerCpuMs: 10 } };
+    const noUploadWork = { ...SERVICES.photo.work, dbWrites: 0, upload: undefined };
+    const flowWithUpload = computeFlow(s.facility, {
+      services: [{ id: 'photo', pv: 200, work: uploadOnlyWork }],
+      uplinkGbps: 10,
+      roles: s.availableRoles,
+      now: 0,
+      bgp: false,
+      down: new Set(),
+    });
+    const dbIo = flowWithUpload.devices.get(db)!.io;
+    expect(dbIo).toBeGreaterThan(1);
+    expect(flowWithUpload.devices.get(worker)!.cpu).toBeLessThan(1);
+    const writeOk = 1 / dbIo;
+    // 投稿の 40% がプライマリ書き込み失敗の影響を受ける
+    expect(flowWithUpload.services.photo!.success).toBeCloseTo(1 - 0.4 * (1 - writeOk), 4);
+
+    // 軽い負荷でも投稿の DB 書き込み分だけ応答時間が増える
+    const lowUpload = computeFlow(s.facility, {
+      services: [{ id: 'photo', pv: 1, work: uploadOnlyWork }],
+      uplinkGbps: 10,
+      roles: s.availableRoles,
+      now: 0,
+      bgp: false,
+      down: new Set(),
+    });
+    const lowNoUpload = computeFlow(s.facility, {
+      services: [{ id: 'photo', pv: 1, work: noUploadWork }],
+      uplinkGbps: 10,
+      roles: s.availableRoles,
+      now: 0,
+      bgp: false,
+      down: new Set(),
+    });
+    expect(lowUpload.services.photo!.latencyMs).toBeGreaterThan(lowNoUpload.services.photo!.latencyMs + 1);
   });
 });
