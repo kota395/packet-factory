@@ -65,7 +65,7 @@ export function roleButtons(sim: Simulation, roles: readonly RoleKey[], act: str
           const k = roleKey(s, r);
           const on = roles.includes(k);
           const err = errorOf(k);
-          return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="${act}" data-id="${id}" data-role="${k}" ${err && !on ? `disabled title="${err}"` : ''}>${ROLE_LABEL[r]}</button>`;
+          return `<button type="button" class="toggle ${on ? 'on' : ''}" aria-pressed="${on}" data-act="${act}" data-id="${id}" data-role="${k}" ${err && !on ? `disabled title="${err}"` : ''}>${ROLE_LABEL[r]}</button>`;
         })
         .join('');
       return `<div class="role-group"><div class="role-svc">${scopeName(s)}</div><div class="role-buttons">${buttons}</div></div>`;

@@ -26,7 +26,7 @@ export function vmContent(sim: Simulation, vm: Vm, base: string): Content {
     .map((k) => {
       const on = vm.disk === k;
       const err = k === 'shared' ? storageErr : null;
-      return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="vmdisk" data-id="${vm.id}" data-disk="${k}" ${err && !on ? `disabled title="${err}"` : ''}>${k === 'local' ? 'ローカル' : '共有ストレージ'}</button>`;
+      return `<button type="button" class="toggle ${on ? 'on' : ''}" aria-pressed="${on}" data-act="vmdisk" data-id="${vm.id}" data-disk="${k}" ${err && !on ? `disabled title="${err}"` : ''}>${k === 'local' ? 'ローカル' : '共有ストレージ'}</button>`;
     })
     .join('');
   fixed += section('ディスク', `<div class="role-buttons">${diskButtons}</div>`);

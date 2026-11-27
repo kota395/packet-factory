@@ -271,7 +271,7 @@ export class ClusterPanel {
             const placed = sim.pods.filter((p) => p.role === k).reduce((n, p) => n + p.count, 0);
             const pending = sim.podsPending.get(k) ?? 0;
             const count = on ? ` ${placed}${pending ? `(待ち ${pending})` : ''}` : '';
-            return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="deploy" data-role="${k}" ${err && !on ? `disabled title="${err}"` : ''}>${splitRole(k)[1]}${count}</button>`;
+            return `<button type="button" class="toggle ${on ? 'on' : ''}" aria-pressed="${on}" data-act="deploy" data-role="${k}" ${err && !on ? `disabled title="${err}"` : ''}>${splitRole(k)[1]}${count}</button>`;
           })
           .join('');
         return `<div class="role-group"><div class="role-svc">${SERVICES[s].name}</div><div class="role-buttons">${buttons}</div></div>`;

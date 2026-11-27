@@ -96,7 +96,7 @@ export function serviceContent(sim: Simulation, base: string, tab: Scope): Conte
         const key = roleKey(id, role);
         const on = sim.deployments.has(key);
         const err = sim.deploymentError(key);
-        return `<button type="button" class="toggle ${on ? 'on' : ''}" data-act="deploy" data-role="${key}" ${err && !on ? `disabled title="${err}"` : ''}>${ROLE_LABEL[role]}</button>`;
+        return `<button type="button" class="toggle ${on ? 'on' : ''}" aria-pressed="${on}" data-act="deploy" data-role="${key}" ${err && !on ? `disabled title="${err}"` : ''}>${ROLE_LABEL[role]}</button>`;
       })
       .join('');
     fixed += section(

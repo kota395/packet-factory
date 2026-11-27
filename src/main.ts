@@ -269,6 +269,7 @@ function updateToolbar(): void {
     const t = b.dataset.tool as ToolId;
     const active = t === 'invest' ? invest.isOpen : t === 'cluster' ? cluster.isOpen : state.selected?.kind === 'service';
     b.classList.toggle('active', active);
+    b.ariaPressed = String(active);
     // クラスタは仮想化か Kubernetes を解放してから
     if (t === 'cluster') b.hidden = !cluster.available(state.sim);
   }
@@ -305,16 +306,22 @@ function bindControls(): void {
   }
   el('btn-chart').addEventListener('click', () => {
     dashboard.toggle();
-    el('btn-chart').classList.toggle('active', dashboard.isOpen);
+    setChartPressed(dashboard.isOpen);
   });
   el('dash').addEventListener('click', (e) => {
-    if ((e.target as HTMLElement).closest('.dash-close')) el('btn-chart').classList.remove('active');
+    if ((e.target as HTMLElement).closest('.dash-close')) setChartPressed(false);
   });
   el('btn-save').addEventListener('click', showSaveMenu);
   el('invest-close').addEventListener('click', () => {
     invest.toggle(false);
     updateToolbar();
   });
+}
+
+function setChartPressed(on: boolean): void {
+  const b = el('btn-chart');
+  b.classList.toggle('active', on);
+  b.ariaPressed = String(on);
 }
 
 /** 前回の速度(読み直しても 1 倍に戻らないように) */
@@ -339,7 +346,9 @@ function setSpeed(speed: number): void {
     }
   }
   for (const b of document.querySelectorAll<HTMLButtonElement>('[data-speed]')) {
-    b.classList.toggle('active', Number(b.dataset.speed) === speed);
+    const on = Number(b.dataset.speed) === speed;
+    b.classList.toggle('active', on);
+    b.ariaPressed = String(on);
   }
 }
 
@@ -452,7 +461,7 @@ function showSaveMenu(): void {
       <button type="button" id="sv-import">貼り付けたコードを読み込む</button>
       <div class="difficulty">
         <div class="note">難易度(いつでも変えられます)</div>
-        <div class="role-buttons">${DIFFICULTY_IDS.map((id) => `<button type="button" class="toggle ${id === state.sim.difficulty ? 'on' : ''}" data-difficulty="${id}" title="${DIFFICULTY.levels[id].note}">${DIFFICULTY.levels[id].name}</button>`).join('')}</div>
+        <div class="role-buttons">${DIFFICULTY_IDS.map((id) => `<button type="button" class="toggle ${id === state.sim.difficulty ? 'on' : ''}" aria-pressed="${id === state.sim.difficulty}" data-difficulty="${id}" title="${DIFFICULTY.levels[id].note}">${DIFFICULTY.levels[id].name}</button>`).join('')}</div>
         <div class="note" id="sv-difficulty-note">${DIFFICULTY.levels[state.sim.difficulty].note}</div>
       </div>
       <button type="button" id="sv-tutorial">チュートリアルを最初から(進行状況は消えます)</button>
@@ -492,7 +501,10 @@ function showSaveMenu(): void {
     b.addEventListener('click', () => {
       const id = b.dataset.difficulty as DifficultyId;
       state.sim.difficulty = id;
-      for (const x of document.querySelectorAll('button[data-difficulty]')) x.classList.toggle('on', x === b);
+      for (const x of document.querySelectorAll<HTMLButtonElement>('button[data-difficulty]')) {
+        x.classList.toggle('on', x === b);
+        x.ariaPressed = String(x === b);
+      }
       el('sv-difficulty-note').textContent = DIFFICULTY.levels[id].note;
       saveGame();
     });
