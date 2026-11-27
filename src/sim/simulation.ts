@@ -215,9 +215,13 @@ export class Simulation {
 
   /** CDN が配っている量(GB/秒) */
   get cdnGBps(): number {
-    if (!this.unlocks.has('cdn')) return 0;
+    if (!this.unlocks.has('cdn') || !this.flow) return 0;
     let kb = 0;
-    for (const id of this.activeServices) kb += this.trafficOf(id, this.time) * this.cdnKBPerPv(id);
+    for (const id of this.activeServices) {
+      const sf = this.flow.services[id];
+      if (!sf) continue;
+      kb += sf.pv * sf.success * this.cdnKBPerPv(id);
+    }
     return kb / 1e6;
   }
 
