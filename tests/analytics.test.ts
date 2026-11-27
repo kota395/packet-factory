@@ -74,4 +74,21 @@ describe('分析基盤と GPU', () => {
     flow = run(s, 1000);
     expect(flow.analytics.coverage).toBeLessThan(1);
   });
+
+  it('つながっていない hadoop・ml は処理せず、単価も上げない', () => {
+    const { s, server } = base({ pv: 100, unlocks: ['hadoop', 'ml', 'gpu'] });
+    server('db', 20, ['blog:web', 'blog:db']);
+    const h = server('small', 16, ['data:hadoop']);
+    // 2 台目の hadoop と ml はスイッチにつながない
+    const lone = server('small', 14, ['data:hadoop'], 0, -1);
+    const m = server('db', 30, ['data:ml'], 0, -1);
+    s.changeParts(m, { kind: 'gpu', dir: 1 });
+    const flow = run(s, 1000);
+    expect(flow.nodeLoads.get(lone)!.work['data:hadoop'] ?? 0).toBe(0);
+    expect(flow.nodeLoads.get(h)!.work['data:hadoop']).toBeCloseTo(flow.analytics.logMBps, 6);
+    expect(flow.analytics.coverage).toBeCloseTo(1, 6);
+    expect(flow.analytics.mlCoverage).toBe(0);
+    expect(flow.analytics.boost).toBeCloseTo(1 + ANALYTICS.hadoopBoost, 6);
+    expect(flow.problems.join()).toContain('hadoop からの経路がない');
+  });
 });
