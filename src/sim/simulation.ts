@@ -559,19 +559,27 @@ export class Simulation {
   }
 
   private rollFailures(dt: number): void {
-    const f = DIFFICULTY.levels[this.difficulty].failures;
-    if (!f || this.facility.devices.size < f.fromDevices) return;
-    let failed = false;
+    const prev = this.time - TICK_MS;
+    let changed = false;
     for (const d of this.facility.devices.values()) {
-      if (MODEL_BY_ID[d.model].category === 'handoff' || d.failedUntil > this.time) continue;
-      if (this.random() < dt / f.mtbfSec) {
-        d.failedUntil = this.time + f.repairSec * 1000;
-        this.lastFailure = { id: d.id, name: d.name, at: this.time, repairSec: f.repairSec };
-        failed = true;
+      if (d.failedUntil > prev && d.failedUntil <= this.time) changed = true;
+    }
+    for (const v of this.facility.vms.values()) {
+      if (v.k8s && v.downUntil > prev && v.downUntil <= this.time) changed = true;
+    }
+    const f = DIFFICULTY.levels[this.difficulty].failures;
+    if (f && this.facility.devices.size >= f.fromDevices) {
+      for (const d of this.facility.devices.values()) {
+        if (MODEL_BY_ID[d.model].category === 'handoff' || d.down || d.failedUntil > this.time) continue;
+        if (this.random() < dt / f.mtbfSec) {
+          d.failedUntil = this.time + f.repairSec * 1000;
+          this.lastFailure = { id: d.id, name: d.name, at: this.time, repairSec: f.repairSec };
+          changed = true;
+        }
       }
     }
-    // 止まったワーカーの Pod はすぐ置き直す
-    if (failed) this.schedule();
+    // 止まった・復旧したワーカーの Pod はすぐ置き直す
+    if (changed) this.schedule();
   }
 
   private seed = 0x9e3779b9;

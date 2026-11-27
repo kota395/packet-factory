@@ -139,4 +139,20 @@ describe('Kubernetes', () => {
     s.toggleDeployment('blog:web');
     expect(s.flow.problems).toContain('Kubernetes のワーカーがありません');
   });
+
+  it('故障したワーカーが復旧した瞬間に、オートスケールを待たず Pod を置き直す', () => {
+    const { s, server } = base({ pv: 30, unlocks: ['kubernetes'] });
+    server('db', 10, ['blog:db']);
+    const w = server('web', 20, []);
+    s.setK8sWorker({ device: w }, true);
+    s.toggleDeployment('blog:web');
+    const dev = s.facility.devices.get(w)!;
+    dev.failedUntil = s.time + 1000;
+    s.schedule();
+    expect(webPods(s)).toBe(0);
+    // 復旧の時刻まで進める(オートスケール間隔 5 秒より短い)
+    s.step(1000);
+    expect(webPods(s)).toBe(K8S.minPods);
+    expect(s.flow.success).toBe(1);
+  });
 });
