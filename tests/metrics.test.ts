@@ -36,6 +36,12 @@ describe('メトリクスと需要予測', () => {
     expect(logistic(100, 1000, 0.03, t)).toBeCloseTo(500, 3);
     expect(secondsUntil(100, 1000, 0.03, 1000)).toBeNull();
     expect(secondsUntil(600, 1000, 0.03, 500)).toBe(0);
+    expect(secondsUntil(100, 1000, 0, 500)).toBeNull();
+    expect(secondsUntil(100, 1000, -0.03, 500)).toBeNull();
+    expect(secondsUntil(600, 1000, 0, 500)).toBe(0);
+    expect(logistic(1500, 1000, -0.03, 100)).toBe(1500);
+    expect(logistic(1500, 1000, 0, 100)).toBe(1500);
+    expect(logistic(1500, 0, 0.03, 10)).toBe(0);
     const [ts, us] = forecastSeries(100, 1000, 0.03, 60, 10);
     expect(ts).toHaveLength(7);
     expect(us[6]).toBeGreaterThan(us[0]);

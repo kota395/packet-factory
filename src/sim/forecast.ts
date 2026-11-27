@@ -6,15 +6,15 @@
 
 /** t 秒後のユーザー数 */
 export function logistic(u0: number, market: number, rate: number, tSec: number): number {
-  if (u0 <= 0) return 0;
-  if (u0 >= market) return u0 + (market - u0) * (1 - Math.exp(-rate * tSec));
+  if (u0 <= 0 || market <= 0) return 0;
+  if (rate <= 0 || tSec <= 0) return u0;
   return market / (1 + ((market - u0) / u0) * Math.exp(-rate * tSec));
 }
 
-/** ユーザー数が target に届くまでの秒数。届かない(市場規模以上)なら null */
+/** ユーザー数が target に届くまでの秒数。届かない(市場規模以上・成長率が 0 以下)なら null */
 export function secondsUntil(u0: number, market: number, rate: number, target: number): number | null {
   if (target <= u0) return 0;
-  if (target >= market || u0 <= 0) return null;
+  if (target >= market || u0 <= 0 || rate <= 0) return null;
   return Math.log((market - u0) / u0 / (market / target - 1)) / rate;
 }
 
